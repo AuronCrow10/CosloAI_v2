@@ -343,8 +343,8 @@ const renderChannelStatusBadge = (ch: BotChannel) => {
     label = "Needs reconnect";
     className = "status-badge status-badge-error";
   } else if (!expiresAt) {
-    label = "Status unknown";
-    className = "status-badge status-badge-warn";
+    label = "Connected (expiry unknown";
+    className = "status-badge status-badge-ok";
   } else {
     const diff = expiresAt.getTime() - now;
 
