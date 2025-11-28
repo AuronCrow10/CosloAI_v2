@@ -1,0 +1,9 @@
+{
+	"id": "qNFWh1ah8CGtU4W",
+	"json": "{\"id\":\"qNFWh1ah8CGtU4W\",\"url\":\"https://justadomain.com/true\",\"loadedUrl\":\"https://justadomain.com/true\",\"uniqueKey\":\"https://justadomain.com/true\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"depth\":1,\"__crawlee\":{\"crawlDepth\":1,\"enqueueStrategy\":\"same-domain\",\"state\":4}},\"handledAt\":\"2025-11-25T17:41:15.879Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://justadomain.com/true",
+	"url": "https://justadomain.com/true"
+}

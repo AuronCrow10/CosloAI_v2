@@ -1,0 +1,53 @@
+{
+  "requestsFinished": 5,
+  "requestsFailed": 1,
+  "requestsRetries": 1,
+  "requestsFailedPerMinute": 1,
+  "requestsFinishedPerMinute": 6,
+  "requestMinDurationMillis": 16385,
+  "requestMaxDurationMillis": 22566,
+  "requestTotalFailedDurationMillis": 665,
+  "requestTotalFinishedDurationMillis": 93757,
+  "crawlerStartedAt": "2025-11-25T17:40:31.819Z",
+  "crawlerFinishedAt": "2025-11-25T17:41:16.980Z",
+  "statsPersistedAt": "2025-11-25T17:41:16.980Z",
+  "crawlerRuntimeMillis": 46769,
+  "crawlerLastStartTimestamp": 1764092430211,
+  "requestRetryHistogram": [
+    5,
+    null,
+    null,
+    1
+  ],
+  "statsId": 0,
+  "requestAvgFailedDurationMillis": 665,
+  "requestAvgFinishedDurationMillis": 18751,
+  "requestTotalDurationMillis": 94422,
+  "requestsTotal": 6,
+  "requestsWithStatusCode": {
+    "200": 5,
+    "403": 4
+  },
+  "errors": {
+    "C:\\Users\\Cosmin\\Desktop\\WebScrapper\\node_modules\\@crawlee\\basic\\internals\\basic-crawler.js:903:19": {
+      "missing error code": {
+        "Error": {
+          "Request blocked - received 403 status code.": {
+            "count": 1
+          }
+        }
+      }
+    }
+  },
+  "retryErrors": {
+    "C:\\Users\\Cosmin\\Desktop\\WebScrapper\\node_modules\\@crawlee\\basic\\internals\\basic-crawler.js:903:19": {
+      "missing error code": {
+        "Error": {
+          "Request blocked - received 403 status code.": {
+            "count": 3
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  db:
+    image: pgvector/pgvector:0.7.4-pg16
+    container_name: pgvector-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    # DB solo interno: nessuna porta esposta
+
+  scraper:
+    build: ./WebScrapper
+    container_name: webscrapper
+    depends_on:
+      - db
+    # Usa il TUO .env del WebScrapper
+    env_file:
+      - ./WebScrapper/.env
+    # Non esponiamo la porta verso l'host:
+    # il servizio è solo interno alla rete Docker
+    # niente 'ports:' qui
+
+  ai-backend:
+    build: ./AI_Chat_Bot_Demo/backend
+    container_name: ai-backend
+    depends_on:
+      - db
+      - scraper
+    # Usa il TUO .env del backend AI
+    env_file:
+      - ./AI_Chat_Bot_Demo/backend/.env
+    ports:
+      - "4000:4000"   # esponi solo questo verso l'esterno (localhost:4000)
+
+volumes:
+  db_data:

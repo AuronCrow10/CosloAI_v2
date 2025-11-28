@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(uuid())
+  email          String   @unique
+  passwordHash   String?
+  googleId       String?  @unique
+  role           UserRole @default(CLIENT)
+  emailVerified  Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bots           Bot[]
+  refreshTokens  RefreshToken[]
+  emailTokens    EmailVerificationToken[]
+  metaSessions   MetaConnectSession[]
+}
+
+enum UserRole {
+  ADMIN
+  CLIENT
+}
+
+model Bot {
+  id                     String       @id @default(uuid())
+  userId                 String
+  user                   User         @relation(fields: [userId], references: [id])
+  slug                   String       @unique
+  name                   String
+  description            String?
+  systemPrompt           String
+  knowledgeClientId      String?
+  domain                 String?
+  useDomainCrawler       Boolean      @default(false)
+  usePdfCrawler          Boolean      @default(false)
+  channelWeb             Boolean      @default(true)
+  channelWhatsapp        Boolean      @default(false)
+  channelInstagram       Boolean      @default(false)
+  channelMessenger       Boolean      @default(false)
+  useCalendar            Boolean      @default(false)
+  calendarId             String?
+  timeZone               String?
+  defaultDurationMinutes Int?         @default(30)
+  status                 BotStatus    @default(DRAFT)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  channels               BotChannel[]
+  subscription           Subscription?
+  conversations          Conversation[]
+  payments               Payment[]    // NEW: billing history
+  metaSessions           MetaConnectSession[]
+}
+
+enum BotStatus {
+  DRAFT
+  PENDING_PAYMENT
+  ACTIVE
+  SUSPENDED
+  CANCELED
+}
+
+model BotChannel {
+  id          String       @id @default(uuid())
+  botId       String
+  bot         Bot          @relation(fields: [botId], references: [id])
+  type        ChannelType
+  externalId  String
+  accessToken String
+  meta        Json?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([botId])
+  @@index([type, externalId])
+  @@unique([botId, type, externalId], name: "botId_type_externalId")
+}
+
+enum ChannelType {
+  WEB
+  WHATSAPP
+  FACEBOOK
+  INSTAGRAM
+}
+
+model Subscription {
+  id                   String               @id @default(uuid())
+  botId                String               @unique
+  bot                  Bot                  @relation(fields: [botId], references: [id])
+  stripeCustomerId     String
+  stripeSubscriptionId String
+  stripePriceId        String               // kept for backwards compatibility (first / primary price)
+  status               SubscriptionStatus
+  currency             String?              // NEW: subscription currency
+  planSnapshotJson     Json?                // NEW: snapshot of features & pricing at subscription time
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  TRIALING
+  UNPAID
+}
+
+model Conversation {
+  id             String       @id @default(uuid())
+  botId          String
+  bot            Bot          @relation(fields: [botId], references: [id])
+  channel        ChannelType
+  externalUserId String
+  lastMessageAt  DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  messages       Message[]
+
+  @@unique([botId, channel, externalUserId], name: "botId_channel_externalUserId")
+}
+
+model Message {
+  id               String       @id @default(uuid())
+  conversationId   String
+  conversation     Conversation @relation(fields: [conversationId], references: [id])
+  role             MessageRole
+  content          String
+  channelMessageId String?
+  createdAt        DateTime     @default(now())
+
+  @@index([conversationId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+//
+// NEW: DB-driven feature pricing
+//
+model FeaturePrice {
+  id                 String   @id @default(uuid())
+  code               String   @unique  // e.g. "DOMAIN_CRAWLER", "PDF_CRAWLER", "CHANNEL_WEB", "WHATSAPP", "INSTAGRAM", "CALENDAR"
+  label              String   // human readable label
+  monthlyAmountCents Int      // net recurring amount in cents
+  currency           String   // e.g. "eur"
+  stripePriceId      String?  // Stripe price for this feature (recurring monthly)
+  isActive           Boolean  @default(true)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+//
+// NEW: legal payment / invoice log
+//
+model Payment {
+  id                    String   @id @default(uuid())
+
+  botId                 String
+  bot                   Bot      @relation(fields: [botId], references: [id])
+
+  stripeCustomerId      String
+  stripeSubscriptionId  String?
+  stripeInvoiceId       String?
+  stripePaymentIntentId String?
+
+  amountCents           Int
+  currency              String
+  status                String   // "succeeded", "failed", etc.
+
+  billingEmail          String?
+  billingName           String?
+  billingAddressJson    Json?    // arbitrary Stripe billing details (address, tax IDs, etc.)
+
+  periodStart           DateTime?
+  periodEnd             DateTime?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+//
+// NEW: Meta connect sessions for OAuth -> page selection
+//
+model MetaConnectSession {
+  id                 String      @id @default(uuid())
+  botId              String
+  bot                Bot         @relation(fields: [botId], references: [id])
+  userId             String
+  user               User        @relation(fields: [userId], references: [id])
+  channelType        ChannelType // FACEBOOK or INSTAGRAM
+  pagesJson          Json        // list returned by /me/accounts
+  longLivedUserToken String      // for potential future refresh
+  createdAt          DateTime    @default(now())
+
+  @@index([botId])
+  @@index([userId])
+  @@index([createdAt])
+}

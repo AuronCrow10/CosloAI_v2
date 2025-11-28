@@ -1,0 +1,9 @@
+V1
+
+Crawls text from Web / PDF / Docs
+
+V2
+
+Either add its own admin panel
+OR
+Make the AI Chat BOT Backend work as "proxy"

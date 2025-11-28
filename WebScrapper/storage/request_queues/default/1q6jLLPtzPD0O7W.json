@@ -1,0 +1,9 @@
+{
+	"id": "1q6jLLPtzPD0O7W",
+	"json": "{\"id\":\"1q6jLLPtzPD0O7W\",\"url\":\"https://justadomain.com/\",\"loadedUrl\":\"https://justadomain.com/\",\"uniqueKey\":\"https://justadomain.com\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"depth\":0,\"__crawlee\":{\"state\":4}},\"handledAt\":\"2025-11-25T17:40:58.045Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://justadomain.com",
+	"url": "https://justadomain.com/"
+}
