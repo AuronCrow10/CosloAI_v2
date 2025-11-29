@@ -1,0 +1,13 @@
+# Env files
+.env
+.env.local
+.env.development
+.env.development.local
+.env.production
+.env.production.local
+*/.env
+*/.env.local
+
+node_modules/
+# Node dependencies (all packages)
+**/node_modules/
