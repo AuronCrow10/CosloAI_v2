@@ -419,9 +419,9 @@ export async function getMetaConnectUrl(
   type: "FACEBOOK" | "INSTAGRAM"
 ): Promise<{ url: string }> {
   const res = await fetch(
-    `${API_BASE_URL}/bots/${encodeURIComponent(
+    `${API_BASE_URL}/bots/meta/${encodeURIComponent(
       botId
-    )}/meta/connect?type=${encodeURIComponent(type)}`,
+    )}/connect?type=${encodeURIComponent(type)}`,
     {
       headers: authHeaders()
     }
