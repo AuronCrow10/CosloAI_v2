@@ -803,3 +803,265 @@ body {
     padding: 1.2rem 1.2rem 1.8rem;
   }
 }
+
+
+
+/* LANDING PAGE – stile tipo Gamma */
+.landing-page {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #0f172a;
+  background: #f5f5fb;
+  min-height: 100vh;
+}
+
+/* Contenitore */
+.lp-container {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* HERO */
+.lp-hero {
+  padding: 3.5rem 0 3rem;
+}
+
+.lp-hero-inner {
+  text-align: center;
+}
+
+.lp-hero-title {
+  font-size: clamp(2rem, 3vw + 0.8rem, 2.7rem);
+  line-height: 1.1;
+  margin-bottom: 1rem;
+}
+
+.lp-hero-subtitle {
+  font-size: 1.02rem;
+  max-width: 640px;
+  margin: 0 auto 1.6rem;
+  color: #4b5563;
+}
+
+.lp-hero-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-bottom: 0.9rem;
+}
+
+.lp-hero-note {
+  font-size: 0.9rem;
+  color: #6b7280;
+  max-width: 560px;
+  margin: 0 auto;
+}
+
+/* Bottoni */
+.lp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.7rem 1.4rem;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.95rem;
+  text-decoration: none;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s,
+    border-color 0.12s;
+}
+
+.lp-btn-primary {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  color: #ffffff;
+  box-shadow: 0 12px 25px rgba(79, 70, 229, 0.35);
+}
+
+.lp-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 35px rgba(79, 70, 229, 0.45);
+}
+
+.lp-btn-secondary {
+  background: #ffffff;
+  color: #111827;
+  border: 1px solid #e5e7eb;
+}
+
+.lp-btn-secondary:hover {
+  background: #f9fafb;
+  border-color: #d1d5db;
+}
+
+/* Sezioni */
+.lp-section {
+  padding: 3.5rem 0;
+}
+
+.lp-section-alt {
+  background: #ffffff;
+}
+
+.lp-section-title {
+  font-size: 1.6rem;
+  margin-bottom: 0.85rem;
+}
+
+.lp-center {
+  text-align: center;
+}
+
+.lp-section-lead {
+  font-size: 1rem;
+  color: #4b5563;
+  margin-bottom: 0.75rem;
+}
+
+.lp-section-text p {
+  margin-bottom: 0.75rem;
+  font-size: 0.97rem;
+  color: #374151;
+}
+
+/* Griglia base */
+.lp-grid-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.6fr);
+  gap: 2.4rem;
+  align-items: flex-start;
+}
+
+.lp-grid-reverse {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.25fr);
+}
+
+/* Cards, canali, benefici */
+.lp-card {
+  background: #f9fafb;
+  border-radius: 1.2rem;
+  padding: 1.25rem 1.35rem;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.lp-card-title {
+  font-size: 1.05rem;
+  margin-bottom: 0.45rem;
+}
+
+.lp-card-text {
+  font-size: 0.94rem;
+  color: #4b5563;
+}
+
+.lp-channel-grid {
+  margin-top: 2rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.25rem;
+}
+
+.lp-benefit-grid {
+  margin-top: 2rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1.25rem;
+}
+
+/* Liste puntate */
+.lp-list {
+  margin: 0.6rem 0 0.4rem;
+  padding-left: 1.2rem;
+  font-size: 0.95rem;
+  color: #374151;
+}
+
+.lp-list li {
+  margin-bottom: 0.35rem;
+}
+
+/* Pill tags */
+.lp-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.6rem 0 0.5rem;
+}
+
+.lp-pill {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #0f172a;
+}
+
+/* Immagine / placeholder */
+.lp-section-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lp-image-placeholder {
+  width: 100%;
+  max-width: 420px;
+  aspect-ratio: 4 / 3;
+  border-radius: 1.3rem;
+  border: 1px dashed #cbd5f5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  color: #6b7280;
+  background: radial-gradient(circle at top left, #eef2ff, #f9fafb);
+  text-align: center;
+  padding: 0 1rem;
+}
+
+/* CTA finale */
+.lp-cta-final {
+  background: radial-gradient(circle at top left, #eef2ff, #e5e7eb);
+}
+
+.lp-cta-inner {
+  text-align: center;
+  max-width: 640px;
+}
+
+.lp-cta-note {
+  font-size: 0.9rem;
+  color: #6b7280;
+  margin-top: 0.75rem;
+}
+
+/* RESPONSIVE */
+@media (max-width: 900px) {
+  .lp-grid-2,
+  .lp-grid-reverse {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-section {
+    padding: 3rem 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-hero {
+    padding-top: 2.5rem;
+  }
+
+  .lp-container {
+    padding: 0 1.1rem;
+  }
+
+  .lp-hero-title {
+    font-size: 1.9rem;
+  }
+}
