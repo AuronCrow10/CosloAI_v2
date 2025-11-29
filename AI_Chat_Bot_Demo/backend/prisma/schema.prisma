@@ -17,10 +17,11 @@ model User {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  bots           Bot[]
-  refreshTokens  RefreshToken[]
-  emailTokens    EmailVerificationToken[]
-  metaSessions   MetaConnectSession[]
+  bots             Bot[]
+  refreshTokens    RefreshToken[]
+  emailTokens      EmailVerificationToken[]
+  metaSessions     MetaConnectSession[]
+  whatsappSessions WhatsappConnectSession[]  // NEW
 }
 
 enum UserRole {
@@ -52,11 +53,12 @@ model Bot {
   createdAt              DateTime     @default(now())
   updatedAt              DateTime     @updatedAt
 
-  channels               BotChannel[]
-  subscription           Subscription?
-  conversations          Conversation[]
-  payments               Payment[]    // NEW: billing history
-  metaSessions           MetaConnectSession[]
+  channels         BotChannel[]
+  subscription     Subscription?
+  conversations    Conversation[]
+  payments         Payment[]
+  metaSessions     MetaConnectSession[]
+  whatsappSessions WhatsappConnectSession[]  // NEW
 }
 
 enum BotStatus {
@@ -98,8 +100,8 @@ model Subscription {
   stripeSubscriptionId String
   stripePriceId        String               // kept for backwards compatibility (first / primary price)
   status               SubscriptionStatus
-  currency             String?              // NEW: subscription currency
-  planSnapshotJson     Json?                // NEW: snapshot of features & pricing at subscription time
+  currency             String?
+  planSnapshotJson     Json?
   createdAt            DateTime             @default(now())
   updatedAt            DateTime             @updatedAt
 }
@@ -170,15 +172,15 @@ model EmailVerificationToken {
 }
 
 //
-// NEW: DB-driven feature pricing
+// DB-driven feature pricing
 //
 model FeaturePrice {
   id                 String   @id @default(uuid())
   code               String   @unique  // e.g. "DOMAIN_CRAWLER", "PDF_CRAWLER", "CHANNEL_WEB", "WHATSAPP", "INSTAGRAM", "CALENDAR"
-  label              String   // human readable label
-  monthlyAmountCents Int      // net recurring amount in cents
-  currency           String   // e.g. "eur"
-  stripePriceId      String?  // Stripe price for this feature (recurring monthly)
+  label              String
+  monthlyAmountCents Int
+  currency           String
+  stripePriceId      String?
   isActive           Boolean  @default(true)
 
   createdAt          DateTime @default(now())
@@ -186,7 +188,7 @@ model FeaturePrice {
 }
 
 //
-// NEW: legal payment / invoice log
+// Legal payment / invoice log
 //
 model Payment {
   id                    String   @id @default(uuid())
@@ -201,11 +203,11 @@ model Payment {
 
   amountCents           Int
   currency              String
-  status                String   // "succeeded", "failed", etc.
+  status                String
 
   billingEmail          String?
   billingName           String?
-  billingAddressJson    Json?    // arbitrary Stripe billing details (address, tax IDs, etc.)
+  billingAddressJson    Json?
 
   periodStart           DateTime?
   periodEnd             DateTime?
@@ -215,7 +217,7 @@ model Payment {
 }
 
 //
-// NEW: Meta connect sessions for OAuth -> page selection
+// Meta connect sessions for OAuth -> page selection
 //
 model MetaConnectSession {
   id                 String      @id @default(uuid())
@@ -225,8 +227,27 @@ model MetaConnectSession {
   user               User        @relation(fields: [userId], references: [id])
   channelType        ChannelType // FACEBOOK or INSTAGRAM
   pagesJson          Json        // list returned by /me/accounts
-  longLivedUserToken String      // for potential future refresh
+  longLivedUserToken String
   createdAt          DateTime    @default(now())
+
+  @@index([botId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+//
+// NEW: WhatsApp embedded signup sessions
+//
+model WhatsappConnectSession {
+  id               String   @id @default(uuid())
+  botId            String
+  bot              Bot      @relation(fields: [botId], references: [id])
+  userId           String
+  user             User     @relation(fields: [userId], references: [id])
+  wabaId           String
+  phoneNumbersJson Json     // list returned by /<wabaId>/phone_numbers
+  waAccessToken    String   // access token from embedded signup
+  createdAt        DateTime @default(now())
 
   @@index([botId])
   @@index([userId])

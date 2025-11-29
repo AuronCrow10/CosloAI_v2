@@ -15,6 +15,7 @@ import metaWebhookRouter from "./routes/metaWebhook";
 import { stripeWebhookHandler } from "./routes/stripeWebhook";
 import conversationsRouter from "./routes/conversations";
 import metaAuthRouter from "./routes/metaAuth";
+import whatsappEmbeddedRouter from "./routes/whatsappEmbedded"; // NEW
 import { scheduleMetaTokenRefreshJob } from "./services/metaTokenService";
 
 const app = express();
@@ -48,6 +49,7 @@ app.use("/api", botKnowledgeRouter);
 app.use("/api", billingRouter);
 app.use("/api", conversationsRouter);
 app.use("/api", metaAuthRouter); // ⬅️ HERE
+app.use("/api", whatsappEmbeddedRouter); // NEW
 
 // Chat & webhooks
 app.use("/api", chatRouter);

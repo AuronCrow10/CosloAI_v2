@@ -1,8 +1,12 @@
-// src/api/bots.ts
 import { API_BASE_URL, handleJsonResponse } from "./client";
 import { getStoredAccessToken } from "./auth";
 
-export type BotStatus = "DRAFT" | "PENDING_PAYMENT" | "ACTIVE" | "SUSPENDED" | "CANCELED";
+export type BotStatus =
+  | "DRAFT"
+  | "PENDING_PAYMENT"
+  | "ACTIVE"
+  | "SUSPENDED"
+  | "CANCELED";
 
 export interface Bot {
   id: string;
@@ -11,7 +15,6 @@ export interface Bot {
   name: string;
   description?: string | null;
   systemPrompt: string;
-  // now nullable / optional: bots can exist without KB yet
   knowledgeClientId?: string | null;
   domain?: string | null;
   useDomainCrawler: boolean;
@@ -67,7 +70,7 @@ export interface CheckoutResponse {
   checkoutUrl: string;
 }
 
-// --- NEW: server-side pricing preview types ---
+// --- Pricing preview types ---
 
 export type FeatureCode =
   | "DOMAIN_CRAWLER"
@@ -147,7 +150,9 @@ export interface CreateBotPayload {
   defaultDurationMinutes?: number | null;
 }
 
-export async function createBot(payload: CreateBotPayload): Promise<Bot> {
+export async function createBot(
+  payload: CreateBotPayload
+): Promise<Bot> {
   const res = await fetch(`${API_BASE_URL}/bots`, {
     method: "POST",
     headers: authHeaders(),
@@ -174,7 +179,10 @@ export interface UpdateBotPayload {
   defaultDurationMinutes?: number | null;
 }
 
-export async function updateBot(id: string, payload: UpdateBotPayload): Promise<Bot> {
+export async function updateBot(
+  id: string,
+  payload: UpdateBotPayload
+): Promise<Bot> {
   const res = await fetch(`${API_BASE_URL}/bots/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: authHeaders(),
@@ -200,7 +208,9 @@ export async function getBotById(id: string): Promise<Bot> {
 
 // ---- Stripe Checkout ----
 
-export async function startBotCheckout(id: string): Promise<CheckoutResponse> {
+export async function startBotCheckout(
+  id: string
+): Promise<CheckoutResponse> {
   const res = await fetch(
     `${API_BASE_URL}/bots/${encodeURIComponent(id)}/checkout`,
     {
@@ -211,7 +221,6 @@ export async function startBotCheckout(id: string): Promise<CheckoutResponse> {
   return handleJsonResponse<CheckoutResponse>(res);
 }
 
-// NEW: server-side pricing preview
 export async function getBotPricingPreview(
   id: string,
   payload?: BotPricingPreviewPayload
@@ -243,7 +252,9 @@ export async function crawlBotDomain(
   domainOverride?: string
 ): Promise<{ status: string; knowledgeClientId: string; domain: string }> {
   const res = await fetch(
-    `${API_BASE_URL}/bots/${encodeURIComponent(botId)}/knowledge/crawl-domain`,
+    `${API_BASE_URL}/bots/${encodeURIComponent(
+      botId
+    )}/knowledge/crawl-domain`,
     {
       method: "POST",
       headers: authHeaders(),
@@ -271,7 +282,9 @@ export async function uploadBotDocuments(
   }
 
   const res = await fetch(
-    `${API_BASE_URL}/bots/${encodeURIComponent(botId)}/knowledge/upload-docs`,
+    `${API_BASE_URL}/bots/${encodeURIComponent(
+      botId
+    )}/knowledge/upload-docs`,
     {
       method: "POST",
       headers,
@@ -283,7 +296,9 @@ export async function uploadBotDocuments(
 
 // ---- Channels ----
 
-export async function fetchChannels(botId: string): Promise<BotChannel[]> {
+export async function fetchChannels(
+  botId: string
+): Promise<BotChannel[]> {
   const res = await fetch(
     `${API_BASE_URL}/bots/${encodeURIComponent(botId)}/channels`,
     {
@@ -327,9 +342,9 @@ export async function updateChannel(
   payload: UpdateChannelPayload
 ): Promise<BotChannel> {
   const res = await fetch(
-    `${API_BASE_URL}/bots/${encodeURIComponent(botId)}/channels/${encodeURIComponent(
-      channelId
-    )}`,
+    `${API_BASE_URL}/bots/${encodeURIComponent(
+      botId
+    )}/channels/${encodeURIComponent(channelId)}`,
     {
       method: "PATCH",
       headers: authHeaders(),
@@ -339,11 +354,14 @@ export async function updateChannel(
   return handleJsonResponse<BotChannel>(res);
 }
 
-export async function deleteChannel(botId: string, channelId: string): Promise<void> {
+export async function deleteChannel(
+  botId: string,
+  channelId: string
+): Promise<void> {
   const res = await fetch(
-    `${API_BASE_URL}/bots/${encodeURIComponent(botId)}/channels/${encodeURIComponent(
-      channelId
-    )}`,
+    `${API_BASE_URL}/bots/${encodeURIComponent(
+      botId
+    )}/channels/${encodeURIComponent(channelId)}`,
     {
       method: "DELETE",
       headers: authHeaders()
@@ -370,7 +388,9 @@ export async function fetchConversationMessages(
   conversationId: string
 ): Promise<ConversationMessage[]> {
   const res = await fetch(
-    `${API_BASE_URL}/conversations/${encodeURIComponent(conversationId)}/messages`,
+    `${API_BASE_URL}/conversations/${encodeURIComponent(
+      conversationId
+    )}/messages`,
     {
       headers: authHeaders()
     }
@@ -399,9 +419,9 @@ export async function getMetaConnectUrl(
   type: "FACEBOOK" | "INSTAGRAM"
 ): Promise<{ url: string }> {
   const res = await fetch(
-    `${API_BASE_URL}/bots/meta/${encodeURIComponent(
+    `${API_BASE_URL}/bots/${encodeURIComponent(
       botId
-    )}/connect?type=${encodeURIComponent(type)}`,
+    )}/meta/connect?type=${encodeURIComponent(type)}`,
     {
       headers: authHeaders()
     }
@@ -433,6 +453,53 @@ export async function attachMetaSession(
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({ pageId })
+    }
+  );
+  return handleJsonResponse<BotChannel>(res);
+}
+
+// ---- WhatsApp embedded signup helpers ----
+
+export interface WhatsappNumberSummary {
+  id: string;
+  displayPhoneNumber: string | null;
+  verifiedName: string | null;
+}
+
+export interface WhatsappConnectSessionResponse {
+  sessionId: string;
+  numbers: WhatsappNumberSummary[];
+}
+
+export async function completeWhatsappEmbeddedSignup(
+  botId: string,
+  payload: { code: string }
+): Promise<WhatsappConnectSessionResponse> {
+  const res = await fetch(
+    `${API_BASE_URL}/bots/${encodeURIComponent(
+      botId
+    )}/whatsapp/embedded/complete`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload)
+    }
+  );
+  return handleJsonResponse<WhatsappConnectSessionResponse>(res);
+}
+
+export async function attachWhatsappSession(
+  sessionId: string,
+  phoneId: string
+): Promise<BotChannel> {
+  const res = await fetch(
+    `${API_BASE_URL}/whatsapp/sessions/${encodeURIComponent(
+      sessionId
+    )}/attach`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ phoneId })
     }
   );
   return handleJsonResponse<BotChannel>(res);

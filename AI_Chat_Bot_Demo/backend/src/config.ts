@@ -16,6 +16,9 @@ export interface AppConfig {
   whatsappAccessToken: string | null;
   whatsappApiBaseUrl: string | null;
 
+  // NEW: optional dedicated redirect URI for WhatsApp embedded signup
+  whatsappEmbeddedRedirectUri: string | null;
+
   metaVerifyToken: string | null;
   metaGraphApiBaseUrl: string | null;
   metaPageAccessToken: string | null;
@@ -66,6 +69,10 @@ export const config: AppConfig = {
   whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || null,
   whatsappAccessToken: process.env.WHATSAPP_ACCESS_TOKEN || null,
   whatsappApiBaseUrl: process.env.WHATSAPP_API_BASE_URL || null,
+
+  // NEW: usually the same as your embedded signup config redirect URI
+  whatsappEmbeddedRedirectUri:
+    process.env.WHATSAPP_EMBEDDED_REDIRECT_URI || null,
 
   metaVerifyToken: process.env.META_VERIFY_TOKEN || null,
   metaGraphApiBaseUrl: process.env.META_GRAPH_API_BASE_URL || null,

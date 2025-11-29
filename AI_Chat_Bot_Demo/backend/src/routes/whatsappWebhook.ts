@@ -2,10 +2,20 @@ import { Router, Request, Response } from "express";
 import axios from "axios";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
-import { findOrCreateConversation, logMessage } from "../services/conversationService";
+import {
+  findOrCreateConversation,
+  logMessage
+} from "../services/conversationService";
 import { generateBotReplyForSlug } from "../services/chatService";
 
 const router = Router();
+
+function isWhatsAppAuthError(err: any): boolean {
+  const status = err?.response?.status;
+  const code = err?.response?.data?.error?.code;
+  // 401/403 HTTP or classic OAuth code 190
+  return status === 401 || status === 403 || code === 190;
+}
 
 // GET /webhook/whatsapp (verification)
 router.get("/", (req: Request, res: Response) => {
@@ -90,13 +100,22 @@ router.post("/", async (req: Request, res: Response) => {
             content: reply
           });
 
-          // Send reply back via Cloud API
-          if (!config.whatsappApiBaseUrl || !config.whatsappAccessToken) {
-            console.error("WhatsApp API not configured");
+          if (!config.whatsappApiBaseUrl) {
+            console.error("WhatsApp API base URL not configured");
             continue;
           }
 
           const url = `${config.whatsappApiBaseUrl}/${phoneNumberId}/messages`;
+
+          // Prefer per-channel token (embedded signup) and fall back to global env token
+          let accessToken = channel.accessToken || config.whatsappAccessToken;
+
+          if (!accessToken) {
+            console.error("No WhatsApp access token configured for this channel", {
+              channelId: channel.id
+            });
+            continue;
+          }
 
           try {
             await axios.post(
@@ -108,14 +127,43 @@ router.post("/", async (req: Request, res: Response) => {
               },
               {
                 headers: {
-                  Authorization: `Bearer ${config.whatsappAccessToken}`,
+                  Authorization: `Bearer ${accessToken}`,
                   "Content-Type": "application/json"
                 },
                 timeout: 10000
               }
             );
-          } catch (err) {
-            console.error("Failed to send WhatsApp message", err);
+          } catch (err: any) {
+            console.error(
+              "Failed to send WhatsApp message",
+              err?.response?.data || err
+            );
+
+            if (isWhatsAppAuthError(err)) {
+              try {
+                const currentMeta = (channel.meta as any) || {};
+                await prisma.botChannel.update({
+                  where: { id: channel.id },
+                  data: {
+                    meta: {
+                      ...currentMeta,
+                      needsReconnect: true
+                    }
+                  }
+                });
+                console.warn(
+                  "Marked WhatsApp channel as needsReconnect due to auth error",
+                  {
+                    channelId: channel.id
+                  }
+                );
+              } catch (updateErr) {
+                console.error(
+                  "Failed to mark WhatsApp channel as needsReconnect",
+                  updateErr
+                );
+              }
+            }
           }
         }
       }
