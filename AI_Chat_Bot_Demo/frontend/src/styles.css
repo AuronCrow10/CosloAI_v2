@@ -373,70 +373,6 @@ body {
   font-size: 0.9rem;
 }
 
-/* Landing */
-
-.landing-page {
-  max-width: 900px;
-  margin: 0 auto;
-}
-
-.hero {
-  padding: 2.3rem 2rem;
-  border-radius: 16px;
-  background: radial-gradient(circle at top left, #4f46e5, #020617);
-  box-shadow: var(--shadow-soft);
-  margin-bottom: 2rem;
-}
-
-.hero h1 {
-  margin-top: 0;
-  margin-bottom: 0.75rem;
-  font-size: 2.1rem;
-}
-
-.hero p {
-  margin-top: 0;
-  max-width: 520px;
-  color: #e5e7eb;
-}
-
-.hero-actions {
-  display: flex;
-  gap: 0.9rem;
-  margin-top: 1.4rem;
-}
-
-.features {
-  margin-top: 1.5rem;
-}
-
-.features h2 {
-  margin-bottom: 1rem;
-}
-
-.feature-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1rem;
-}
-
-.feature-card {
-  background: rgba(15, 23, 42, 0.9);
-  border-radius: 14px;
-  padding: 1rem 1.1rem;
-  border: 1px solid rgba(148, 163, 184, 0.25);
-}
-
-.feature-card h3 {
-  margin: 0 0 0.5rem;
-}
-
-.landing-footer {
-  margin-top: 1.5rem;
-  font-size: 0.9rem;
-  color: var(--text-muted);
-}
-
 /* Detail layout */
 
 .detail-layout {
@@ -482,7 +418,6 @@ body {
 }
 
 .status-row:nth-child(2) {
-  /* Knowledge – green accent */
   background: radial-gradient(
       circle at top left,
       rgba(34, 197, 94, 0.13),
@@ -491,7 +426,6 @@ body {
 }
 
 .status-row:nth-child(3) {
-  /* Channels – blue / amber accent */
   background: radial-gradient(
       circle at top left,
       rgba(59, 130, 246, 0.15),
@@ -500,7 +434,6 @@ body {
 }
 
 .status-row:nth-child(4) {
-  /* Calendar – yellow accent */
   background: radial-gradient(
       circle at top left,
       rgba(250, 204, 21, 0.15),
@@ -543,7 +476,6 @@ body {
   border-radius: 999px;
 }
 
-/* OK = green */
 .status-badge-ok {
   background: rgba(22, 163, 74, 0.15);
   border: 1px solid rgba(34, 197, 94, 0.8);
@@ -554,7 +486,6 @@ body {
   background: #22c55e;
 }
 
-/* WARN = yellow / amber */
 .status-badge-warn {
   background: rgba(250, 204, 21, 0.12);
   border: 1px solid rgba(250, 204, 21, 0.85);
@@ -565,7 +496,6 @@ body {
   background: #facc15;
 }
 
-/* ERROR = red */
 .status-badge-error {
   background: rgba(248, 113, 113, 0.14);
   border: 1px solid rgba(248, 113, 113, 0.9);
@@ -577,12 +507,12 @@ body {
 }
 
 /* Text inside status rows */
+
 .status-row p.muted {
   margin: 0.15rem 0 0;
   font-size: 0.86rem;
   line-height: 1.4;
 }
-
 
 .link-list {
   list-style: none;
@@ -777,7 +707,7 @@ body {
   gap: 0.6rem;
 }
 
-/* Responsive tweaks */
+/* Responsive tweaks (app) */
 
 @media (max-width: 880px) {
   .detail-layout {
@@ -804,5 +734,1009 @@ body {
   }
 }
 
+/* ========================================
+   LANDING PAGE STYLES
+   ======================================== */
+
+/* Wrapper chiaro solo per la landing */
+.layout-root-landing {
+  background: linear-gradient(to bottom, #ffffff, #f8f9fc);
+}
+
+/* Header solo per la landing */
+.layout-header-landing {
+  background: transparent;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  box-shadow: none;
+}
+
+.brand-landing {
+  color: #111827;
+}
+
+.layout-nav-landing a {
+  color: #4b5563;
+}
+
+.layout-nav-landing a:hover {
+  color: #111827;
+}
+
+/* Main full-width per la landing */
+.layout-main-landing {
+  max-width: 100%;
+  padding: 0;
+}
+
+/* ROOT LANDING */
+.landing-page {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 5rem 0 4rem;
+}
+
+/* Contenitore sections */
+.lp-container {
+  width: 100%;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+/* HERO */
+.lp-hero {
+  padding-bottom: 4rem;
+}
+
+.lp-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 3rem;
+  align-items: center;
+}
+
+.lp-hero-content {
+  text-align: left;
+}
+
+.lp-hero-title {
+  font-size: clamp(2.6rem, 3vw + 1rem, 3.4rem);
+  font-weight: 800;
+  line-height: 1.1;
+  color: #111827;
+  margin: 0 0 1.3rem;
+  max-width: 640px;
+}
+
+.lp-hero-subtitle {
+  font-size: 1.1rem;
+  line-height: 1.7;
+  color: #4b5568;
+  max-width: 620px;
+  margin: 0 0 1.8rem;
+}
+
+.lp-hero-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  justify-content: center;
+}
+
+.lp-hero-content .lp-hero-cta {
+  justify-content: flex-start;
+}
+
+.lp-hero-note {
+  font-size: 0.95rem;
+  color: #6b7280;
+  max-width: 620px;
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* Colonna immagine Coslo */
+.lp-hero-image {
+  display: flex;
+  justify-content: center;
+}
+
+/* Animazioni Coslo */
+@keyframes coslo-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes coslo-talk {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.95;
+  }
+  30% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+  55% {
+    transform: translateY(1px);
+  }
+}
+
+@keyframes coslo-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(74, 222, 128, 1);
+    transform: scale(1.15);
+  }
+}
+
+.lp-hero-mascotte-frame {
+  position: relative;
+  width: 460px;
+  max-width: 100%;
+  border-radius: 26px;
+  padding: 2.3rem;
+  background: radial-gradient(circle at 20% 0%, #eef2ff, #e0e7ff, #c7d2fe);
+  box-shadow: 0 22px 55px rgba(79, 70, 229, 0.3);
+  overflow: hidden;
+  animation: coslo-float 7s ease-in-out infinite;
+}
+
+.lp-hero-mascotte-glow {
+  position: absolute;
+  inset: 15%;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 0%, #ffffffaa, transparent 60%);
+  opacity: 0.9;
+}
+
+.lp-hero-mascotte-img {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: auto;
+  z-index: 1;
+}
+
+.lp-hero-mascotte-badge {
+  position: absolute;
+  left: 1.75rem;
+  bottom: 1.5rem;
+  right: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.9);
+  color: #e5e7eb;
+  font-size: 0.8rem;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.55);
+  z-index: 2;
+  animation: coslo-talk 2.7s ease-in-out infinite;
+}
+
+.lp-hero-mascotte-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.9);
+  animation: coslo-dot-pulse 1.9s ease-in-out infinite;
+}
+
+/* Bottoni landing */
+.lp-btn {
+  display: inline-block;
+  padding: 0.9rem 2.1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 999px;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+
+.lp-btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #ffffff;
+  box-shadow: 0 10px 30px rgba(102, 126, 234, 0.55);
+}
+
+.lp-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 40px rgba(102, 126, 234, 0.65);
+}
+
+.lp-btn-secondary {
+  background: #ffffff;
+  color: #667eea;
+  border-color: #667eea;
+}
+
+.lp-btn-secondary:hover {
+  background: #f7fafc;
+  transform: translateY(-2px);
+}
+
+/* SEZIONI GENERALI */
+
+.lp-section {
+  padding: 4rem 0;
+}
+
+.lp-section-alt {
+  background: #f8fafc;
+}
+
+.lp-section-alt .lp-container {
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+.lp-section-title {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 1.5rem;
+}
+
+.lp-section-title.lp-centered {
+  text-align: center;
+}
+
+.lp-text {
+  font-size: 1.02rem;
+  line-height: 1.8;
+  color: #4b5568;
+  margin-bottom: 1.1rem;
+}
+
+.lp-text.lp-centered {
+  text-align: center;
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* GRID */
+
+.lp-grid-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.5fr);
+  gap: 3rem;
+  align-items: flex-start;
+}
+
+.lp-section-intro {
+  margin-bottom: 2.5rem;
+}
+
+/* CARDS */
+
+.lp-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.8rem;
+}
+
+.lp-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.lp-card {
+  background: #ffffff;
+  padding: 1.8rem;
+  border-radius: 18px;
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.lp-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+.lp-card-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 0.7rem;
+}
+
+.lp-card-text {
+  font-size: 0.98rem;
+  line-height: 1.7;
+  color: #4b5568;
+}
+
+/* LISTA */
+
+.lp-list {
+  list-style: none;
+  padding: 0;
+  margin: 1.2rem 0 1.5rem;
+}
+
+.lp-list li {
+  position: relative;
+  padding-left: 1.8rem;
+  margin-bottom: 0.7rem;
+  font-size: 1.02rem;
+  line-height: 1.7;
+  color: #4b5568;
+}
+
+.lp-list li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  top: 0.1rem;
+  font-size: 1.1rem;
+  color: #667eea;
+  font-weight: 700;
+}
+
+/* CALENDAR MOCK */
+
+.lp-section-calendar {
+  align-items: center;
+}
+
+.lp-calendar-mock {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 20px;
+  padding: 1.6rem;
+  box-shadow: 0 12px 36px rgba(102, 126, 234, 0.5);
+}
+
+.lp-calendar-header {
+  background: rgba(255, 255, 255, 0.95);
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  font-weight: 700;
+  color: #111827;
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.lp-calendar-body {
+  background: rgba(255, 255, 255, 0.95);
+  padding: 1.3rem;
+  border-radius: 12px;
+}
+
+.lp-calendar-event {
+  display: flex;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08);
+  margin-bottom: 0.7rem;
+}
+
+.lp-calendar-event:last-child {
+  margin-bottom: 0;
+}
+
+.lp-event-time {
+  font-weight: 700;
+  color: #667eea;
+  min-width: 60px;
+}
+
+.lp-event-details strong {
+  color: #111827;
+  font-size: 0.95rem;
+}
+
+.lp-event-details span {
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+/* PILLS */
+
+.lp-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+}
+
+.lp-pill {
+  padding: 0.45rem 1.2rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #667eea18, #764ba218);
+  color: #4c51bf;
+  border: 1px solid rgba(102, 126, 234, 0.4);
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* CTA FINALE */
+
+.lp-cta-final {
+  background: linear-gradient(to right, #f9fafb, #eef2ff);
+}
+
+.lp-cta-text {
+  margin-top: 0.5rem;
+}
+
+/* Responsive landing */
+
+@media (max-width: 1024px) {
+  .lp-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .lp-hero {
+    padding-top: 4rem;
+  }
+
+  .lp-hero-grid {
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+  }
+
+  .lp-hero-content {
+    text-align: center;
+  }
+
+  .lp-hero-content .lp-hero-cta {
+    justify-content: center;
+  }
+
+  .lp-hero-title {
+    font-size: 2.2rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .lp-hero-subtitle,
+  .lp-hero-note {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .lp-hero-mascotte-frame {
+    width: 260px;
+    padding: 1.6rem;
+  }
+}
 
 
+
+/* ========================================
+   MINI COSLO CHAT SECTION
+   ======================================== */
+
+.lp-mini-coslo-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 3rem;
+  align-items: center;
+}
+
+/* Contenitore tipo "mini widget chat" */
+.lp-mini-coslo-widget {
+  position: relative;
+  max-width: 380px;
+  margin: 0 auto;
+  padding: 1.4rem 1.6rem 3.2rem; /* più spazio in basso */
+  border-radius: 22px;
+  background: radial-gradient(circle at 0% 0%, #1f2937, #020617);
+  box-shadow: 0 20px 45px rgba(15, 23, 42, 0.75);
+  overflow: visible; /* non taglia più l'avatar */
+}
+
+/* Avatar mini Coslo in basso a sinistra */
+.lp-mini-coslo-avatar {
+  position: absolute;
+  left: 1.1rem;
+  bottom: 1.1rem;
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  background: radial-gradient(circle at 20% 0%, #4f46e518, #111827);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  z-index: 2; /* sopra alle bolle */
+}
+
+.lp-mini-coslo-avatar img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Stack delle bolle di chat */
+.lp-mini-coslo-bubbles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-left: 0.2rem;
+  position: relative;
+  z-index: 1; /* sotto all'avatar */
+}
+
+/* Bolla base */
+.lp-mini-coslo-bubble {
+  max-width: 100%;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 0.55rem 0.8rem;
+  border-radius: 12px;
+  color: #e5e7eb;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+}
+
+/* Bolla "utente": lato destro, viola */
+.lp-mini-coslo-bubble-user {
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border-color: transparent;
+  animation: mini-bubble-cycle 7s ease-in-out infinite;
+}
+
+/* Bolla "Coslo": lato sinistro, scura */
+.lp-mini-coslo-bubble-bot {
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+  margin-left: 4rem;
+  animation: mini-bubble-cycle 7s ease-in-out infinite;
+  animation-delay: 3.2s; /* entra dopo la bolla utente */
+}
+
+/* Animazione comparsa/scomparsa delle bolle */
+@keyframes mini-bubble-cycle {
+  0% {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  8% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  55% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+/* Responsive per la sezione mini Coslo */
+@media (max-width: 1024px) {
+  .lp-mini-coslo-grid {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+
+  .lp-mini-coslo-widget {
+    max-width: 340px;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-mini-coslo-widget {
+    max-width: 100%;
+  }
+}
+
+
+
+
+/* ========================================
+   COSLO CHE "STUDIA" I CONTENUTI
+   ======================================== */
+
+.lp-knowledge-left {
+  display: flex;
+  flex-direction: column;
+  gap: 1.6rem;
+}
+
+.lp-knowledge-card {
+  position: relative;
+  width: 100%;
+  max-width: 340px;
+  padding: 2rem 1.9rem 2.4rem; /* più spazio sopra e sotto */
+  border-radius: 22px;
+  background: radial-gradient(circle at 0% 0%, #e0f2fe, #e5e7ff, #c7d2fe);
+  box-shadow: 0 18px 40px rgba(79, 70, 229, 0.35);
+  overflow: visible; /* non taglia più Coslo o i documenti */
+}
+
+/* Coslo in un cerchio centrale */
+.lp-knowledge-avatar {
+  position: relative;
+  width: 110px;
+  height: 110px;
+  margin: 0 auto 0.9rem;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 0%, #ffffff, #e5e7ff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 10px 25px rgba(79, 70, 229, 0.35);
+  z-index: 2; /* sopra ai documenti */
+}
+
+.lp-knowledge-avatar img {
+  display: block;
+  width: 92%;
+  height: auto;
+  transform: translateY(2px);
+  animation: coslo-study-bounce 3.2s ease-in-out infinite;
+}
+
+/* Piccolo "respiro" come se stesse leggendo */
+@keyframes coslo-study-bounce {
+  0%,
+  100% {
+    transform: translateY(2px);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+/* "Documenti" che orbitano attorno a Coslo */
+
+.lp-knowledge-doc {
+  position: absolute;
+  width: 74px;
+  height: 50px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.96);
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  z-index: 1; /* sotto a Coslo */
+}
+
+.lp-knowledge-doc-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #e5e7eb;
+}
+
+/* Posizioni e animazioni diverse per ogni documento */
+.lp-knowledge-doc-1 {
+  top: 18%;
+  left: 6%;
+  transform-origin: 150% 180%;
+  animation: doc-orbit-1 7s ease-in-out infinite;
+}
+
+.lp-knowledge-doc-2 {
+  top: 6%;
+  right: 8%;
+  transform-origin: -40% 250%;
+  animation: doc-orbit-2 7.2s ease-in-out infinite;
+}
+
+.lp-knowledge-doc-3 {
+  bottom: 18%;
+  right: 4%;
+  transform-origin: -20% -40%;
+  animation: doc-orbit-3 6.8s ease-in-out infinite;
+}
+
+/* Orbite morbide + leggera rotazione */
+@keyframes doc-orbit-1 {
+  0% {
+    transform: rotate(-6deg) translateY(0);
+    opacity: 0.9;
+  }
+  50% {
+    transform: rotate(4deg) translateY(-8px);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(-6deg) translateY(0);
+    opacity: 0.9;
+  }
+}
+
+@keyframes doc-orbit-2 {
+  0% {
+    transform: rotate(4deg) translateY(0);
+    opacity: 0.9;
+  }
+  50% {
+    transform: rotate(-4deg) translateY(10px);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(4deg) translateY(0);
+    opacity: 0.9;
+  }
+}
+
+@keyframes doc-orbit-3 {
+  0% {
+    transform: rotate(3deg) translateY(0);
+    opacity: 0.9;
+  }
+  50% {
+    transform: rotate(-5deg) translateY(-8px);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(3deg) translateY(0);
+    opacity: 0.9;
+  }
+}
+
+/* Caption sotto Coslo */
+.lp-knowledge-caption {
+  margin-top: 0.6rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #4b5563;
+  text-align: center;
+}
+
+/* Responsive: centriamo il blocco su mobile */
+@media (max-width: 1024px) {
+  .lp-knowledge-left {
+    align-items: center;
+    text-align: center;
+  }
+
+  .lp-knowledge-card {
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-knowledge-card {
+    max-width: 100%;
+  }
+}
+
+
+
+/* ========================================
+   MINI COSLO - SEZIONE "ASSISTENZA CONTINUA"
+   ======================================== */
+
+.lp-intro-assist-left {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* Card sotto al titolo */
+.lp-intro-assist-card {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.9rem 1.1rem;
+  max-width: 340px;
+  border-radius: 18px;
+  background: radial-gradient(circle at 0% 0%, #eef2ff, #e0e7ff);
+  box-shadow: 0 12px 28px rgba(79, 70, 229, 0.25);
+}
+
+/* Avatar di Coslo */
+.lp-intro-assist-avatar {
+  flex-shrink: 0;
+  width: 54px;
+  height: 54px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 0%, #ffffff, #e5e7ff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 18px rgba(79, 70, 229, 0.3);
+  animation: coslo-float 6s ease-in-out infinite; /* riusa l'animazione già definita */
+}
+
+.lp-intro-assist-avatar img {
+  display: block;
+  width: 80%;
+  height: auto;
+}
+
+/* Testo accanto all’avatar */
+.lp-intro-assist-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.lp-intro-assist-label {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #4f46e5;
+}
+
+.lp-intro-assist-caption {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #4b5563;
+}
+
+/* Responsive: su tablet/mobile centriamo la card */
+@media (max-width: 1024px) {
+  .lp-intro-assist-left {
+    align-items: center;
+    text-align: center;
+  }
+
+  .lp-intro-assist-card {
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+
+/* ========================================
+   COSLO INTRO (immagine sotto al titolo)
+   ======================================== */
+
+.lp-intro-left {
+  display: flex;
+  flex-direction: column;
+  gap: 1.8rem;
+  align-items: flex-start;
+}
+
+.lp-intro-image {
+  width: 340px;             /* prima 260px */
+  max-width: 100%;
+  border-radius: 24px;
+  padding: 1.8rem 1.8rem 1.5rem;  /* un po' più spazio dentro */
+  background: radial-gradient(circle at 0% 0%, #eef2ff, #e0e7ff);
+  box-shadow: 0 18px 40px rgba(79, 70, 229, 0.28);
+  animation: coslo-float 7s ease-in-out infinite;
+}
+
+
+.lp-intro-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Su tablet/mobile centriamo tutto */
+@media (max-width: 1024px) {
+  .lp-intro-left {
+    align-items: center;
+    text-align: center;
+  }
+}
+
+
+
+/* Layout sezione intro: Coslo a sinistra, testo a destra */
+.lp-intro-illustration {
+  display: flex;
+  justify-content: flex-start;
+  align-items: flex-start;   /* invece di center */
+  margin-top: 1.5rem;        /* lo abbassa leggermente */
+}
+
+.lp-intro-right {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  justify-content: center;
+}
+
+/* Su tablet/mobile: Coslo sopra, testo centrato sotto */
+@media (max-width: 1024px) {
+  .lp-intro-illustration {
+    justify-content: center;
+    align-items: center;
+    margin-top: 0;           /* su mobile torna centrato */
+  }
+
+  .lp-intro-image {
+    width: 260px;            /* torniamo a una dimensione più “mobile friendly” */
+    padding: 1.4rem 1.4rem 1.1rem;
+  }
+
+  .lp-intro-right {
+    align-items: center;
+    text-align: center;
+  }
+}
+
+
+
+
+/* ========================================
+   COSLO CHE "CRESCE" CON LA TUA AZIENDA
+   ======================================== */
+
+.lp-growth-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.5fr);
+  gap: 3rem;
+  align-items: center;
+}
+
+.lp-growth-visual {
+  display: flex;
+  justify-content: center;
+}
+
+.lp-growth-card {
+  position: relative;
+  width: 420px;
+  max-width: 100%;
+  border-radius: 26px;
+  padding: 2.2rem 2.1rem 2.5rem;
+  background: linear-gradient(145deg, #eef2ff, #e0f2fe);
+  /* gradient che “mixa” il bianco della pagina con l’azzurro dell’immagine */
+  box-shadow: 0 22px 55px rgba(79, 70, 229, 0.25);
+  overflow: hidden;
+  animation: coslo-float 8s ease-in-out infinite; /* riusa l’animazione morbida */
+}
+
+.lp-growth-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Responsive: su tablet/mobile impiliamo tutto e mettiamo Coslo sotto il testo */
+@media (max-width: 1024px) {
+  .lp-growth-grid {
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+  }
+
+  .lp-growth-visual {
+    order: 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-growth-card {
+    width: 100%;
+  }
+}

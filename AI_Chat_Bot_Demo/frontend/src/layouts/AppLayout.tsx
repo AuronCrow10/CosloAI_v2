@@ -33,7 +33,7 @@ const AppLayout: React.FC = () => {
       <div className="app-main">
         <header className="app-main-header">
           <div className="app-main-header-left">
-            <span className="brand-small">AI Demo Bots</span>
+            <span className="brand-small">Coslo - Assistente AI</span>
           </div>
           <div className="app-main-header-right">
             {user && (

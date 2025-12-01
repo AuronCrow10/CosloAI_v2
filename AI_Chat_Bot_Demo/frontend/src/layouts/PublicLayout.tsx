@@ -1,20 +1,23 @@
 // src/layouts/PublicLayout.tsx
 import React from "react";
-import { Link, Outlet } from "react-router-dom";
+import { Link, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
 const PublicLayout: React.FC = () => {
   const { user } = useAuth();
+  const location = useLocation();
+
+  const isLanding = location.pathname === "/";
 
   return (
-    <div className="layout-root">
-      <header className="layout-header">
+    <div className={isLanding ? "layout-root layout-root-landing" : "layout-root"}>
+      <header className={isLanding ? "layout-header layout-header-landing" : "layout-header"}>
         <div className="layout-header-left">
-          <Link to="/" className="brand">
-            AI Demo Bots
+          <Link to="/" className={isLanding ? "brand brand-landing" : "brand"}>
+            Coslo - Assistente AI
           </Link>
         </div>
-        <nav className="layout-nav">
+        <nav className={isLanding ? "layout-nav layout-nav-landing" : "layout-nav"}>
           <Link to="/policy">Policy</Link>
           {user ? (
             <Link to="/app/bots">Dashboard</Link>
@@ -26,7 +29,8 @@ const PublicLayout: React.FC = () => {
           )}
         </nav>
       </header>
-      <main className="layout-main">
+
+      <main className={isLanding ? "layout-main layout-main-landing" : "layout-main"}>
         <Outlet />
       </main>
     </div>
