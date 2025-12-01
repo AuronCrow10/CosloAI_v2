@@ -1649,3 +1649,316 @@ body {
     margin: 0 auto;
   }
 }
+
+
+
+/* ========================================
+   POLICY PAGE
+   ======================================== */
+
+.policy-page {
+  width: 100%;
+}
+
+.policy-container {
+  max-width: 900px; /* leggermente più stretta della landing */
+}
+
+/* Header / hero */
+.policy-header {
+  text-align: left;
+  margin-bottom: 2.5rem;
+}
+
+.policy-kicker {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #6b7280;
+}
+
+.policy-intro {
+  max-width: 720px;
+}
+
+/* Blocchi contenuto */
+.policy-grid {
+  display: grid;
+  gap: 2.5rem;
+}
+
+.policy-section {
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 1.6rem 1.8rem;
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.policy-subtitle {
+  margin: 0 0 0.6rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+/* Liste */
+.policy-list {
+  margin: 0.6rem 0 0;
+  padding-left: 1.2rem;
+  color: #4b5568;
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.policy-list li {
+  margin-bottom: 0.3rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .policy-header {
+    text-align: center;
+  }
+
+  .policy-intro {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .policy-section {
+    padding: 1.4rem 1.3rem;
+  }
+}
+
+
+
+/* ========================================
+   SITE FOOTER (landing / policy / terms)
+   ======================================== */
+
+.site-footer {
+  border-top: 1px solid rgba(226, 232, 240, 0.9);
+  background: #f9fafb;
+  padding: 1.75rem 0;
+  margin-top: 3rem;
+}
+
+.site-footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  font-size: 0.9rem;
+  color: #6b7280;
+}
+
+.site-footer-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.site-footer-brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.85rem;
+  color: #111827;
+}
+
+.site-footer-copy {
+  margin: 0;
+}
+
+/* Link legali */
+.site-footer-links {
+  display: flex;
+  align-items: center;
+  gap: 1.3rem;
+}
+
+.site-footer-links a {
+  text-decoration: none;
+  color: #4b5563;
+  font-size: 0.9rem;
+}
+
+.site-footer-links a:hover {
+  color: #111827;
+}
+
+/* Social icons */
+.site-footer-social {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.site-footer-social a {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #4b5563;
+  background: #ffffff;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08);
+  transition: transform 0.15s ease, box-shadow 0.15s ease,
+    border-color 0.15s ease, background 0.15s ease;
+}
+
+.site-footer-social a:hover {
+  transform: translateY(-1px);
+  border-color: #667eea;
+  background: #eef2ff;
+  box-shadow: 0 6px 16px rgba(129, 140, 248, 0.3);
+  color: #374151;
+}
+
+/* Responsive footer */
+@media (max-width: 768px) {
+  .site-footer-inner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .site-footer-links {
+    flex-wrap: wrap;
+  }
+}
+
+
+
+/* ========================================
+   COOKIE BANNER
+   ======================================== */
+
+.cookie-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 1.5rem;
+  z-index: 50;
+  pointer-events: none; /* così non blocca clic fuori dal box */
+}
+
+.cookie-banner-inner {
+  pointer-events: auto;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.2rem 1.4rem;
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.15);
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+}
+
+/* Testo */
+.cookie-banner-text {
+  flex: 1;
+}
+
+.cookie-banner-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.cookie-banner-body {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #4b5563;
+}
+
+.cookie-banner-link {
+  color: #4f46e5;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+}
+
+.cookie-banner-link:hover {
+  color: #3730a3;
+}
+
+/* Bottoni */
+.cookie-banner-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.6rem;
+}
+
+.cookie-btn {
+  padding: 0.45rem 1.2rem;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.cookie-btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #ffffff;
+  box-shadow: 0 10px 24px rgba(102, 126, 234, 0.45);
+}
+
+.cookie-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 30px rgba(102, 126, 234, 0.6);
+}
+
+.cookie-btn-secondary {
+  background: #f9fafb;
+  color: #374151;
+  border-color: rgba(156, 163, 175, 0.8);
+}
+
+.cookie-btn-secondary:hover {
+  background: #e5e7eb;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .cookie-banner-inner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cookie-banner-actions {
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 480px) {
+  .cookie-banner {
+    bottom: 0.75rem;
+  }
+
+  .cookie-banner-inner {
+    padding: 1rem 1.1rem;
+  }
+
+  .cookie-banner-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .cookie-btn {
+    width: 100%;
+    text-align: center;
+  }
+}

@@ -2,12 +2,13 @@
 import React from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import CookieBanner from "../components/CookieBanner";
 
 const PublicLayout: React.FC = () => {
   const { user } = useAuth();
   const location = useLocation();
 
-  const isLanding = location.pathname === "/";
+  const isLanding = location.pathname === "/" || location.pathname === "/policy" || location.pathname === "/terms";
 
   return (
     <div className={isLanding ? "layout-root layout-root-landing" : "layout-root"}>
@@ -18,7 +19,6 @@ const PublicLayout: React.FC = () => {
           </Link>
         </div>
         <nav className={isLanding ? "layout-nav layout-nav-landing" : "layout-nav"}>
-          <Link to="/policy">Policy</Link>
           {user ? (
             <Link to="/app/bots">Dashboard</Link>
           ) : (
@@ -33,6 +33,7 @@ const PublicLayout: React.FC = () => {
       <main className={isLanding ? "layout-main layout-main-landing" : "layout-main"}>
         <Outlet />
       </main>
+      <CookieBanner />
     </div>
   );
 };

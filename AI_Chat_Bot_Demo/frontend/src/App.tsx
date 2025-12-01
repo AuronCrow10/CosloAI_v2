@@ -21,6 +21,7 @@ import BotConversationsPage from "./pages/app/BotConversationsPage";
 import ConversationDetailPage from "./pages/app/ConversationDetailsPage";
 import BotKnowledgePage from "./pages/app/BotKnowledgePage";
 import BotFeaturesPage from "./pages/app/BotFeaturesPage";
+import TermsPage from "./pages/TermsPage";
 
 
 import WidgetBotPage from "./pages/WidgetBotPage"; // in alto
@@ -33,6 +34,7 @@ const App: React.FC = () => {
         <Route element={<PublicLayout />}>
           <Route path="/" element={<LandingPage />} />
           <Route path="/policy" element={<PolicyPage />} />
+          <Route path="/terms" element={<TermsPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/verify-email" element={<VerifyEmailPage />} />

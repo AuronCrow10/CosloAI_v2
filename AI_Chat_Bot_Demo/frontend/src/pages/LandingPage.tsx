@@ -4,6 +4,7 @@ import { Link, Navigate, useSearchParams } from "react-router-dom";
 import cosloHero from "../assets/coslo-hero.png";
 import cosloAssist247 from "../assets/coslo-assist-247.png";
 import cosloGrowth from "../assets/coslo-growth.png";
+import SiteFooter from "../components/SiteFooter";
 
 const LandingPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -408,6 +409,7 @@ const LandingPage: React.FC = () => {
           </div>
         </div>
       </section>
+      <SiteFooter />
     </div>
   );
 };
