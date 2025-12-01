@@ -65,40 +65,44 @@ const LandingPage: React.FC = () => {
       </section>
 
 {/* INTRO */}
-      <section className="lp-section">
-        <div className="lp-container lp-grid-2">
-          {/* Colonna sinistra: solo Coslo */}
-          <div className="lp-intro-illustration">
-            <div className="lp-intro-image">
-              <img
-                src={cosloAssist247}
-                alt="Coslo che lavora 24/7 al tuo fianco"
-              />
-            </div>
-          </div>
+<section className="lp-section">
+  <div className="lp-container lp-intro-with-image">
+    {/* 1. Titolo */}
+    <div className="lp-intro-heading">
+      <h2 className="lp-section-title">
+        Un&apos;assistenza continua, precisa e realmente utile
+      </h2>
+    </div>
 
-          {/* Colonna destra: titolo + testo */}
-          <div className="lp-intro-right">
-            <h2 className="lp-section-title">
-              Un&apos;assistenza continua, precisa e realmente utile
-            </h2>
-            <p className="lp-text">
-              La nostra piattaforma è pensata per semplificare il lavoro delle aziende,
-              aumentare le conversioni e offrire ai clienti un canale di comunicazione
-              moderno, fluido e immediato.
-            </p>
-            <p className="lp-text">
-              Grazie a un sistema avanzato di automazione e comprensione dei contenuti,
-              il tuo business può finalmente garantire un supporto costante, coerente
-              e di qualità, senza dover aumentare il carico di lavoro del team interno.
-            </p>
-            <p className="lp-text">
-              Qui troverai nel dettaglio tutte le funzionalità che rendono il nostro
-              assistente AI uno strumento davvero indispensabile per la tua attività.
-            </p>
-          </div>
-        </div>
-      </section>
+    {/* 2. Immagine Coslo 24/7 */}
+    <div className="lp-intro-image">
+      <div className="lp-intro-illustration-frame">
+        <img
+          src={cosloAssist247} // <-- usa qui il tuo import
+          alt="Coslo sempre operativo 24/7 al computer"
+        />
+      </div>
+    </div>
+
+    {/* 3. Corpo testo */}
+    <div className="lp-intro-body">
+      <p className="lp-text">
+        La nostra piattaforma è pensata per semplificare il lavoro delle aziende,
+        aumentare le conversioni e offrire ai clienti un canale di comunicazione
+        moderno, fluido e immediato.
+      </p>
+      <p className="lp-text">
+        Grazie a un sistema avanzato di automazione e comprensione dei contenuti,
+        il tuo business può finalmente garantire un supporto costante, coerente
+        e di qualità, senza dover aumentare il carico di lavoro del team interno.
+      </p>
+      <p className="lp-text">
+        Qui troverai nel dettaglio tutte le funzionalità che rendono il nostro
+        assistente AI uno strumento davvero indispensabile per la tua attività.
+      </p>
+    </div>
+  </div>
+</section>
 
       {/* MULTICANALE */}
       <section className="lp-section lp-section-alt">

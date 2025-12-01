@@ -1222,8 +1222,6 @@ body {
   }
 }
 
-
-
 /* ========================================
    MINI COSLO CHAT SECTION
    ======================================== */
@@ -1240,11 +1238,11 @@ body {
   position: relative;
   max-width: 380px;
   margin: 0 auto;
-  padding: 1.4rem 1.6rem 3.2rem; /* più spazio in basso */
+  padding: 1.4rem 1.6rem 3.2rem;
   border-radius: 22px;
   background: radial-gradient(circle at 0% 0%, #1f2937, #020617);
   box-shadow: 0 20px 45px rgba(15, 23, 42, 0.75);
-  overflow: visible; /* non taglia più l'avatar */
+  overflow: visible;
 }
 
 /* Avatar mini Coslo in basso a sinistra */
@@ -1260,7 +1258,7 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  z-index: 2; /* sopra alle bolle */
+  z-index: 2;
 }
 
 .lp-mini-coslo-avatar img {
@@ -1276,7 +1274,7 @@ body {
   gap: 0.55rem;
   margin-left: 0.2rem;
   position: relative;
-  z-index: 1; /* sotto all'avatar */
+  z-index: 1;
 }
 
 /* Bolla base */
@@ -1310,7 +1308,7 @@ body {
   border-bottom-left-radius: 4px;
   margin-left: 4rem;
   animation: mini-bubble-cycle 7s ease-in-out infinite;
-  animation-delay: 3.2s; /* entra dopo la bolla utente */
+  animation-delay: 3.2s;
 }
 
 /* Animazione comparsa/scomparsa delle bolle */
@@ -1355,9 +1353,6 @@ body {
   }
 }
 
-
-
-
 /* ========================================
    COSLO CHE "STUDIA" I CONTENUTI
    ======================================== */
@@ -1372,11 +1367,11 @@ body {
   position: relative;
   width: 100%;
   max-width: 340px;
-  padding: 2rem 1.9rem 2.4rem; /* più spazio sopra e sotto */
+  padding: 2rem 1.9rem 2.4rem;
   border-radius: 22px;
   background: radial-gradient(circle at 0% 0%, #e0f2fe, #e5e7ff, #c7d2fe);
   box-shadow: 0 18px 40px rgba(79, 70, 229, 0.35);
-  overflow: visible; /* non taglia più Coslo o i documenti */
+  overflow: visible;
 }
 
 /* Coslo in un cerchio centrale */
@@ -1391,7 +1386,7 @@ body {
   align-items: center;
   justify-content: center;
   box-shadow: 0 10px 25px rgba(79, 70, 229, 0.35);
-  z-index: 2; /* sopra ai documenti */
+  z-index: 2;
 }
 
 .lp-knowledge-avatar img {
@@ -1426,7 +1421,7 @@ body {
   align-items: center;
   justify-content: center;
   border: 1px solid rgba(148, 163, 184, 0.7);
-  z-index: 1; /* sotto a Coslo */
+  z-index: 1;
 }
 
 .lp-knowledge-doc-label {
@@ -1532,162 +1527,6 @@ body {
   }
 }
 
-
-
-/* ========================================
-   MINI COSLO - SEZIONE "ASSISTENZA CONTINUA"
-   ======================================== */
-
-.lp-intro-assist-left {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-}
-
-/* Card sotto al titolo */
-.lp-intro-assist-card {
-  display: flex;
-  align-items: center;
-  gap: 0.9rem;
-  padding: 0.9rem 1.1rem;
-  max-width: 340px;
-  border-radius: 18px;
-  background: radial-gradient(circle at 0% 0%, #eef2ff, #e0e7ff);
-  box-shadow: 0 12px 28px rgba(79, 70, 229, 0.25);
-}
-
-/* Avatar di Coslo */
-.lp-intro-assist-avatar {
-  flex-shrink: 0;
-  width: 54px;
-  height: 54px;
-  border-radius: 999px;
-  background: radial-gradient(circle at 30% 0%, #ffffff, #e5e7ff);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 8px 18px rgba(79, 70, 229, 0.3);
-  animation: coslo-float 6s ease-in-out infinite; /* riusa l'animazione già definita */
-}
-
-.lp-intro-assist-avatar img {
-  display: block;
-  width: 80%;
-  height: auto;
-}
-
-/* Testo accanto all’avatar */
-.lp-intro-assist-text {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.lp-intro-assist-label {
-  margin: 0;
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #4f46e5;
-}
-
-.lp-intro-assist-caption {
-  margin: 0;
-  font-size: 0.9rem;
-  line-height: 1.5;
-  color: #4b5563;
-}
-
-/* Responsive: su tablet/mobile centriamo la card */
-@media (max-width: 1024px) {
-  .lp-intro-assist-left {
-    align-items: center;
-    text-align: center;
-  }
-
-  .lp-intro-assist-card {
-    margin-left: auto;
-    margin-right: auto;
-  }
-}
-
-
-/* ========================================
-   COSLO INTRO (immagine sotto al titolo)
-   ======================================== */
-
-.lp-intro-left {
-  display: flex;
-  flex-direction: column;
-  gap: 1.8rem;
-  align-items: flex-start;
-}
-
-.lp-intro-image {
-  width: 340px;             /* prima 260px */
-  max-width: 100%;
-  border-radius: 24px;
-  padding: 1.8rem 1.8rem 1.5rem;  /* un po' più spazio dentro */
-  background: radial-gradient(circle at 0% 0%, #eef2ff, #e0e7ff);
-  box-shadow: 0 18px 40px rgba(79, 70, 229, 0.28);
-  animation: coslo-float 7s ease-in-out infinite;
-}
-
-
-.lp-intro-image img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-/* Su tablet/mobile centriamo tutto */
-@media (max-width: 1024px) {
-  .lp-intro-left {
-    align-items: center;
-    text-align: center;
-  }
-}
-
-
-
-/* Layout sezione intro: Coslo a sinistra, testo a destra */
-.lp-intro-illustration {
-  display: flex;
-  justify-content: flex-start;
-  align-items: flex-start;   /* invece di center */
-  margin-top: 1.5rem;        /* lo abbassa leggermente */
-}
-
-.lp-intro-right {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  justify-content: center;
-}
-
-/* Su tablet/mobile: Coslo sopra, testo centrato sotto */
-@media (max-width: 1024px) {
-  .lp-intro-illustration {
-    justify-content: center;
-    align-items: center;
-    margin-top: 0;           /* su mobile torna centrato */
-  }
-
-  .lp-intro-image {
-    width: 260px;            /* torniamo a una dimensione più “mobile friendly” */
-    padding: 1.4rem 1.4rem 1.1rem;
-  }
-
-  .lp-intro-right {
-    align-items: center;
-    text-align: center;
-  }
-}
-
-
-
-
 /* ========================================
    COSLO CHE "CRESCE" CON LA TUA AZIENDA
    ======================================== */
@@ -1711,10 +1550,9 @@ body {
   border-radius: 26px;
   padding: 2.2rem 2.1rem 2.5rem;
   background: linear-gradient(145deg, #eef2ff, #e0f2fe);
-  /* gradient che “mixa” il bianco della pagina con l’azzurro dell’immagine */
   box-shadow: 0 22px 55px rgba(79, 70, 229, 0.25);
   overflow: hidden;
-  animation: coslo-float 8s ease-in-out infinite; /* riusa l’animazione morbida */
+  animation: coslo-float 8s ease-in-out infinite;
 }
 
 .lp-growth-img {
@@ -1738,5 +1576,76 @@ body {
 @media (max-width: 640px) {
   .lp-growth-card {
     width: 100%;
+  }
+}
+
+/* ========================================
+   INTRO: titolo + Coslo 24/7 + testo
+   ======================================== */
+
+.lp-intro-with-image {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.4fr);
+  grid-template-areas:
+    "image heading"
+    "image body";
+  gap: 3rem;
+  align-items: center;
+}
+
+.lp-intro-heading {
+  grid-area: heading;
+}
+
+.lp-intro-body {
+  grid-area: body;
+}
+
+.lp-intro-image {
+  grid-area: image;
+  display: flex;
+  justify-content: center;
+}
+
+/* card dell’illustrazione, in linea con gli altri Coslo */
+.lp-intro-illustration-frame {
+  width: 100%;
+  max-width: 320px;
+  border-radius: 24px;
+  padding: 1.8rem 1.8rem 1.6rem;
+  background: radial-gradient(circle at 10% 0%, #eef2ff, #e0e7ff, #c7d2fe);
+  box-shadow: 0 22px 55px rgba(79, 70, 229, 0.22);
+}
+
+.lp-intro-illustration-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Mobile: titolo -> immagine -> testo */
+@media (max-width: 768px) {
+  .lp-intro-with-image {
+    display: block; /* niente griglia, segue l’ordine del DOM */
+  }
+
+  .lp-intro-heading {
+    margin-bottom: 1.4rem;
+    text-align: center;
+  }
+
+  .lp-intro-image {
+    margin: 0 auto 2rem; /* immagine centrata + più spazio sotto */
+    justify-content: center;
+  }
+
+  .lp-intro-illustration-frame {
+    max-width: 260px;
+    margin: 0 auto;
+  }
+
+  .lp-intro-body {
+    max-width: 640px;
+    margin: 0 auto;
   }
 }
