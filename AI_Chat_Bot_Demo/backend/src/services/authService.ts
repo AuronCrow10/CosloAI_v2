@@ -29,20 +29,14 @@ export function signAccessToken(payload: JwtPayload): string {
   });
 }
 
-export function signRefreshToken(payload: JwtPayload): string {
-  return jwt.sign(payload, config.jwtRefreshSecret, {
-    expiresIn: config.jwtRefreshExpiresIn
-  });
-}
-
 export function verifyAccessToken(token: string): JwtPayload {
   return jwt.verify(token, config.jwtAccessSecret) as JwtPayload;
 }
 
-export function verifyRefreshToken(token: string): JwtPayload {
-  return jwt.verify(token, config.jwtRefreshSecret) as JwtPayload;
-}
-
+/**
+ * Opaque refresh token (random string stored in DB).
+ * No JWT for refresh – easier revocation/rotation.
+ */
 export async function createRefreshToken(userId: string): Promise<string> {
   const token = randomBytes(48).toString("hex");
   const expiresAt = addSeconds(new Date(), config.jwtRefreshExpiresIn);
@@ -58,6 +52,10 @@ export async function revokeRefreshToken(token: string): Promise<void> {
   await prisma.refreshToken.deleteMany({ where: { token } });
 }
 
+export async function revokeAllRefreshTokensForUser(userId: string): Promise<void> {
+  await prisma.refreshToken.deleteMany({ where: { userId } });
+}
+
 export async function sendVerificationEmail(userId: string, email: string): Promise<void> {
   if (!config.smtpHost || !config.smtpFrom) {
     console.warn("SMTP not configured, skipping verification email send");
@@ -71,7 +69,9 @@ export async function sendVerificationEmail(userId: string, email: string): Prom
     data: { userId, token, expiresAt }
   });
 
-  const verifyUrl = `${process.env.FRONTEND_ORIGIN || "http://localhost:3000"}/verify-email?token=${token}`;
+  const verifyUrl = `${
+    process.env.FRONTEND_ORIGIN || "http://localhost:3000"
+  }/verify-email?token=${token}`;
 
   const transporter = nodemailer.createTransport({
     host: config.smtpHost,

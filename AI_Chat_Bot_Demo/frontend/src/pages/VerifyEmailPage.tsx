@@ -14,7 +14,7 @@ const VerifyEmailPage: React.FC = () => {
     const token = searchParams.get("token");
     if (!token) {
       setStatus("error");
-      setMessage("Missing verification token.");
+      setMessage("Token di verifica mancante.");
       return;
     }
 
@@ -22,26 +22,44 @@ const VerifyEmailPage: React.FC = () => {
     verifyEmailApi(token)
       .then((res) => {
         setStatus(res.success ? "success" : "error");
-        setMessage(res.message || (res.success ? "Email verified!" : "Invalid token."));
+        setMessage(
+          res.message ||
+            (res.success
+              ? "Email verificata con successo!"
+              : "Token non valido o scaduto.")
+        );
       })
       .catch((err: any) => {
         console.error(err);
         setStatus("error");
-        setMessage(err.message || "Verification failed.");
+        setMessage(err.message || "Verifica fallita.");
       });
   }, [searchParams]);
 
   return (
-    <div className="page-container">
-      <h1>Email verification</h1>
-      {status === "loading" && <p>Verifying your email...</p>}
-      {status !== "loading" && message && <p>{message}</p>}
-      {(status === "success" || status === "error") && (
-        <p>
-          You can now go to <Link to="/login">Login</Link>.
-        </p>
-      )}
-    </div>
+    <section className="auth-landing">
+      <div className="lp-container">
+        <div className="auth-center">
+          <div className="auth-card auth-card-verify">
+            <h1 className="auth-card-title">Verifica email</h1>
+            {status === "loading" && (
+              <p className="auth-subtitle">Stiamo verificando la tua email...</p>
+            )}
+            {status !== "loading" && message && (
+              <p className="auth-subtitle">{message}</p>
+            )}
+            {(status === "success" || status === "error") && (
+              <p className="auth-switch" style={{ marginTop: "1.25rem" }}>
+                Ora puoi tornare al{" "}
+                <Link to="/login">
+                  login
+                </Link>.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 };
 

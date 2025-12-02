@@ -15,7 +15,7 @@ export interface AuthResponse {
 }
 
 export interface VerifyEmailResponse {
-  success: boolean;
+  success?: boolean;
   message?: string;
 }
 
@@ -53,7 +53,10 @@ export function clearAuthData(): void {
   localStorage.removeItem(USER_KEY);
 }
 
-export async function registerApi(email: string, password: string): Promise<void> {
+export async function registerApi(
+  email: string,
+  password: string
+): Promise<void> {
   const res = await fetch(`/auth/register`, {
     method: "POST",
     headers: {
@@ -61,11 +64,13 @@ export async function registerApi(email: string, password: string): Promise<void
     },
     body: JSON.stringify({ email, password })
   });
-  // backend may return {message}, but we don't need body
   await handleJsonResponse<unknown>(res);
 }
 
-export async function loginApi(email: string, password: string): Promise<AuthResponse> {
+export async function loginApi(
+  email: string,
+  password: string
+): Promise<AuthResponse> {
   const res = await fetch(`/auth/login`, {
     method: "POST",
     headers: {
@@ -76,7 +81,9 @@ export async function loginApi(email: string, password: string): Promise<AuthRes
   return handleJsonResponse<AuthResponse>(res);
 }
 
-export async function verifyEmailApi(token: string): Promise<VerifyEmailResponse> {
+export async function verifyEmailApi(
+  token: string
+): Promise<VerifyEmailResponse> {
   const res = await fetch(`/auth/verify-email`, {
     method: "POST",
     headers: {
@@ -87,7 +94,13 @@ export async function verifyEmailApi(token: string): Promise<VerifyEmailResponse
   return handleJsonResponse<VerifyEmailResponse>(res);
 }
 
-export async function refreshTokenApi(refreshToken: string): Promise<AuthResponse> {
+/**
+ * NOTE: Backend /auth/refresh now returns AuthResponse
+ * and rotates the refresh token.
+ */
+export async function refreshTokenApi(
+  refreshToken: string
+): Promise<AuthResponse> {
   const res = await fetch(`/auth/refresh`, {
     method: "POST",
     headers: {
@@ -99,7 +112,6 @@ export async function refreshTokenApi(refreshToken: string): Promise<AuthRespons
 }
 
 export async function logoutApi(refreshToken: string | null): Promise<void> {
-  // backend may require refreshToken body; send if present
   const res = await fetch(`/auth/logout`, {
     method: "POST",
     headers: {
@@ -110,7 +122,6 @@ export async function logoutApi(refreshToken: string | null): Promise<void> {
   await handleJsonResponse<unknown>(res);
 }
 
-// Placeholder for Google login via idToken (UI can pass idToken from Google SDK)
 export async function loginWithGoogleApi(idToken: string): Promise<AuthResponse> {
   const res = await fetch(`/auth/google`, {
     method: "POST",

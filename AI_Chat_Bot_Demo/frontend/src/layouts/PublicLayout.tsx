@@ -8,7 +8,7 @@ const PublicLayout: React.FC = () => {
   const { user } = useAuth();
   const location = useLocation();
 
-  const isLanding = location.pathname === "/" || location.pathname === "/policy" || location.pathname === "/terms";
+  const isLanding = location.pathname === "/" || location.pathname === "/policy" || location.pathname === "/terms" || location.pathname === "/login" || location.pathname === "/register" || location.pathname=== "/verify-email";
 
   return (
     <div className={isLanding ? "layout-root layout-root-landing" : "layout-root"}>

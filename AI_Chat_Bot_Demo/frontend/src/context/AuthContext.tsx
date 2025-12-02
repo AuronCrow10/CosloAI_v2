@@ -10,14 +10,14 @@ import {
   AuthUser,
   loginApi,
   registerApi,
-  verifyEmailApi,
   refreshTokenApi,
   logoutApi,
   getStoredAccessToken,
   getStoredRefreshToken,
   getStoredUser,
   storeAuthData,
-  clearAuthData
+  clearAuthData,
+  loginWithGoogleApi
 } from "../api/auth";
 
 interface AuthContextValue {
@@ -28,6 +28,7 @@ interface AuthContextValue {
   register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
+  loginWithGoogle: (idToken: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -39,21 +40,22 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   );
   const [isLoading, setIsLoading] = useState(false);
 
-  // Optional: try to refresh on mount if we have a refresh token
-  useEffect(() => {
-    const refreshToken = getStoredRefreshToken();
-    if (!accessToken && refreshToken) {
-      refreshSession().catch(() => {
-        // ignore; user stays logged out
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const login = async (email: string, password: string): Promise<void> => {
     setIsLoading(true);
     try {
       const data = await loginApi(email, password);
+      storeAuthData(data);
+      setUser(data.user);
+      setAccessToken(data.accessToken);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const loginWithGoogle = async (idToken: string): Promise<void> => {
+    setIsLoading(true);
+    try {
+      const data = await loginWithGoogleApi(idToken);
       storeAuthData(data);
       setUser(data.user);
       setAccessToken(data.accessToken);
@@ -77,7 +79,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const refreshToken = getStoredRefreshToken();
       await logoutApi(refreshToken);
     } catch {
-      // ignore errors
+      // ignore backend errors on logout
     } finally {
       clearAuthData();
       setUser(null);
@@ -89,18 +91,38 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const refreshSession = async (): Promise<void> => {
     const refreshToken = getStoredRefreshToken();
     if (!refreshToken) {
+      clearAuthData();
+      setUser(null);
+      setAccessToken(null);
       throw new Error("No refresh token");
     }
+
     setIsLoading(true);
     try {
       const data = await refreshTokenApi(refreshToken);
       storeAuthData(data);
       setUser(data.user);
       setAccessToken(data.accessToken);
+    } catch (err) {
+      clearAuthData();
+      setUser(null);
+      setAccessToken(null);
+      throw err;
     } finally {
       setIsLoading(false);
     }
   };
+
+  // On mount: if we have refreshToken but no accessToken, try to restore session
+  useEffect(() => {
+    const refreshToken = getStoredRefreshToken();
+    if (!accessToken && refreshToken) {
+      refreshSession().catch(() => {
+        // ignore; refreshSession already cleared on failure
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const value: AuthContextValue = {
     user,
@@ -109,7 +131,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     login,
     register,
     logout,
-    refreshSession
+    refreshSession,
+    loginWithGoogle
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
