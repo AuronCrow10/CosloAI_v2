@@ -1,3 +1,4 @@
+// routes/stripeWebhook.ts
 import { Request, Response } from "express";
 import Stripe from "stripe";
 import { prisma } from "../prisma/prisma";
@@ -59,6 +60,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           primaryItem?.price?.currency ?? session.currency ?? "eur";
 
         const planSnapshot = parsePlanSnapshot(session.metadata || null);
+        const usagePlanId = session.metadata?.usagePlanId as string | undefined;
 
         await prisma.subscription.upsert({
           where: { botId },
@@ -69,7 +71,8 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             stripePriceId,
             status: "ACTIVE",
             currency,
-            planSnapshotJson: planSnapshot ?? undefined
+            planSnapshotJson: planSnapshot ?? undefined,
+            usagePlanId: usagePlanId ?? undefined
           },
           update: {
             stripeCustomerId: customerId,
@@ -77,7 +80,8 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             stripePriceId,
             status: "ACTIVE",
             currency,
-            planSnapshotJson: planSnapshot ?? undefined
+            planSnapshotJson: planSnapshot ?? undefined,
+            usagePlanId: usagePlanId ?? undefined
           }
         });
 
@@ -114,6 +118,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           data: {
             status,
             currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
+            // usagePlanId is not changed here (we set it at checkout time)
           }
         });
 
@@ -122,7 +127,6 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         if (status === "ACTIVE" || status === "TRIALING") {
           botStatus = "ACTIVE";
         } else if (status === "CANCELED") {
-        // Manteniamo CANCELED per i bot con abbonamento terminato
           botStatus = "CANCELED";
         } else {
           botStatus = "SUSPENDED";
@@ -150,7 +154,6 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         const amountCents = invoice.amount_paid;
         const currency = invoice.currency;
 
-        // Use the denormalized fields on the invoice (no need to expand customer)
         const billingEmail = invoice.customer_email ?? undefined;
         const billingName = invoice.customer_name ?? undefined;
         const billingAddress = invoice.customer_address ?? null;
@@ -191,7 +194,6 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             status: invoice.status ?? "succeeded",
             billingEmail,
             billingName,
-            // store whatever Stripe gives us for address (can be null)
             billingAddressJson: billingAddress
               ? (billingAddress as any)
               : undefined,
@@ -240,8 +242,6 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             status: "failed"
           }
         });
-
-        // You might later want to suspend bot here if repeated failures happen.
 
         break;
       }

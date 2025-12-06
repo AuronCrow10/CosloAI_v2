@@ -1,9 +1,0 @@
-{
-	"id": "87VxdSTeAmZHjPz",
-	"json": "{\"id\":\"87VxdSTeAmZHjPz\",\"url\":\"https://www.trustpilot.com/review/godaddy.com\",\"uniqueKey\":\"https://www.trustpilot.com/review/godaddy.com\",\"method\":\"GET\",\"noRetry\":true,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"enqueueStrategy\":\"same-domain\",\"state\":7}},\"handledAt\":\"2025-11-25T17:40:59.667Z\"}",
-	"method": "GET",
-	"orderNo": null,
-	"retryCount": 0,
-	"uniqueKey": "https://www.trustpilot.com/review/godaddy.com",
-	"url": "https://www.trustpilot.com/review/godaddy.com"
-}

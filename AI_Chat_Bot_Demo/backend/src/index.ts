@@ -17,6 +17,7 @@ import conversationsRouter from "./routes/conversations";
 import metaAuthRouter from "./routes/metaAuth";
 import whatsappEmbeddedRouter from "./routes/whatsappEmbedded"; // NEW
 import { scheduleMetaTokenRefreshJob } from "./services/metaTokenService";
+import usageRouter from "./routes/usage"; // NEW
 
 const app = express();
 
@@ -50,6 +51,8 @@ app.use("/api", billingRouter);
 app.use("/api", conversationsRouter);
 app.use("/api", metaAuthRouter); // ⬅️ HERE
 app.use("/api", whatsappEmbeddedRouter); // NEW
+app.use("/api", usageRouter); // NEW
+
 
 // Chat & webhooks
 app.use("/api", chatRouter);

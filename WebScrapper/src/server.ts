@@ -47,20 +47,19 @@ const db = new Database(config.db);
 const embeddings = new EmbeddingService(config.embeddings);
 
 // inizializzo il DB una volta sola
-db.init().then(() => {
-  console.log('DB initialized');
-}).catch((err) => {
-  console.error('Failed to init DB', err);
-  process.exit(1);
-});
-
+db.init()
+  .then(() => {
+    console.log('DB initialized');
+  })
+  .catch((err) => {
+    console.error('Failed to init DB', err);
+    process.exit(1);
+  });
 
 app.use((req, _res, next) => {
-  console.log("[KB]", req.method, req.url);
+  console.log('[KB]', req.method, req.url);
   next();
 });
-
-
 
 // Returns 201 with { client, created: true } or 409 if domain already exists.
 app.post('/clients', requireInternalAuth, async (req, res) => {
@@ -79,7 +78,6 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
     console.log(name);
     console.log(embeddingModel);
     console.log(mainDomain);
-    
 
     if (!name) {
       return res.status(400).json({ error: 'name is required' });
@@ -119,10 +117,13 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
   }
 });
 
-// 1) Endpoint per lanciare il crawl
+// 1) Endpoint per lanciare il crawl (fire-and-forget)
 app.post('/crawl', requireInternalAuth, async (req, res) => {
   try {
-    const { clientId, domain } = req.body;
+    const { clientId, domain } = req.body as {
+      clientId?: string;
+      domain?: string;
+    };
 
     if (!clientId || !domain) {
       return res
@@ -130,18 +131,38 @@ app.post('/crawl', requireInternalAuth, async (req, res) => {
         .json({ error: 'clientId and domain are required' });
     }
 
-    // versione semplice: esegue il crawl in modo sincrono
-    await runCrawl(clientId, domain);
+    // Fire-and-forget: avvia il crawl ma non blocca la response HTTP
+    runCrawl(clientId, domain)
+      .then(() => {
+        console.log(
+          `[KB] Crawl completed for client=${clientId}, domain=${domain}`,
+        );
+      })
+      .catch((err) => {
+        console.error(
+          `[KB] Crawl failed for client=${clientId}, domain=${domain}`,
+          err,
+        );
+      });
 
-    return res.json({ status: 'ok', message: 'Crawl completed' });
+    // Rispondi subito per evitare timeout sul frontend
+    return res.status(202).json({
+      status: 'queued',
+      message: 'Crawl started',
+      clientId,
+      domain,
+    });
   } catch (err) {
     console.error('Error in /crawl', err);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
 
-
-app.post('/upload-document', requireInternalAuth, upload.single('file'), async (req, res) => {
+app.post(
+  '/upload-document',
+  requireInternalAuth,
+  upload.single('file'),
+  async (req, res) => {
     try {
       const { clientId, domain } = req.body as {
         clientId?: string;
@@ -164,8 +185,7 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
       }
 
       // 2) Determine logical "domain" for these chunks
-      const sourceDomain =
-        domain || client.mainDomain || 'uploaded-docs';
+      const sourceDomain = domain || client.mainDomain || 'uploaded-docs';
 
       const safeName = encodeURIComponent(file.originalname);
       const sourceUrl = `file://${sourceDomain}/${safeName}`;
@@ -176,9 +196,9 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
         rawText = await extractTextFromBuffer(file.buffer, file.originalname);
       } catch (err: any) {
         console.error('Failed to extract text from uploaded document', err);
-        return res
-          .status(400)
-          .json({ error: `Could not extract text: ${err.message || 'unknown error'}` });
+        return res.status(400).json({
+          error: `Could not extract text: ${err.message || 'unknown error'}`,
+        });
       }
 
       const cleanedText = rawText
@@ -228,7 +248,7 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
 
 // 2) Endpoint per la search vettoriale
 app.post('/search', requireInternalAuth, async (req, res) => {
-  console.log("ciao");
+  console.log('ciao');
   try {
     const { clientId, query, domain, limit } = req.body;
 
@@ -260,6 +280,136 @@ app.post('/search', requireInternalAuth, async (req, res) => {
     return res.json({ results });
   } catch (err) {
     console.error('Error in /search', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// Helper per parse date query params
+function parseDateQueryParam(
+  value: string | undefined,
+  fieldName: string,
+  res: express.Response,
+): Date | undefined | null {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    res
+      .status(400)
+      .json({ error: `Invalid date format for "${fieldName}". Use ISO8601.` });
+    return undefined;
+  }
+  return d;
+}
+
+// 3) Endpoint per vedere l'uso dei token per un singolo client
+// Supporta:
+// - ?clientId=...              → tutto lo storico
+// - ?clientId=...&from=...&to=... → intervallo personalizzato
+// - ?clientId=...&period=month → mese corrente (real-time)
+app.get('/usage', requireInternalAuth, async (req, res) => {
+  try {
+    const clientId = req.query.clientId as string | undefined;
+
+    if (!clientId) {
+      return res.status(400).json({ error: 'clientId is required' });
+    }
+
+    const client = await db.getClientById(clientId);
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    const fromStr = req.query.from as string | undefined;
+    const toStr = req.query.to as string | undefined;
+    const period = (req.query.period as string | undefined)?.toLowerCase();
+
+    let from: Date | null = null;
+    let to: Date | null = null;
+
+    // If explicit from/to are provided, use them
+    if (fromStr) {
+      const parsed = parseDateQueryParam(fromStr, 'from', res);
+      if (parsed === undefined) return; // error already sent
+      from = parsed;
+    }
+    if (toStr) {
+      const parsed = parseDateQueryParam(toStr, 'to', res);
+      if (parsed === undefined) return; // error already sent
+      to = parsed;
+    }
+
+    // If no from/to but period=month, compute current month [startOfMonth, now]
+    if (!from && !to && period === 'month') {
+      const now = new Date();
+      const startOfMonthUtc = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0),
+      );
+      from = startOfMonthUtc;
+      to = now;
+    }
+
+    const summary = await db.getClientUsageSummary(clientId, from ?? null, to ?? null);
+
+    return res.json(summary);
+  } catch (err) {
+    console.error('Error in /usage', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// 4) Endpoint per vedere l'uso dei token per tutti i client
+// Supporta:
+// - ?limit=50
+// - ?from=...&to=...
+// - ?period=month (mese corrente)
+app.get('/usage/clients', requireInternalAuth, async (req, res) => {
+  try {
+    const limitRaw = req.query.limit as string | undefined;
+    let limit = 100;
+
+    if (limitRaw) {
+      const parsed = Number.parseInt(limitRaw, 10);
+      if (!Number.isNaN(parsed) && parsed > 0) {
+        limit = Math.min(parsed, 1000); // hard cap
+      }
+    }
+
+    const fromStr = req.query.from as string | undefined;
+    const toStr = req.query.to as string | undefined;
+    const period = (req.query.period as string | undefined)?.toLowerCase();
+
+    let from: Date | null = null;
+    let to: Date | null = null;
+
+    if (fromStr) {
+      const parsed = parseDateQueryParam(fromStr, 'from', res);
+      if (parsed === undefined) return;
+      from = parsed;
+    }
+    if (toStr) {
+      const parsed = parseDateQueryParam(toStr, 'to', res);
+      if (parsed === undefined) return;
+      to = parsed;
+    }
+
+    if (!from && !to && period === 'month') {
+      const now = new Date();
+      const startOfMonthUtc = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0),
+      );
+      from = startOfMonthUtc;
+      to = now;
+    }
+
+    const usageList = await db.getAllClientsUsageSummary(
+      limit,
+      from ?? null,
+      to ?? null,
+    );
+
+    return res.json({ clients: usageList });
+  } catch (err) {
+    console.error('Error in /usage/clients', err);
     return res.status(500).json({ error: 'Internal error' });
   }
 });

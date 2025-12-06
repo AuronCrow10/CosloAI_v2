@@ -70,7 +70,7 @@ export interface CheckoutResponse {
   checkoutUrl: string;
 }
 
-// --- Pricing preview types ---
+// --- Pricing preview types (features only) ---
 
 export type FeatureCode =
   | "DOMAIN_CRAWLER"
@@ -104,6 +104,20 @@ export interface BotPricingPreviewPayload {
   channelMessenger?: boolean;
   channelInstagram?: boolean;
   useCalendar?: boolean;
+}
+
+// --- Usage plans (for tokens/limits) ---
+
+export interface UsagePlan {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  monthlyTokens?: number | null;
+  monthlyAmountCents: number;
+  currency: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Bots ----
@@ -180,11 +194,15 @@ export async function getBotById(id: string): Promise<Bot> {
 
 // ---- Stripe Checkout ----
 
-export async function startBotCheckout(id: string): Promise<CheckoutResponse> {
+export async function startBotCheckout(
+  id: string,
+  payload: { usagePlanId: string }
+): Promise<CheckoutResponse> {
   return authFetchJson<CheckoutResponse>(
     `/bots/${encodeURIComponent(id)}/checkout`,
     {
-      method: "POST"
+      method: "POST",
+      body: JSON.stringify(payload)
     }
   );
 }
@@ -211,6 +229,13 @@ export async function cancelBotSubscription(id: string): Promise<Bot> {
   );
 }
 
+// NEW: fetch usage plans list
+export async function fetchUsagePlans(): Promise<UsagePlan[]> {
+  return authFetchJson<UsagePlan[]>("/usage-plans");
+}
+
+// ---- Knowledge & documents ----
+
 export async function crawlBotDomain(
   botId: string,
   domainOverride?: string
@@ -234,8 +259,6 @@ export async function uploadBotDocuments(
     formData.append("files", file);
   });
 
-  // authFetchJson will add Authorization and handle 401/refresh; it will NOT
-  // set Content-Type when body is FormData.
   return authFetchJson<{ status: string; knowledgeClientId: string; files: string[] }>(
     `/bots/${encodeURIComponent(botId)}/knowledge/upload-docs`,
     {

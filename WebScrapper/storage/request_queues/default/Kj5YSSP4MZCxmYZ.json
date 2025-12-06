@@ -1,9 +1,0 @@
-{
-	"id": "Kj5YSSP4MZCxmYZ",
-	"json": "{\"id\":\"Kj5YSSP4MZCxmYZ\",\"url\":\"https://forsale.godaddy.com/forsale/true\",\"loadedUrl\":\"https://forsale.godaddy.com/forsale/true\",\"uniqueKey\":\"https://forsale.godaddy.com/forsale/true\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"crawlDepth\":1,\"enqueueStrategy\":\"same-domain\",\"state\":4}},\"handledAt\":\"2025-11-25T17:41:16.360Z\"}",
-	"method": "GET",
-	"orderNo": null,
-	"retryCount": 0,
-	"uniqueKey": "https://forsale.godaddy.com/forsale/true",
-	"url": "https://forsale.godaddy.com/forsale/true"
-}

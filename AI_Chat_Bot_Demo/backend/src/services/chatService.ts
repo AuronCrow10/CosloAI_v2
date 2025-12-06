@@ -2,8 +2,16 @@
 
 import { getBotConfigBySlug } from "../bots/config";
 import { searchKnowledge } from "../knowledge/client";
-import { ChatMessage, ChatTool, getChatCompletion, openai } from "../openai/client";
-import { handleBookAppointment, BookAppointmentArgs } from "./bookingService";
+import {
+  ChatMessage,
+  ChatTool,
+  getChatCompletion,
+  createChatCompletionWithUsage
+} from "../openai/client";
+import {
+  handleBookAppointment,
+  BookAppointmentArgs
+} from "./bookingService";
 
 // NEW: conversation history for per-conversation memory
 import { getConversationHistoryAsChatMessages } from "./conversationService";
@@ -34,11 +42,13 @@ const bookingTool: ChatTool = {
         },
         phone: {
           type: "string",
-          description: "User's phone number including country code if possible"
+          description:
+            "User's phone number including country code if possible"
         },
         service: {
           type: "string",
-          description: "Requested service or treatment (e.g. haircut, dinner for 2, etc.)"
+          description:
+            "Requested service or treatment (e.g. haircut, dinner for 2, etc.)"
         },
         datetime: {
           type: "string",
@@ -77,6 +87,7 @@ type GenerateReplyOptions = {
  * Generate a reply for a given bot slug and user message.
  * Reuses RAG logic and adds optional booking via tools.
  * NOW: supports per-conversation memory when conversationId is provided.
+ * ALSO: logs OpenAI token usage per bot/user.
  */
 export async function generateBotReplyForSlug(
   slug: string,
@@ -85,7 +96,10 @@ export async function generateBotReplyForSlug(
 ): Promise<string> {
   const botConfig = await getBotConfigBySlug(slug);
   if (!botConfig) {
-    throw new ChatServiceError(`Bot not found for slug '${slug}'`, 404);
+    throw new ChatServiceError(
+      `Bot not found for slug '${slug}'`,
+      404
+    );
   }
   if (!botConfig.knowledgeClientId) {
     throw new ChatServiceError(
@@ -100,8 +114,17 @@ export async function generateBotReplyForSlug(
   }
 
   if (message.length > MAX_MESSAGE_LENGTH) {
-    throw new ChatServiceError(`Message is too long (max ${MAX_MESSAGE_LENGTH} chars)`, 400);
+    throw new ChatServiceError(
+      `Message is too long (max ${MAX_MESSAGE_LENGTH} chars)`,
+      400
+    );
   }
+
+  // Base usage context (per user/bot) for all OpenAI calls in this request
+  const usageBase = {
+    userId: botConfig.ownerUserId ?? null,
+    botId: botConfig.botId ?? null
+  };
 
   // 1) Call Knowledge Backend
   const results = await searchKnowledge({
@@ -150,7 +173,7 @@ export async function generateBotReplyForSlug(
     });
   }
 
-  // --- NEW: Per-conversation memory (recent history) ---
+  // --- Per-conversation memory (recent history) ---
   if (options.conversationId) {
     const historyMessages = await getConversationHistoryAsChatMessages(
       options.conversationId
@@ -174,16 +197,27 @@ export async function generateBotReplyForSlug(
 
   // 4) If booking is disabled, simple path: one OpenAI call, no tools.
   if (!bookingEnabled) {
-    return await getChatCompletion({ messages, maxTokens: 400 });
+    return await getChatCompletion({
+      messages,
+      maxTokens: 400,
+      usageContext: {
+        ...usageBase,
+        operation: "chat_basic"
+      }
+    });
   }
 
   // 5) Booking-enabled path: use tools
-  const firstResponse = await openai.chat.completions.create({
+  const firstResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages,
-    max_tokens: 400,
+    maxTokens: 400,
     tools: [bookingTool],
-    tool_choice: "auto"
+    toolChoice: "auto",
+    usageContext: {
+      ...usageBase,
+      operation: "chat_booking_first"
+    }
   });
 
   const firstChoice = firstResponse.choices[0];
@@ -194,16 +228,22 @@ export async function generateBotReplyForSlug(
   if (!toolCalls || toolCalls.length === 0) {
     const content = firstMessage.content;
     if (!content) {
-      throw new Error("OpenAI returned no content in booking-enabled path");
+      throw new Error(
+        "OpenAI returned no content in booking-enabled path"
+      );
     }
     return content;
   }
 
   // Find the book_appointment tool call
-  const bookingCall = toolCalls.find((tc) => tc.function?.name === "book_appointment");
+  const bookingCall = toolCalls.find(
+    (tc) => tc.function?.name === "book_appointment"
+  );
   if (!bookingCall) {
     // Some other tool (unexpected) – just return content
-    const content = firstMessage.content || "Sorry, I couldn't process your booking request.";
+    const content =
+      firstMessage.content ||
+      "Sorry, I couldn't process your booking request.";
     return content;
   }
 
@@ -219,7 +259,10 @@ export async function generateBotReplyForSlug(
       args
     });
   } catch (err) {
-    console.error("Failed to parse book_appointment arguments:", err);
+    console.error(
+      "Failed to parse book_appointment arguments:",
+      err
+    );
     const bookingResult = {
       success: false,
       errorMessage:
@@ -237,14 +280,21 @@ export async function generateBotReplyForSlug(
       }
     ];
 
-    const secondResponse = await openai.chat.completions.create({
+    const secondResponse = await createChatCompletionWithUsage({
       model: "gpt-4.1-mini",
       messages: toolMessages,
-      max_tokens: 400
+      maxTokens: 400,
+      usageContext: {
+        ...usageBase,
+        operation: "chat_booking_second"
+      }
     });
 
     const secondChoice = secondResponse.choices[0];
-    return secondChoice.message.content || "Sorry, I couldn't process your booking.";
+    return (
+      secondChoice.message.content ||
+      "Sorry, I couldn't process your booking."
+    );
   }
 
   // Actually perform booking
@@ -261,10 +311,14 @@ export async function generateBotReplyForSlug(
     }
   ];
 
-  const secondResponse = await openai.chat.completions.create({
+  const secondResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages: toolMessages,
-    max_tokens: 400
+    maxTokens: 400,
+    usageContext: {
+      ...usageBase,
+      operation: "chat_booking_second"
+    }
   });
 
   const secondChoice = secondResponse.choices[0];
@@ -272,7 +326,8 @@ export async function generateBotReplyForSlug(
     secondChoice.message.content ||
     (bookingResult.success
       ? "Your booking has been processed."
-      : bookingResult.errorMessage || "Sorry, I couldn't process your booking.");
+      : bookingResult.errorMessage ||
+        "Sorry, I couldn't process your booking.");
 
   return finalContent;
 }

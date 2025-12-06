@@ -6,18 +6,10 @@ import {
   BotChannel,
   getBotById,
   updateBot,
-  startBotCheckout,
   fetchChannels,
   getBotPricingPreview,
   BotPricingPreview
 } from "../../api/bots";
-
-const formatCurrency = (amountCents: number, currency: string) =>
-  new Intl.NumberFormat("en-GB", {
-    style: "currency",
-    currency: currency.toUpperCase(),
-    minimumFractionDigits: 2
-  }).format(amountCents / 100);
 
 const BotDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -26,14 +18,12 @@ const BotDetailPage: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const [form, setForm] = useState<{
     description: string;
     systemPrompt: string;
-    domain: string;
   } | null>(null);
 
   const [pricing, setPricing] = useState<BotPricingPreview | null>(null);
@@ -50,8 +40,7 @@ const BotDetailPage: React.FC = () => {
         setChannels(channelData || []);
         setForm({
           description: botData.description || "",
-          systemPrompt: botData.systemPrompt,
-          domain: botData.domain || ""
+          systemPrompt: botData.systemPrompt
         });
 
         // Load current plan breakdown from server (based on stored features)
@@ -90,32 +79,15 @@ const BotDetailPage: React.FC = () => {
     try {
       const updated = await updateBot(id, {
         description: form.description,
-        systemPrompt: form.systemPrompt,
-        domain: form.domain || null
+        systemPrompt: form.systemPrompt
       });
       setBot(updated);
       setSuccess("Bot basics updated successfully.");
-      // Optionally refresh pricing if domain changes affect feature usage later
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Failed to update bot");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleCheckout = async () => {
-    if (!id) return;
-    setCheckoutLoading(true);
-    setError(null);
-    try {
-      const { checkoutUrl } = await startBotCheckout(id);
-      window.location.href = checkoutUrl;
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Failed to start checkout");
-    } finally {
-      setCheckoutLoading(false);
     }
   };
 
@@ -212,25 +184,52 @@ const BotDetailPage: React.FC = () => {
     !!bot.timeZone &&
     !!bot.defaultDurationMinutes;
 
-  // Nice helpers for badges
   const badgeClass = (kind: "ok" | "warn" | "error") => {
-    // using existing-ish classes so it still looks decent
     if (kind === "ok") return "status-badge status-badge-ok";
     if (kind === "warn") return "status-badge status-badge-warn";
     return "status-badge status-badge-error";
   };
 
+  const getBotStatusBadgeKind = (status: Bot["status"]): "ok" | "warn" | "error" => {
+    const normalized = status.toUpperCase();
+    if (normalized === "ACTIVE") return "ok";
+    if (normalized === "DRAFT") return "warn";
+    return "error"; // CANCELLED / INACTIVE / anything else
+  };
+
+  const getStatusPillClass = (status: Bot["status"]) => {
+    const normalized = status.toUpperCase();
+    if (normalized === "ACTIVE") {
+      return "plan-summary-status plan-summary-status-ok";
+    }
+    if (normalized === "DRAFT") {
+      return "plan-summary-status plan-summary-status-warn";
+    }
+    if (normalized === "CANCELLED" || normalized === "INACTIVE") {
+      return "plan-summary-status plan-summary-status-error";
+    }
+    return "plan-summary-status";
+  };
+
+  const statusPillClass = getStatusPillClass(bot.status);
+
   return (
     <div>
+      {/* HEADER / HERO */}
       <div className="page-header">
-        <div>
-          <h1>{bot.name}</h1>
-          <p className="muted">
-            Slug: <code>{bot.slug}</code> · Status:{" "}
-            <strong>{bot.status}</strong>
-          </p>
+        <div className="bot-header">
+          <div className="bot-avatar">
+            {bot.name.charAt(0).toUpperCase()}
+          </div>
+          <div>
+            <h1 className="bot-title">{bot.name}</h1>
+            <p className="muted">
+              Slug: <code>{bot.slug}</code>
+            </p>
+          </div>
         </div>
         <div className="page-header-actions">
+          <span className={statusPillClass}>{bot.status}</span>
           <Link
             to={`/demo/${bot.slug}`}
             className="btn-secondary"
@@ -239,21 +238,25 @@ const BotDetailPage: React.FC = () => {
             Open demo
           </Link>
           {!isActive && (
-            <button
-              className="btn-primary"
-              onClick={handleCheckout}
-              disabled={checkoutLoading}
-            >
-              {checkoutLoading ? "Redirecting..." : "Activate & Pay"}
-            </button>
+            <Link to={`/app/bots/${bot.id}/plan`} className="btn-primary">
+              Activate &amp; Pay
+            </Link>
+          )}
+          {isActive && (
+            <Link to={`/app/bots/${bot.id}/plan`} className="btn-primary">
+              View plan &amp; billing
+            </Link>
           )}
         </div>
       </div>
 
       <div className="detail-layout">
-        {/* LEFT: Bot basics + overview */}
+        {/* LEFT: Bot basics + health overview */}
         <section className="detail-main">
           <h2>Bot basics</h2>
+          <p className="muted" style={{ marginTop: "0.25rem" }}>
+            High-level description and core behavior for this assistant.
+          </p>
           <form className="form" onSubmit={handleSave}>
             {error && <div className="form-error">{error}</div>}
             {success && <div className="form-success">{success}</div>}
@@ -264,54 +267,46 @@ const BotDetailPage: React.FC = () => {
                 value={form.description}
                 onChange={handleChange("description")}
                 rows={2}
+                placeholder="Short description of what this bot does..."
               />
             </label>
 
             <label className="form-field">
-              <span>System prompt</span>
+              <span>System prompt (advanced behavior)</span>
               <textarea
                 value={form.systemPrompt}
                 onChange={handleChange("systemPrompt")}
-                rows={4}
+                rows={5}
+                placeholder="Internal instructions the AI must always follow..."
               />
+              <span style={{ fontSize: "0.8rem", marginTop: "0.1rem" }}>
+                This is not shown to end users. Use it to define tone, boundaries
+                and special rules for the bot.
+              </span>
             </label>
-            {/*
-            <label className="form-field">
-              <span>Domain</span>
-              <input
-                type="text"
-                value={form.domain}
-                onChange={handleChange("domain")}
-                placeholder="https://example.com"
-              />
-            </label>
-            */}
+
             <button className="btn-primary" type="submit" disabled={saving}>
               {saving ? "Saving..." : "Save basics"}
             </button>
           </form>
 
-          {/* OVERVIEW just under Bot basics */}
-          <h2 style={{ marginTop: "2rem" }}>Overview</h2>
+          {/* HEALTH OVERVIEW */}
+          <h2 style={{ marginTop: "2rem" }}>Health overview</h2>
           <div className="status-overview">
             {/* Bot status */}
             <div className="status-row">
               <div className="status-row-header">
                 <span className="status-label">Bot status</span>
-                <span
-                  className={
-                    bot.status === "ACTIVE"
-                      ? badgeClass("ok")
-                      : badgeClass("warn")
-                  }
-                >
+                <span className={badgeClass(getBotStatusBadgeKind(bot.status))}>
                   {bot.status}
                 </span>
               </div>
               <p className="muted">
                 {bot.status === "ACTIVE"
                   ? "This bot is active and ready to handle conversations."
-                  : "This bot is not active yet. You can activate it from the billing flow."}
+                  : bot.status === "DRAFT"
+                  ? "This bot is not active yet. You can activate it from the billing flow."
+                  : "This bot is currently not active. Check your plan & billing or contact support if this is unexpected."}
               </p>
             </div>
 
@@ -428,71 +423,75 @@ const BotDetailPage: React.FC = () => {
           </div>
         </section>
 
-        {/* RIGHT: navigation + subscription breakdown */}
+        {/* RIGHT: navigation as main card */}
         <section className="detail-side">
-          <h2>Navigation</h2>
-          <ul className="link-list">
+          <h2>Bot workspace</h2>
+          <p className="muted" style={{ marginTop: "0.25rem" }}>
+            Jump to configuration and monitoring areas for this bot.
+          </p>
+
+          <ul className="bot-nav-list">
             <li>
-              <Link to={`/app/bots/${bot.id}/features`}>
-                Features &amp; Plan
+              <Link
+                to={`/app/bots/${bot.id}/features`}
+                className="bot-nav-item"
+              >
+                <div className="bot-nav-item-main">
+                  <span className="bot-nav-item-title">
+                    Features &amp; Plan
+                  </span>
+                  <span className="bot-nav-item-description">
+                    Enable channels, crawlers and choose the usage plan.
+                  </span>
+                </div>
+                <span className="bot-nav-item-arrow">→</span>
               </Link>
             </li>
             <li>
-              <Link to={`/app/bots/${bot.id}/knowledge`}>
-                Content &amp; Knowledge
+              <Link
+                to={`/app/bots/${bot.id}/knowledge`}
+                className="bot-nav-item"
+              >
+                <div className="bot-nav-item-main">
+                  <span className="bot-nav-item-title">
+                    Content &amp; Knowledge
+                  </span>
+                  <span className="bot-nav-item-description">
+                    Upload documents and configure how the bot learns.
+                  </span>
+                </div>
+                <span className="bot-nav-item-arrow">→</span>
               </Link>
             </li>
             <li>
-              <Link to={`/app/bots/${bot.id}/channels`}>Channels</Link>
+              <Link
+                to={`/app/bots/${bot.id}/channels`}
+                className="bot-nav-item"
+              >
+                <div className="bot-nav-item-main">
+                  <span className="bot-nav-item-title">Channels</span>
+                  <span className="bot-nav-item-description">
+                    Connect WhatsApp, website, Facebook and Instagram.
+                  </span>
+                </div>
+                <span className="bot-nav-item-arrow">→</span>
+              </Link>
             </li>
             <li>
-              <Link to={`/app/bots/${bot.id}/conversations`}>
-                Conversations
+              <Link
+                to={`/app/bots/${bot.id}/conversations`}
+                className="bot-nav-item"
+              >
+                <div className="bot-nav-item-main">
+                  <span className="bot-nav-item-title">Conversations</span>
+                  <span className="bot-nav-item-description">
+                    Review user chats and debug bot behavior.
+                  </span>
+                </div>
+                <span className="bot-nav-item-arrow">→</span>
               </Link>
             </li>
           </ul>
-
-          <h3 style={{ marginTop: "2rem" }}>Subscription</h3>
-          <p>
-            Current status: <strong>{bot.status}</strong>
-          </p>
-          {!isActive && (
-            <p className="muted">
-              Activate this bot to start billing and use it in production.
-            </p>
-          )}
-          {isActive && (
-            <p className="form-success" style={{ marginTop: "0.25rem" }}>
-              Active via Stripe subscription.
-            </p>
-          )}
-
-          <h4 style={{ marginTop: "1rem" }}>Current plan</h4>
-          {pricingError && (
-            <p className="form-error">{pricingError}</p>
-          )}
-          {pricing ? (
-            <>
-              <ul className="link-list">
-                {pricing.lineItems.map((li) => (
-                  <li key={li.code}>
-                    <span>{li.label}</span>
-                    <span>
-                      {li.monthlyAmountFormatted}
-                      /month
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              <div style={{ marginTop: "0.5rem" }}>
-                <span>Total base price: </span>
-                <strong>{pricing.totalAmountFormatted}</strong>
-                <span className="muted"> per month (VAT/tax added by Stripe)</span>
-              </div>
-            </>
-          ) : (
-            <p className="muted">Loading current pricing…</p>
-          )}
         </section>
       </div>
     </div>

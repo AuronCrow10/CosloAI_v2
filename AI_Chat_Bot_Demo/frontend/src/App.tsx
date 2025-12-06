@@ -22,9 +22,12 @@ import ConversationDetailPage from "./pages/app/ConversationDetailsPage";
 import BotKnowledgePage from "./pages/app/BotKnowledgePage";
 import BotFeaturesPage from "./pages/app/BotFeaturesPage";
 import TermsPage from "./pages/TermsPage";
+import BillingPage from "./pages/app/BillingPage";
 
+import WidgetBotPage from "./pages/WidgetBotPage";
 
-import WidgetBotPage from "./pages/WidgetBotPage"; // in alto
+// NEW
+import BotPlanPage from "./pages/app/BotPlanPage";
 
 const App: React.FC = () => {
   return (
@@ -38,11 +41,10 @@ const App: React.FC = () => {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/verify-email" element={<VerifyEmailPage />} />
-          {/* Demo route must remain exactly the same */}
           <Route path="/demo/:slug" element={<DemoBotPage />} />
         </Route>
 
-         <Route path="/widget/:slug" element={<WidgetBotPage />} />
+        <Route path="/widget/:slug" element={<WidgetBotPage />} />
 
         {/* Authenticated app layout */}
         <Route
@@ -60,6 +62,11 @@ const App: React.FC = () => {
           <Route path="bots/:id/conversations" element={<BotConversationsPage />} />
           <Route path="bots/:id/knowledge" element={<BotKnowledgePage />} />
           <Route path="bots/:id/features" element={<BotFeaturesPage />} />
+          {/* NEW: step 2 - plan selection & payment */}
+          <Route path="bots/:id/plan" element={<BotPlanPage />} />
+
+          {/* NEW */}
+          <Route path="billing" element={<BillingPage />} />
         </Route>
 
         {/* Conversations top-level route for details */}
@@ -84,7 +91,9 @@ const App: React.FC = () => {
 const NotFound: React.FC = () => (
   <div className="page-container">
     <h2>Page not found</h2>
-    <p>Check the URL or go back to the <a href="/">home page</a>.</p>
+    <p>
+      Check the URL or go back to the <a href="/">home page</a>.
+    </p>
   </div>
 );
 

@@ -81,9 +81,9 @@ const BotKnowledgePage: React.FC = () => {
     try {
       const resp = await crawlBotDomain(id, domain.trim());
       setSuccess(
-        `Domain crawl started/completed for ${resp.domain}. Knowledge client: ${resp.knowledgeClientId}`
+        `Domain crawl started/completed for ${resp.domain}. The knowledge base will be refreshed shortly.`
       );
-      // Refresh bot to get updated knowledgeClientId
+      // Refresh bot to get updated knowledgeClientId, even if we don't display it here
       const refreshed = await getBotById(id);
       setBot(refreshed);
     } catch (err: any) {
@@ -188,155 +188,188 @@ const BotKnowledgePage: React.FC = () => {
       {error && <div className="form-error">{error}</div>}
       {success && <div className="form-success">{success}</div>}
 
-      <div className="detail-layout">
-        <section className="detail-main">
-          <h2>Knowledge settings</h2>
+      {/* Single full-width card instead of detail-layout with right side */}
+      {/*  <section className="detail-main knowledge-main">
+        <h2>Knowledge settings</h2>*/}
 
-          {/* If bot is NOT active → lock the whole section and show a status card only */}
-          {!isActive ? (
-            <div className="status-overview" style={{ marginTop: "0.75rem" }}>
-              <div className="status-row">
-                <div className="status-row-header">
-                  <span className="status-label">Knowledge status</span>
-                  <span className="status-badge status-badge-warn">
-                    Locked
-                  </span>
-                </div>
-                <p className="muted">
-                  This bot is currently <strong>{bot.status}</strong>. Activate it in{" "}
-                  <Link to={`/app/bots/${bot.id}/features`}>
-                    Features &amp; Plan
-                  </Link>{" "}
-                  before crawling your site or uploading documents.
-                </p>
+        {/* If bot is NOT active → lock everything */}
+        {!isActive ? (
+          <div className="status-overview" style={{ marginTop: "0.75rem" }}>
+            <div className="status-row">
+              <div className="status-row-header">
+                <span className="status-label">Knowledge status</span>
+                <span className="status-badge status-badge-warn">Locked</span>
               </div>
+              <p className="muted">
+                This bot is currently <strong>{bot.status}</strong>. Activate it in{" "}
+                <Link to={`/app/bots/${bot.id}/features`}>
+                  Features &amp; Plan
+                </Link>{" "}
+                before crawling your site or uploading documents.
+              </p>
             </div>
-          ) : (
-            <>
-              {/* If active but no KB yet → same style status card as overview */}
-              {knowledgeMissing && (
-                <div
-                  className="status-overview"
-                  style={{ marginTop: "0.75rem", marginBottom: "0.75rem" }}
-                >
-                  <div className="status-row">
-                    <div className="status-row-header">
-                      <span className="status-label">Knowledge status</span>
-                      <span className="status-badge status-badge-warn">
-                        Missing
-                      </span>
-                    </div>
-                    <p className="muted">
-                      No knowledge base has been built yet. Crawl your domain or
-                      upload PDFs to give this bot real context.
+          </div>
+        ) : (
+          <>
+            {/* Active but no KB yet → status card */}
+            {knowledgeMissing && (
+              <div
+                className="status-overview"
+                style={{ marginTop: "0.75rem", marginBottom: "0.75rem" }}
+              >
+                <div className="status-row">
+                  <div className="status-row-header">
+                    <span className="status-label">Knowledge status</span>
+                    <span className="status-badge status-badge-warn">
+                      Missing
+                    </span>
+                  </div>
+                  <p className="muted">
+                    No knowledge base has been built yet. Crawl your domain or
+                    upload PDFs to give this bot real context.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Two main cards: Domain knowledge + Documents */}
+            <div className="knowledge-cards">
+              {/* Domain card */}
+              <section className="knowledge-card">
+                <div className="knowledge-card-header">
+                  <div>
+                    <h3 className="knowledge-card-title">Domain knowledge</h3>
+                    <p className="knowledge-card-description">
+                      Configure the website to crawl and refine how the bot
+                      should use it in answers.
                     </p>
                   </div>
-                </div>
-              )}
-
-              {/* Settings form */}
-              <form className="form" onSubmit={handleSaveSettings}>
-                <label className="form-field">
-                  <span>Domain</span>
-                  <input
-                    type="text"
-                    value={domain}
-                    onChange={(e) => setDomain(e.target.value)}
-                    placeholder="https://example.com"
-                  />
-                  <small>
-                    This domain is used when crawling your site and for RAG search
-                    context.
-                  </small>
-                </label>
-                <label className="form-field">
-                  <span>System prompt</span>
-                  <textarea
-                    value={systemPrompt}
-                    onChange={(e) => setSystemPrompt(e.target.value)}
-                    rows={4}
-                  />
-                </label>
-                <button className="btn-primary" type="submit" disabled={saving}>
-                  {saving ? "Saving..." : "Save settings"}
-                </button>
-              </form>
-
-              <hr />
-
-              {/* Domain crawler */}
-              <h2>Domain crawler</h2>
-              {!bot.useDomainCrawler && (
-                <p className="muted">
-                  Domain crawler is disabled for this bot. Enable it in{" "}
-                  <Link to={`/app/bots/${bot.id}/features`}>
-                    Features &amp; Plan
-                  </Link>{" "}
-                  if you want to crawl your website.
-                </p>
-              )}
-              {bot.useDomainCrawler && (
-                <>
-                  <p className="muted">
-                    We&apos;ll crawl the configured domain and index the content as
-                    knowledge for this bot.
-                  </p>
-                  <button
-                    className="btn-secondary"
-                    type="button"
-                    onClick={handleCrawlDomain}
-                    disabled={crawlLoading}
+                  <span
+                    className={
+                      bot.useDomainCrawler
+                        ? "status-badge status-badge-ok"
+                        : "status-badge status-badge-warn"
+                    }
                   >
-                    {crawlLoading ? "Crawling..." : "Crawl domain now"}
-                  </button>
-                </>
-              )}
-
-              <hr />
-
-              {/* Upload docs */}
-              <h2>Upload documents (PDFs)</h2>
-              {!bot.usePdfCrawler && (
-                <p className="muted">
-                  PDF ingestion is disabled for this bot. Enable it in{" "}
-                  <Link to={`/app/bots/${bot.id}/features`}>
-                    Features &amp; Plan
-                  </Link>{" "}
-                  if you want to upload docs.
-                </p>
-              )}
-              {bot.usePdfCrawler && (
-                <div className="form-field">
-                  <span>Upload one or more files</span>
-                  <input
-                    type="file"
-                    accept=".pdf,.doc,.docx,.txt"
-                    multiple
-                    onChange={handleUploadDocs}
-                    disabled={uploadLoading}
-                  />
-                  {uploadLoading && <p>Uploading...</p>}
+                    {bot.useDomainCrawler ? "Feature enabled" : "Feature disabled"}
+                  </span>
                 </div>
-              )}
-            </>
-          )}
-        </section>
 
-        <section className="detail-side">
-          <h2>Status</h2>
-          <p>
-            Knowledge client:{" "}
-            {bot.knowledgeClientId ? (
-              <code>{bot.knowledgeClientId}</code>
-            ) : (
-              <span className="muted">not created yet</span>
-            )}
-          </p>
-          <p>
-            Bot status: <strong>{bot.status}</strong>
-          </p>
-        </section>
-      </div>
+                <form className="form" onSubmit={handleSaveSettings}>
+                  <label className="form-field">
+                    <span>Domain</span>
+                    <input
+                      type="text"
+                      value={domain}
+                      onChange={(e) => setDomain(e.target.value)}
+                      placeholder="https://example.com"
+                    />
+                    <span className="knowledge-card-muted-note">
+                      This domain is used when crawling your site and as context
+                      for knowledge search.
+                    </span>
+                  </label>
+
+                  <label className="form-field">
+                    <span>System prompt (for knowledge usage)</span>
+                    <textarea
+                      value={systemPrompt}
+                      onChange={(e) => setSystemPrompt(e.target.value)}
+                      rows={4}
+                      placeholder="Explain how the bot should use website / document knowledge in its answers..."
+                    />
+                  </label>
+
+                  <div className="knowledge-card-actions">
+                    <button
+                      className="btn-primary"
+                      type="submit"
+                      disabled={saving}
+                    >
+                      {saving ? "Saving..." : "Save knowledge settings"}
+                    </button>
+
+                    <button
+                      className="btn-secondary"
+                      type="button"
+                      onClick={handleCrawlDomain}
+                      disabled={crawlLoading || !bot.useDomainCrawler}
+                    >
+                      {crawlLoading ? "Crawling..." : "Crawl domain now"}
+                    </button>
+                  </div>
+
+                  {!bot.useDomainCrawler && (
+                    <p className="knowledge-card-muted-note">
+                      Domain crawler is disabled for this bot. Enable it in{" "}
+                      <Link to={`/app/bots/${bot.id}/features`}>
+                        Features &amp; Plan
+                      </Link>{" "}
+                      to crawl your website.
+                    </p>
+                  )}
+                </form>
+              </section>
+
+              {/* Documents card */}
+              <section className="knowledge-card">
+                <div className="knowledge-card-header">
+                  <div>
+                    <h3 className="knowledge-card-title">
+                      Documents &amp; PDFs
+                    </h3>
+                    <p className="knowledge-card-description">
+                      Upload PDFs and other documents to enrich the bot&apos;s
+                      knowledge with manuals, FAQs or product sheets.
+                    </p>
+                  </div>
+                  <span
+                    className={
+                      bot.usePdfCrawler
+                        ? "status-badge status-badge-ok"
+                        : "status-badge status-badge-warn"
+                    }
+                  >
+                    {bot.usePdfCrawler ? "Feature enabled" : "Feature disabled"}
+                  </span>
+                </div>
+
+                {!bot.usePdfCrawler && (
+                  <p className="knowledge-card-muted-note">
+                    PDF ingestion is disabled for this bot. Enable it in{" "}
+                    <Link to={`/app/bots/${bot.id}/features`}>
+                      Features &amp; Plan
+                    </Link>{" "}
+                    to upload documents.
+                  </p>
+                )}
+
+                {bot.usePdfCrawler && (
+                  <div className="form-field">
+                    <span>Upload one or more files</span>
+                    <input
+                      type="file"
+                      accept=".pdf,.doc,.docx,.txt"
+                      multiple
+                      onChange={handleUploadDocs}
+                      disabled={uploadLoading}
+                    />
+                    {uploadLoading && (
+                      <span className="knowledge-card-muted-note">
+                        Uploading and ingesting documents…
+                      </span>
+                    )}
+                    <span className="knowledge-card-muted-note">
+                      Supported formats: PDF, DOC, DOCX, TXT.
+                    </span>
+                  </div>
+                )}
+              </section>
+            </div>
+          </>
+        )}
+       {/*} 
+      </section>*/}
     </div>
   );
 };

@@ -23,13 +23,25 @@ export async function searchClientContent(params: {
 
   const model = client.embeddingModel;
 
-  const [queryEmbedding] = await embeddings.embedBatch([query], model);
+  const { vectors, usage } = await embeddings.embedBatch([query], model);
+  const [queryEmbedding] = vectors;
+
+  // Track OpenAI token usage per client for searches
+  if (usage && usage.totalTokens > 0) {
+    await db.recordUsage({
+      clientId: client.id,
+      model,
+      operation: 'embeddings_search',
+      promptTokens: usage.promptTokens,
+      totalTokens: usage.totalTokens,
+    });
+  }
 
   const results = await db.searchClientChunks({
     clientId: client.id,
     model,
     queryEmbedding,
-    //domain: options?.domain,
+    domain: options?.domain,
     limit: options?.limit ?? 10,
   });
 

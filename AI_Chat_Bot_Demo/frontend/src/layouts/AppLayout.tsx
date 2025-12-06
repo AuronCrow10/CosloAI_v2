@@ -21,14 +21,20 @@ const AppLayout: React.FC = () => {
         <div className="app-sidebar-header">
           <h2>Dashboard</h2>
         </div>
-        <nav className="app-sidebar-nav">
-          <Link
-            to="/app/bots"
-            className={isActive("/app/bots") ? "active" : undefined}
-          >
-            Bots
-          </Link>
-        </nav>
+<nav className="app-sidebar-nav">
+  <Link
+    to="/app/bots"
+    className={isActive("/app/bots") ? "active" : undefined}
+  >
+    Bots
+  </Link>
+  <Link
+    to="/app/billing"
+    className={isActive("/app/billing") ? "active" : undefined}
+  >
+    Billing
+  </Link>
+</nav>
       </aside>
       <div className="app-main">
         <header className="app-main-header">

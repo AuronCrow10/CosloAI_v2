@@ -21,7 +21,9 @@ model User {
   refreshTokens    RefreshToken[]
   emailTokens      EmailVerificationToken[]
   metaSessions     MetaConnectSession[]
-  whatsappSessions WhatsappConnectSession[]  // NEW
+  whatsappSessions WhatsappConnectSession[]
+
+  openaiUsages     OpenAIUsage[]
 }
 
 enum UserRole {
@@ -58,7 +60,9 @@ model Bot {
   conversations    Conversation[]
   payments         Payment[]
   metaSessions     MetaConnectSession[]
-  whatsappSessions WhatsappConnectSession[]  // NEW
+  whatsappSessions WhatsappConnectSession[]
+
+  openaiUsages     OpenAIUsage[]
 }
 
 enum BotStatus {
@@ -104,6 +108,10 @@ model Subscription {
   planSnapshotJson     Json?
   createdAt            DateTime             @default(now())
   updatedAt            DateTime             @updatedAt
+
+  // selected usage plan for this bot
+  usagePlanId          String?
+  usagePlan            UsagePlan?           @relation(fields: [usagePlanId], references: [id])
 }
 
 enum SubscriptionStatus {
@@ -172,11 +180,11 @@ model EmailVerificationToken {
 }
 
 //
-// DB-driven feature pricing
+// DB-driven feature pricing (LEGACY – still there, but we’ll move to plans)
 //
 model FeaturePrice {
   id                 String   @id @default(uuid())
-  code               String   @unique  // e.g. "DOMAIN_CRAWLER", "PDF_CRAWLER", "CHANNEL_WEB", "WHATSAPP", "INSTAGRAM", "CALENDAR"
+  code               String   @unique  // e.g. "DOMAIN_CRAWLER", "PDF_CRAWLER", etc.
   label              String
   monthlyAmountCents Int
   currency           String
@@ -185,6 +193,32 @@ model FeaturePrice {
 
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+//
+// Usage-based plan definition (per bot)
+//
+model UsagePlan {
+  id           String   @id @default(uuid())
+  code         String   @unique   // e.g. "STARTER", "GROWTH", "SCALE", "CUSTOM"
+  name         String
+  description  String?
+
+  // Token limit per month (for all operations combined).
+  // Null = no limit (or “unlimited”).
+  monthlyTokens Int?
+
+  // Billing info
+  monthlyAmountCents Int
+  currency           String
+  stripePriceId      String?  // Stripe recurring price ID for this plan
+
+  isActive           Boolean  @default(true)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  subscriptions      Subscription[]
 }
 
 //
@@ -216,17 +250,14 @@ model Payment {
   updatedAt             DateTime @updatedAt
 }
 
-//
-// Meta connect sessions for OAuth -> page selection
-//
 model MetaConnectSession {
   id                 String      @id @default(uuid())
   botId              String
   bot                Bot         @relation(fields: [botId], references: [id])
   userId             String
   user               User        @relation(fields: [userId], references: [id])
-  channelType        ChannelType // FACEBOOK or INSTAGRAM
-  pagesJson          Json        // list returned by /me/accounts
+  channelType        ChannelType
+  pagesJson          Json
   longLivedUserToken String
   createdAt          DateTime    @default(now())
 
@@ -235,9 +266,6 @@ model MetaConnectSession {
   @@index([createdAt])
 }
 
-//
-// NEW: WhatsApp embedded signup sessions
-//
 model WhatsappConnectSession {
   id               String   @id @default(uuid())
   botId            String
@@ -245,11 +273,31 @@ model WhatsappConnectSession {
   userId           String
   user             User     @relation(fields: [userId], references: [id])
   wabaId           String
-  phoneNumbersJson Json     // list returned by /<wabaId>/phone_numbers
-  waAccessToken    String   // access token from embedded signup
+  phoneNumbersJson Json
+  waAccessToken    String
   createdAt        DateTime @default(now())
 
   @@index([botId])
   @@index([userId])
   @@index([createdAt])
+}
+
+model OpenAIUsage {
+  id               String   @id @default(uuid())
+  userId           String?
+  user             User?    @relation(fields: [userId], references: [id])
+  botId            String?
+  bot              Bot?     @relation(fields: [botId], references: [id])
+
+  model            String
+  operation        String
+
+  promptTokens     Int
+  completionTokens Int
+  totalTokens      Int
+
+  createdAt        DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([botId, createdAt])
 }

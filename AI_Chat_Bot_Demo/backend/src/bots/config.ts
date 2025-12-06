@@ -13,7 +13,6 @@ export type BookingConfig =
     };
 
 // Channels config
-
 export type WebChannelConfig = {
   enabled: boolean;
 };
@@ -48,6 +47,10 @@ export type DemoBotConfig = {
   booking?: BookingConfig;
   channels?: BotChannels;
   description?: string;
+
+  // NEW: for usage attribution
+  ownerUserId?: string | null;
+  botId?: string | null;
 };
 
 // --- HARDCODED DEMO BOTS (fallback) ---
@@ -76,13 +79,12 @@ const DEMO_BOTS: DemoBotConfig[] = [
       },
       facebook: {
         pageId: "843684242170165"
-        // pageAccessToken: "...optional, else use global META_PAGE_ACCESS_TOKEN"
       },
       instagram: {
         igBusinessId: "17841401887023191"
-        // pageAccessToken: "...optional"
       }
     }
+    // ownerUserId / botId are undefined for static demo bots
   }
   // ... other static demo bots if you want ...
 ];
@@ -145,13 +147,19 @@ function mapDbBotToDemoConfig(
     systemPrompt: dbBot.systemPrompt,
     description: dbBot.description || undefined,
     booking: buildBookingFromDb(dbBot),
-    channels: buildChannelsFromDb(dbBot)
+    channels: buildChannelsFromDb(dbBot),
+
+    // NEW: link back to DB entities for usage tracking
+    ownerUserId: dbBot.userId,
+    botId: dbBot.id
   };
 }
 
 // --- PUBLIC API ---
 
-export async function getBotConfigBySlug(slug: string): Promise<DemoBotConfig | null> {
+export async function getBotConfigBySlug(
+  slug: string
+): Promise<DemoBotConfig | null> {
   // 1) DB first
   const dbBot = await prisma.bot.findUnique({
     where: { slug },
@@ -167,14 +175,16 @@ export async function getBotConfigBySlug(slug: string): Promise<DemoBotConfig | 
   return fallback;
 }
 
-export type PublicBotConfig = Pick<DemoBotConfig, "slug" | "name" | "description">;
+export type PublicBotConfig = Pick<
+  DemoBotConfig,
+  "slug" | "name" | "description"
+>;
 
 // Inverse lookups DB-first, then fallback to static DEMO_BOTS
 
 export async function getBotSlugByFacebookPageId(
   pageId: string
 ): Promise<string | null> {
-  // 1) DB: BotChannel where type=FACEBOOK && externalId = pageId
   const channel = await prisma.botChannel.findFirst({
     where: {
       type: "FACEBOOK",
@@ -187,9 +197,9 @@ export async function getBotSlugByFacebookPageId(
     return channel.bot.slug;
   }
 
-  // 2) Fallback static
   const bot = DEMO_BOTS.find(
-    (b) => b.channels?.facebook && b.channels.facebook.pageId === pageId
+    (b) =>
+      b.channels?.facebook && b.channels.facebook.pageId === pageId
   );
   return bot ? bot.slug : null;
 }
@@ -197,7 +207,6 @@ export async function getBotSlugByFacebookPageId(
 export async function getBotSlugByInstagramBusinessId(
   igBusinessId: string
 ): Promise<string | null> {
-  // 1) DB: BotChannel where type=INSTAGRAM && externalId = igBusinessId
   const channel = await prisma.botChannel.findFirst({
     where: {
       type: "INSTAGRAM",
@@ -210,9 +219,10 @@ export async function getBotSlugByInstagramBusinessId(
     return channel.bot.slug;
   }
 
-  // 2) Fallback static
   const bot = DEMO_BOTS.find(
-    (b) => b.channels?.instagram && b.channels.instagram.igBusinessId === igBusinessId
+    (b) =>
+      b.channels?.instagram &&
+      b.channels.instagram.igBusinessId === igBusinessId
   );
   return bot ? bot.slug : null;
 }

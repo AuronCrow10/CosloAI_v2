@@ -1,3 +1,4 @@
+// services/billingService.ts
 import Stripe from "stripe";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
@@ -81,6 +82,8 @@ function getEnabledFeatureCodes(bot: BotFeatureFlags): FeatureCode[] {
  *  - per-feature UI breakdown
  *  - Stripe line_items (one per feature)
  *  - total amount & currency
+ *
+ * NOTE: this is *only* features price. UsagePlan price is added separately.
  */
 export async function computeBotPricingForBot(
   bot: BotFeatureFlags
@@ -192,7 +195,6 @@ computeBotPricingForBot(exampleBot) =>
   totalAmountCents = sum of DOMAIN_CRAWLER + CHANNEL_WEB + WHATSAPP prices.
 */
 
-
 type BotWithSubscription = {
   id: string;
   userId: string;
@@ -212,22 +214,21 @@ type BotWithSubscription = {
 /**
  * Sync Stripe subscription prices with the bot's current feature flags.
  *
- * - Usa computeBotPricingForBot come SSoT.
- * - Usa proration_behavior: "create_prorations" => Stripe calcola
- *   automaticamente addebiti/crediti per il periodo rimanente.
+ * - Uses computeBotPricingForBot as SSoT for *feature* prices.
+ * - Uses proration_behavior: "create_prorations".
  *
- * NOTA "no refunds":
- *  Non chiamiamo MAI stripe.refunds.create.
- *  Eventuali crediti da downgrade rimangono come credito Stripe
- *  e verranno usati per le prossime fatture, non rimborsati sulla carta.
+ * IMPORTANT with plans:
+ *  We keep the UsagePlan Stripe price item untouched and only
+ *  add/remove feature price items.
  */
 export async function updateBotSubscriptionForFeatureChange(
   bot: BotWithSubscription,
   prorationBehavior: Stripe.SubscriptionUpdateParams.ProrationBehavior = "create_prorations"
 ) {
   if (!stripe) return;
-  if (!bot.subscription) return; // nessuna subscription da aggiornare
+  if (!bot.subscription) return; // no subscription to update
 
+  // Compute desired feature prices
   const pricing = await computeBotPricingForBot({
     useDomainCrawler: bot.useDomainCrawler,
     usePdfCrawler: bot.usePdfCrawler,
@@ -240,29 +241,48 @@ export async function updateBotSubscriptionForFeatureChange(
 
   const stripeSubId = bot.subscription.stripeSubscriptionId;
 
+  // Load Stripe subscription items
   const stripeSub = await stripe.subscriptions.retrieve(stripeSubId, {
     expand: ["items.data.price"]
   });
 
   const existingItems = stripeSub.items.data;
 
-  // Nuovi priceId desiderati (uno per feature)
-  const newPriceIds = pricing.lineItemsForStripe.map((li) => li.price);
-  const newPriceSet = new Set(newPriceIds);
+  // Load plan info (if any) from our DB to know the plan priceId
+  const dbSub = await prisma.subscription.findUnique({
+    where: { id: bot.subscription.id },
+    include: { usagePlan: true }
+  });
+
+  const planPriceId: string | null =
+    dbSub?.usagePlan?.stripePriceId ?? null;
+
+  const featurePriceIds = pricing.lineItemsForStripe.map((li) => li.price);
+  const featurePriceIdSet = new Set(featurePriceIds);
 
   const items: Stripe.SubscriptionUpdateParams.Item[] = [];
 
-  // 1) Mantieni / rimuovi gli item esistenti
+  // 1) Keep / remove existing *feature* items, but preserve the plan item
   for (const item of existingItems) {
     const priceId = item.price.id;
-    if (newPriceSet.has(priceId)) {
+
+    // Plan item: keep as-is (we don't manage it here)
+    if (planPriceId && priceId === planPriceId) {
+      items.push({
+        id: item.id,
+        quantity: item.quantity ?? 1 // keep current qty (usually 1)
+      });
+      continue;
+    }
+
+    // Feature item: keep if still desired, else delete
+    if (featurePriceIdSet.has(priceId)) {
       items.push({
         id: item.id,
         price: priceId,
         quantity: 1
       });
     } else {
-      // feature rimossa -> elimina l'item
       items.push({
         id: item.id,
         deleted: true
@@ -270,10 +290,15 @@ export async function updateBotSubscriptionForFeatureChange(
     }
   }
 
-  // 2) Aggiungi item per priceId nuovi
-  const existingPriceSet = new Set(existingItems.map((i) => i.price.id));
-  for (const priceId of newPriceIds) {
-    if (!existingPriceSet.has(priceId)) {
+  // 2) Add new feature price items not present yet
+  const existingFeaturePriceSet = new Set(
+    existingItems
+      .map((i) => i.price.id)
+      .filter((pid) => !planPriceId || pid !== planPriceId)
+  );
+
+  for (const priceId of featurePriceIds) {
+    if (!existingFeaturePriceSet.has(priceId)) {
       items.push({
         price: priceId,
         quantity: 1
@@ -281,16 +306,14 @@ export async function updateBotSubscriptionForFeatureChange(
     }
   }
 
-  // 3) Aggiorna la subscription su Stripe con proration
+  // 3) Update subscription on Stripe with proration
   const updatedStripeSub = await stripe.subscriptions.update(stripeSubId, {
     items,
     proration_behavior: prorationBehavior,
-    // metadata di comodo
     metadata: {
       botId: bot.id,
       userId: String(bot.userId)
     }
-    // NOTA: non settiamo payment_behavior => default Stripe, niente refund automatico.
   });
 
   const primaryItem = updatedStripeSub.items.data[0];
@@ -298,7 +321,8 @@ export async function updateBotSubscriptionForFeatureChange(
 
   const compactPlanSnapshot = {
     f: pricing.featureCodes,
-    t: pricing.totalAmountCents,
+    fp: pricing.totalAmountCents,
+    // plan info is stored separately on Subscription via usagePlanId
     c: currency
   };
 

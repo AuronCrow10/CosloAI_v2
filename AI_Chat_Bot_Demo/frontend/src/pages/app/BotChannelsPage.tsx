@@ -414,21 +414,37 @@ const BotChannelsPage: React.FC = () => {
     );
   };
 
-  const renderChannelStatusBadge = (ch: BotChannel) => {
+const getChannelStatusInfo = (
+    ch: BotChannel | null
+  ): { label: string; className: string; isConnected: boolean } => {
+    if (!ch) {
+      return {
+        label: "Not connected",
+        className: "status-badge status-badge-warn",
+        isConnected: false
+      };
+    }
+
     const meta = (ch.meta as any) || {};
 
+    // Non-Meta channels (WEB, WHATSAPP via embedded, etc.)
     if (!isMetaChannelType(ch.type)) {
       const needsReconnect = meta.needsReconnect === true;
       if (needsReconnect) {
-        return (
-          <span className="status-badge status-badge-error">
-            Needs reconnect
-          </span>
-        );
+        return {
+          label: "Needs reconnect",
+          className: "status-badge status-badge-error",
+          isConnected: false
+        };
       }
-      return <span className="status-badge status-badge-ok">Active</span>;
+      return {
+        label: "Active",
+        className: "status-badge status-badge-ok",
+        isConnected: true
+      };
     }
 
+    // Meta channels (FACEBOOK / INSTAGRAM) with token expiry
     const now = Date.now();
     const needsReconnect = meta.needsReconnect === true;
     const tokenExpiresAtStr: string | undefined = meta.tokenExpiresAt;
@@ -441,30 +457,49 @@ const BotChannelsPage: React.FC = () => {
       }
     }
 
-    let label = "Connected";
-    let className = "status-badge status-badge-ok";
-
     if (needsReconnect) {
-      label = "Needs reconnect";
-      className = "status-badge status-badge-error";
-    } else if (!expiresAt) {
-      label = "Connected (expiry unknown)";
-      className = "status-badge status-badge-ok";
-    } else {
-      const diff = expiresAt.getTime() - now;
-
-      if (diff <= 0) {
-        label = "Expired";
-        className = "status-badge status-badge-error";
-      } else if (diff <= SEVEN_DAYS_MS) {
-        label = "Expiring soon";
-        className = "status-badge status-badge-warn";
-      } else {
-        label = "Connected";
-        className = "status-badge status-badge-ok";
-      }
+      return {
+        label: "Needs reconnect",
+        className: "status-badge status-badge-error",
+        isConnected: false
+      };
     }
 
+    if (!expiresAt) {
+      return {
+        label: "Connected (expiry unknown)",
+        className: "status-badge status-badge-ok",
+        isConnected: true
+      };
+    }
+
+    const diff = expiresAt.getTime() - now;
+
+    if (diff <= 0) {
+      return {
+        label: "Expired",
+        className: "status-badge status-badge-error",
+        isConnected: false
+      };
+    }
+
+    if (diff <= SEVEN_DAYS_MS) {
+      return {
+        label: "Expiring soon",
+        className: "status-badge status-badge-warn",
+        isConnected: false
+      };
+    }
+
+    return {
+      label: "Connected",
+      className: "status-badge status-badge-ok",
+      isConnected: true
+    };
+  };
+
+  const renderChannelStatusBadge = (ch: BotChannel | null) => {
+    const { label, className } = getChannelStatusInfo(ch);
     return <span className={className}>{label}</span>;
   };
 
@@ -604,64 +639,202 @@ const BotChannelsPage: React.FC = () => {
         </div>
       )}
 
-      {/* Meta + WhatsApp connect buttons */}
+{/* Meta + WhatsApp connect cards */}
       {!loading && (
-        <div style={{ marginBottom: "1.5rem" }}>
+        <section className="detail-main" style={{ marginBottom: "1.5rem" }}>
           <h2>Connect social channels</h2>
           <p className="muted">
             Use Meta login to connect your Facebook Page, Instagram Business
             account or WhatsApp Business number. We&apos;ll store the necessary
             tokens securely and keep your bot responding.
           </p>
-          <div className="form-actions-inline">
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={async () => {
-                try {
-                  const { url } = await getMetaConnectUrl(id, "FACEBOOK");
-                  window.location.href = url;
-                } catch (err: any) {
-                  console.error(err);
-                  setError(
-                    err.message || "Failed to start Facebook connection"
-                  );
-                }
-              }}
-            >
-              Connect Facebook Page
-            </button>
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={async () => {
-                try {
-                  const { url } = await getMetaConnectUrl(id, "INSTAGRAM");
-                  window.location.href = url;
-                } catch (err: any) {
-                  console.error(err);
-                  setError(
-                    err.message || "Failed to start Instagram connection"
-                  );
-                }
-              }}
-            >
-              Connect Instagram Business
-            </button>
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={handleConnectWhatsApp}
-              disabled={waConnecting}
-            >
-              {waConnecting ? "Connecting WhatsApp..." : "Connect WhatsApp"}
-            </button>
-          </div>
-        </div>
+
+          {(() => {
+            const facebookChannel =
+              channels.find((c) => c.type === "FACEBOOK") || null;
+            const instagramChannel =
+              channels.find((c) => c.type === "INSTAGRAM") || null;
+            const whatsappChannel =
+              channels.find((c) => c.type === "WHATSAPP") || null;
+
+            const fbStatus = getChannelStatusInfo(facebookChannel);
+            const igStatus = getChannelStatusInfo(instagramChannel);
+            const waStatus = getChannelStatusInfo(whatsappChannel);
+
+            const getWhatsappDisplay = () => {
+              if (!whatsappChannel) return null;
+              const meta = (whatsappChannel.meta as any) || {};
+              const displayPhoneNumber =
+                meta.displayPhoneNumber ||
+                meta.display_phone_number ||
+                whatsappChannel.externalId;
+              const verifiedName =
+                meta.verifiedName || meta.verified_name || "";
+              return (
+                <p className="channel-card-meta">
+                  Connected number: <strong>{displayPhoneNumber}</strong>
+                  {verifiedName ? ` – ${verifiedName}` : ""}
+                </p>
+              );
+            };
+
+            const getFacebookDisplay = () => {
+              if (!facebookChannel) return null;
+              const pageName =
+                (facebookChannel.meta as any)?.pageName || "Connected via Meta";
+              return (
+                <p className="channel-card-meta">
+                  Connected page: <strong>{pageName}</strong>
+                </p>
+              );
+            };
+
+            const getInstagramDisplay = () => {
+              if (!instagramChannel) return null;
+              const pageName =
+                (instagramChannel.meta as any)?.pageName ||
+                "Connected via Meta";
+              return (
+                <p className="channel-card-meta">
+                  Linked business account: <strong>{pageName}</strong>
+                </p>
+              );
+            };
+
+            return (
+              <div className="channel-cards">
+                {/* Facebook card */}
+                <article className="channel-card">
+                  <div className="channel-card-header">
+                    <div className="channel-card-main">
+                      <div className="channel-card-icon channel-card-icon-facebook">
+                        f
+                      </div>
+                      <div>
+                        <h3 className="channel-card-title">Facebook Page</h3>
+                        <p className="channel-card-description">
+                          Connect a Facebook Page so your bot can respond via
+                          Messenger.
+                        </p>
+                      </div>
+                    </div>
+                    {renderChannelStatusBadge(facebookChannel)}
+                  </div>
+                  {getFacebookDisplay()}
+                  {!fbStatus.isConnected && (
+                    <button
+                      type="button"
+                      className="btn-primary channel-card-button"
+                      onClick={async () => {
+                        try {
+                          const { url } = await getMetaConnectUrl(
+                            id,
+                            "FACEBOOK"
+                          );
+                          window.location.href = url;
+                        } catch (err: any) {
+                          console.error(err);
+                          setError(
+                            err.message || "Failed to start Facebook connection"
+                          );
+                        }
+                      }}
+                    >
+                      {facebookChannel ? "Reconnect Facebook" : "Connect Facebook"}
+                    </button>
+                  )}
+                </article>
+
+                {/* Instagram card */}
+                <article className="channel-card">
+                  <div className="channel-card-header">
+                    <div className="channel-card-main">
+                      <div className="channel-card-icon channel-card-icon-instagram">
+                        ig
+                      </div>
+                      <div>
+                        <h3 className="channel-card-title">
+                          Instagram Business
+                        </h3>
+                        <p className="channel-card-description">
+                          Connect an Instagram Business account to reply to DMs.
+                        </p>
+                      </div>
+                    </div>
+                    {renderChannelStatusBadge(instagramChannel)}
+                  </div>
+                  {getInstagramDisplay()}
+                  {!igStatus.isConnected && (
+                    <button
+                      type="button"
+                      className="btn-primary channel-card-button"
+                      onClick={async () => {
+                        try {
+                          const { url } = await getMetaConnectUrl(
+                            id,
+                            "INSTAGRAM"
+                          );
+                          window.location.href = url;
+                        } catch (err: any) {
+                          console.error(err);
+                          setError(
+                            err.message ||
+                              "Failed to start Instagram connection"
+                          );
+                        }
+                      }}
+                    >
+                      {instagramChannel
+                        ? "Reconnect Instagram"
+                        : "Connect Instagram"}
+                    </button>
+                  )}
+                </article>
+
+                {/* WhatsApp card */}
+                <article className="channel-card">
+                  <div className="channel-card-header">
+                    <div className="channel-card-main">
+                      <div className="channel-card-icon channel-card-icon-whatsapp">
+                        wa
+                      </div>
+                      <div>
+                        <h3 className="channel-card-title">
+                          WhatsApp Business
+                        </h3>
+                        <p className="channel-card-description">
+                          Connect a WhatsApp Business number using embedded
+                          signup.
+                        </p>
+                      </div>
+                    </div>
+                    {renderChannelStatusBadge(whatsappChannel)}
+                  </div>
+                  {getWhatsappDisplay()}
+                  {!waStatus.isConnected && (
+                    <button
+                      type="button"
+                      className="btn-primary channel-card-button"
+                      onClick={handleConnectWhatsApp}
+                      disabled={waConnecting}
+                    >
+                      {waConnecting
+                        ? "Connecting WhatsApp..."
+                        : whatsappChannel
+                        ? "Reconnect WhatsApp"
+                        : "Connect WhatsApp"}
+                    </button>
+                  )}
+                </article>
+              </div>
+            );
+          })()}
+        </section>
       )}
 
       {/* Existing channels list */}
       {loading && <p>Loading channels...</p>}
+      {/*
       {!loading && channels.length === 0 && <p>No channels configured yet.</p>}
       {!loading && channels.length > 0 && (
         <table className="table">
@@ -707,7 +880,9 @@ const BotChannelsPage: React.FC = () => {
 
       <hr className="section-separator" />
 
+      */}
       {/* Manual channel creation (non-Meta) */}
+      {/*
       {!creating && !editingId && (
         <button
           className="btn-primary"
@@ -837,7 +1012,7 @@ const BotChannelsPage: React.FC = () => {
             </button>
           </div>
         </form>
-      )}
+      )} */}
     </div>
   );
 };

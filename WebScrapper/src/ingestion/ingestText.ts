@@ -36,12 +36,7 @@ export async function ingestTextForClient(params: {
   const { text, url, domain, client, deps } = params;
   const { config, db, embeddings } = deps;
 
-  const chunks: TextChunk[] = chunkText(
-    text,
-    url,
-    domain,
-    config.chunking,
-  );
+  const chunks: TextChunk[] = chunkText(text, url, domain, config.chunking);
 
   if (chunks.length === 0) {
     logger.info(`No chunks produced for ${url}`);
@@ -52,7 +47,22 @@ export async function ingestTextForClient(params: {
 
   let vectors: number[][];
   try {
-    vectors = await embeddings.embedBatch(texts, client.embeddingModel);
+    const { vectors: v, usage } = await embeddings.embedBatch(
+      texts,
+      client.embeddingModel,
+    );
+    vectors = v;
+
+    // Track OpenAI token usage per client for ingestion (crawl/upload)
+    if (usage && usage.totalTokens > 0) {
+      await db.recordUsage({
+        clientId: client.id,
+        model: client.embeddingModel,
+        operation: 'embeddings_ingest',
+        promptTokens: usage.promptTokens,
+        totalTokens: usage.totalTokens,
+      });
+    }
   } catch (err) {
     logger.error(`Embedding failed for URL ${url}`, err);
     throw err;
@@ -65,11 +75,7 @@ export async function ingestTextForClient(params: {
     const row: ChunkWithEmbedding = { ...chunk, embedding };
 
     try {
-      await db.insertChunkForClient(
-        client.id,
-        client.embeddingModel,
-        row,
-      );
+      await db.insertChunkForClient(client.id, client.embeddingModel, row);
       // Note: this counts attempts, same as your previous "chunksStored" counter.
       stored += 1;
     } catch (err) {
