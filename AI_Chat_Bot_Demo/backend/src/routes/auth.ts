@@ -14,7 +14,7 @@ import { config } from "../config";
 
 const router = Router();
 
-const passwordSchema = z
+export const passwordSchema = z
   .string()
   .min(8, "La password deve avere almeno 8 caratteri")
   .regex(/[A-Z]/, "La password deve contenere almeno una lettera maiuscola")
