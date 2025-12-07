@@ -17,6 +17,10 @@ model User {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  // NEW
+  name       String?
+  avatarUrl  String?
+
   bots             Bot[]
   refreshTokens    RefreshToken[]
   emailTokens      EmailVerificationToken[]
