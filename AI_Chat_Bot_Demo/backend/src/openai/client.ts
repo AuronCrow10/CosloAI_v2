@@ -51,7 +51,7 @@ export async function createChatCompletionWithUsage(params: {
   const {
     messages,
     model = "gpt-4.1-mini",
-    maxTokens = 250,
+    maxTokens = 300,
     tools,
     toolChoice,
     usageContext
@@ -68,6 +68,21 @@ export async function createChatCompletionWithUsage(params: {
   const usage = (completion as any).usage;
   const normCtx = normalizeUsageContext(usageContext);
 
+  // 🔍 LOG DI DEBUG SUI TOKEN
+  if (usage) {
+    const info = {
+      model,
+      operation: normCtx?.operation ?? "chat_basic",
+      promptTokens: usage.prompt_tokens ?? 0,
+      completionTokens: usage.completion_tokens ?? 0,
+      totalTokens: usage.total_tokens ?? 0,
+      // opzionale: conta messaggi nel prompt, utile per capire la dimensione
+      messageCount: messages.length
+    };
+
+    console.log("[OpenAI usage]", info);
+  }
+
   if (usage && normCtx) {
     await recordOpenAIUsage({
       userId: normCtx.userId,
@@ -82,6 +97,7 @@ export async function createChatCompletionWithUsage(params: {
 
   return completion;
 }
+
 
 /**
  * Convenience wrapper: returns only the assistant content.
