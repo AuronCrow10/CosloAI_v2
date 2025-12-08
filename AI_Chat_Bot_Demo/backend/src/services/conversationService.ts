@@ -17,8 +17,8 @@ type LogMessageArgs = {
   channelMessageId?: string;
 };
 
-const MAX_HISTORY_MESSAGES = 20;   // max number of messages to look back
-const MAX_HISTORY_CHARS = 6000;    // char-based budget (~1500 tokens)
+const MAX_HISTORY_MESSAGES = 10;   // max number of messages to look back
+const MAX_HISTORY_CHARS = 3000;    // char-based budget (~750 tokens)
 
 /**
  * Find or create a Conversation row based on (botId, channel, externalUserId).
