@@ -334,3 +334,143 @@ export async function updateBotSubscriptionForFeatureChange(
     }
   });
 }
+
+
+export async function updateBotSubscriptionForUsagePlanChange({
+  botId,
+  newUsagePlanId,
+  prorationBehavior = "create_prorations"
+}: {
+  botId: string;
+  newUsagePlanId: string;
+  prorationBehavior?: Stripe.SubscriptionUpdateParams.ProrationBehavior;
+}) {
+  if (!stripe) return;
+
+  // Load bot with subscription + current usage plan
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId },
+    include: {
+      subscription: {
+        include: {
+          usagePlan: true
+        }
+      }
+    }
+  });
+
+  if (!bot || !bot.subscription) {
+    throw new Error("Bot or subscription not found");
+  }
+
+  const dbSub = bot.subscription;
+  const stripeSubId = dbSub.stripeSubscriptionId;
+
+  // Load the new usage plan (must be active and have a Stripe price)
+  const newPlan = await prisma.usagePlan.findFirst({
+    where: {
+      id: newUsagePlanId,
+      isActive: true
+    }
+  });
+
+  if (!newPlan) {
+    throw new Error("Usage plan not found or inactive");
+  }
+
+  if (!newPlan.stripePriceId) {
+    throw new Error(`Usage plan ${newPlan.code} has no Stripe price configured`);
+  }
+
+  // Compute current features pricing to keep snapshot consistent
+  const featurePricing = await computeBotPricingForBot({
+    useDomainCrawler: bot.useDomainCrawler,
+    usePdfCrawler: bot.usePdfCrawler,
+    channelWeb: bot.channelWeb,
+    channelWhatsapp: bot.channelWhatsapp,
+    channelMessenger: bot.channelMessenger,
+    channelInstagram: bot.channelInstagram,
+    useCalendar: bot.useCalendar
+  });
+
+  // Currency consistency between features and plan
+  if (featurePricing.currency !== newPlan.currency) {
+    throw new Error(
+      `Currency mismatch between features (${featurePricing.currency}) and plan (${newPlan.currency})`
+    );
+  }
+
+  // Load Stripe subscription to manipulate items
+  const stripeSub = await stripe.subscriptions.retrieve(stripeSubId, {
+    expand: ["items.data.price"]
+  });
+
+  const existingItems = stripeSub.items.data;
+
+  const oldPlanPriceId: string | null =
+    dbSub.usagePlan?.stripePriceId ?? null;
+
+  const items: Stripe.SubscriptionUpdateParams.Item[] = [];
+
+  for (const item of existingItems) {
+    const priceId = item.price.id;
+
+    // Old plan item: delete it
+    if (oldPlanPriceId && priceId === oldPlanPriceId) {
+      items.push({
+        id: item.id,
+        deleted: true
+      });
+      continue;
+    }
+
+    // Feature item (or any non-plan item): keep as-is
+    items.push({
+      id: item.id,
+      price: priceId,
+      quantity: item.quantity ?? 1
+    });
+  }
+
+  // Add new plan item
+  items.push({
+    price: newPlan.stripePriceId,
+    quantity: 1
+  });
+
+  // Update subscription on Stripe with proration
+  const updatedStripeSub = await stripe.subscriptions.update(stripeSubId, {
+    items,
+    proration_behavior: prorationBehavior,
+    metadata: {
+      botId: bot.id,
+      userId: String(bot.userId),
+      usagePlanId: newPlan.id
+    }
+  });
+
+  const primaryItem = updatedStripeSub.items.data[0];
+  const currency = primaryItem?.price?.currency ?? featurePricing.currency;
+
+  const totalAmountCents =
+    featurePricing.totalAmountCents + newPlan.monthlyAmountCents;
+
+  const compactPlanSnapshot = {
+    f: featurePricing.featureCodes,           // feature codes
+    fp: featurePricing.totalAmountCents,      // features amount
+    p: newPlan.code,                          // plan code
+    pt: newPlan.monthlyAmountCents,           // plan amount
+    t: totalAmountCents,                      // total
+    c: currency                               // currency
+  };
+
+  // Persist new plan + snapshot on our side
+  await prisma.subscription.update({
+    where: { id: dbSub.id },
+    data: {
+      usagePlanId: newPlan.id,
+      currency,
+      planSnapshotJson: compactPlanSnapshot
+    }
+  });
+}

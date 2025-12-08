@@ -2,7 +2,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../prisma/prisma";
-import { stripe, computeBotPricingForBot } from "../services/billingService";
+import { stripe, computeBotPricingForBot, updateBotSubscriptionForUsagePlanChange } from "../services/billingService";
 import { config } from "../config";
 import { getUsageForBot } from "../services/usageAggregationService"; // ⬅️ NEW
 
@@ -524,5 +524,73 @@ router.post("/bots/:id/cancel-subscription", async (req, res) => {
     return res.status(500).json({ error: "Failed to cancel subscription" });
   }
 });
+
+
+// POST /api/bots/:id/change-plan
+router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe is not configured" });
+    }
+
+    const botId = req.params.id;
+    const userId = (req as any).user.id as string;
+    const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
+
+    if (!usagePlanId) {
+      return res.status(400).json({ error: "usagePlanId is required" });
+    }
+
+    const bot = await prisma.bot.findFirst({
+      where: { id: botId, userId },
+      include: {
+        subscription: {
+          include: { usagePlan: true }
+        }
+      }
+    });
+
+    if (!bot || !bot.subscription) {
+      return res
+        .status(404)
+        .json({ error: "Bot or subscription not found" });
+    }
+
+    if (bot.status !== "ACTIVE") {
+      return res
+        .status(400)
+        .json({ error: "Bot must be ACTIVE to change plan" });
+    }
+
+    if (!bot.subscription.usagePlanId) {
+      return res.status(400).json({
+        error:
+          "This subscription is not linked to a usage plan and cannot change using this endpoint."
+      });
+    }
+
+    // No-op if they pick the same plan
+    if (bot.subscription.usagePlanId === usagePlanId) {
+      return res.json({ ok: true, unchanged: true });
+    }
+
+    await updateBotSubscriptionForUsagePlanChange({
+      botId: bot.id,
+      newUsagePlanId: usagePlanId,
+      prorationBehavior: "create_prorations"
+    });
+
+    const updatedSub = await prisma.subscription.findUnique({
+      where: { id: bot.subscription.id },
+      include: { usagePlan: true }
+    });
+
+    return res.json({ ok: true, subscription: updatedSub });
+  } catch (err) {
+    console.error("Error changing usage plan", err);
+    return res.status(500).json({ error: "Failed to change usage plan" });
+  }
+});
+
 
 export default router;
