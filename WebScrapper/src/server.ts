@@ -61,6 +61,7 @@ app.use((req, _res, next) => {
   next();
 });
 
+
 // Returns 201 with { client, created: true } or 409 if domain already exists.
 app.post('/clients', requireInternalAuth, async (req, res) => {
   try {
@@ -116,6 +117,30 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+
+
+
+// Delete a client and all its content (via ON DELETE CASCADE).
+app.delete('/clients/:id', requireInternalAuth, async (req, res) => {
+  try {
+    const clientId = req.params.id;
+
+    // Optional: verify client exists first (not strictly necessary)
+    const existing = await db.getClientById(clientId);
+    if (!existing) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    await db.deleteClientById(clientId);
+
+    return res.status(204).send();
+  } catch (err) {
+    console.error('Error in DELETE /clients/:id', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+
 
 // 1) Endpoint per lanciare il crawl (fire-and-forget)
 app.post('/crawl', requireInternalAuth, async (req, res) => {

@@ -17,7 +17,7 @@ function formatAmountForUi(amountCents: number, currency: string): string {
 }
 
 // Require auth for all billing routes
-router.use(requireAuth);
+router.use("/billing", requireAuth);
 
 // GET /api/billing/overview
 router.get("/billing/overview", async (req, res) => {

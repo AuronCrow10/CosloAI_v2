@@ -219,6 +219,26 @@ export class Database {
     }
   }
 
+
+  /**
+   * Delete a client by ID.
+   * Thanks to ON DELETE CASCADE, this also removes all page_chunks_* and client_usage rows.
+   */
+  async deleteClientById(id: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query(
+        `
+        DELETE FROM clients
+        WHERE id = $1
+        `,
+        [id],
+      );
+    } finally {
+      client.release();
+    }
+  }
+
   // ---------- PAGE CHUNKS (SMALL / LARGE) ----------
 
   private getTableForModel(model: EmbeddingModel): {

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
 import { updateBotSubscriptionForFeatureChange } from "../services/billingService";
+import { deleteKnowledgeClient } from "../services/knowledgeClient";
 
 const router = Router();
 
@@ -224,15 +225,67 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
   res.json(updated);
 });
 
-// Delete bot (hard delete for now)
+// Delete bot (hard delete with slug confirmation and full cascade)
 router.delete("/bots/:id", async (req: Request, res: Response) => {
+  const { slug } = req.body as { slug?: string };
+
+  if (!slug) {
+    return res.status(400).json({ error: "Slug is required for deletion." });
+  }
+
   const bot = await prisma.bot.findFirst({
     where: { id: req.params.id, userId: req.user!.id }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
 
-  await prisma.bot.delete({ where: { id: bot.id } });
-  res.status(204).send();
+  if (slug !== bot.slug) {
+    return res.status(400).json({ error: "Slug does not match this bot." });
+  }
+
+  // 1) Delete knowledge client (if any) in knowledge backend
+  if (bot.knowledgeClientId) {
+    try {
+      await deleteKnowledgeClient(bot.knowledgeClientId);
+    } catch (err) {
+      console.error(
+        `Failed to delete knowledge client for bot ${bot.id} (${bot.knowledgeClientId})`,
+        err
+      );
+      return res
+        .status(500)
+        .json({ error: "Failed to delete bot knowledge data." });
+    }
+  }
+
+  // 2) Delete all bot-related data in a transaction
+  await prisma.$transaction(async (tx) => {
+    // Messages -> Conversations
+    await tx.message.deleteMany({
+      where: {
+        conversation: { botId: bot.id }
+      }
+    });
+    await tx.conversation.deleteMany({ where: { botId: bot.id } });
+
+    // Channels
+    await tx.botChannel.deleteMany({ where: { botId: bot.id } });
+
+    // Billing / payments / subscriptions
+    await tx.payment.deleteMany({ where: { botId: bot.id } });
+    await tx.subscription.deleteMany({ where: { botId: bot.id } });
+
+    // Meta & WhatsApp sessions
+    await tx.metaConnectSession.deleteMany({ where: { botId: bot.id } });
+    await tx.whatsappConnectSession.deleteMany({ where: { botId: bot.id } });
+
+    // Usage
+    await tx.openAIUsage.deleteMany({ where: { botId: bot.id } });
+
+    // Finally the bot itself
+    await tx.bot.delete({ where: { id: bot.id } });
+  });
+
+  return res.status(204).send();
 });
 
 export default router;

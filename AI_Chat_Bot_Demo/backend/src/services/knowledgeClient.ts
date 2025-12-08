@@ -55,3 +55,21 @@ export async function ingestDocs(params: {
     maxBodyLength: Infinity
   });
 }
+
+
+export async function deleteKnowledgeClient(clientId: string): Promise<void> {
+  try {
+    await client.delete(`/clients/${clientId}`);
+  } catch (err: any) {
+    // If the client is already gone, we don't want to break user deletion
+    if (err.response && err.response.status === 404) {
+      console.warn(`Knowledge client ${clientId} not found while deleting, continuing.`);
+      return;
+    }
+    console.error(`Failed to delete knowledge client ${clientId}`, err);
+    // Depending on your taste, you can either:
+    // - rethrow (abort account/bot deletion)
+    // - or swallow with a warning (I'll rethrow to be strict)
+    throw err;
+  }
+}
