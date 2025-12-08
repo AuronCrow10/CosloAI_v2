@@ -158,7 +158,9 @@ export async function generateBotReplyForSlug(
       content:
         "You are given CONTEXT extracted from the business website.\n" +
         "Use ONLY this context to answer factual questions about the business (services, prices, opening hours, address, etc.).\n" +
-        "If the answer is not present in the context, say you don't know.\n\n" +
+        "If the answer is not present in the context, say you don't know.\n" +
+        "Respond concisely (typically 3–5 sentences) unless the user explicitly asks for more detail.\n" +
+        "Avoid repeating long lists of skills or services if they were already mentioned earlier; instead, briefly refer back to them.\n\n" +
         "CONTEXT:\n" +
         contextText
     }
@@ -174,18 +176,24 @@ export async function generateBotReplyForSlug(
   }
 
   // --- Per-conversation memory (recent history) ---
-  if (options.conversationId) {
+if (options.conversationId) {
     const historyMessages = await getConversationHistoryAsChatMessages(
       options.conversationId
     );
 
-    if (historyMessages.length > 0) {
+    // Keep only the last 5 turns (user + assistant = 10 messages max)
+    const recentHistory =
+      historyMessages.length > 10
+        ? historyMessages.slice(-10)
+        : historyMessages;
+
+    if (recentHistory.length > 0) {
       messages.push({
         role: "system",
         content:
           "Below is the recent conversation history with this user. Use it to understand context, references and follow-ups."
       });
-      messages.push(...historyMessages);
+      messages.push(...recentHistory);
     }
   }
 
@@ -199,7 +207,7 @@ export async function generateBotReplyForSlug(
   if (!bookingEnabled) {
     return await getChatCompletion({
       messages,
-      maxTokens: 400,
+      maxTokens: 300,
       usageContext: {
         ...usageBase,
         operation: "chat_basic"
@@ -211,7 +219,7 @@ export async function generateBotReplyForSlug(
   const firstResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages,
-    maxTokens: 400,
+    maxTokens: 300,
     tools: [bookingTool],
     toolChoice: "auto",
     usageContext: {
@@ -283,7 +291,7 @@ export async function generateBotReplyForSlug(
     const secondResponse = await createChatCompletionWithUsage({
       model: "gpt-4.1-mini",
       messages: toolMessages,
-      maxTokens: 400,
+      maxTokens: 300,
       usageContext: {
         ...usageBase,
         operation: "chat_booking_second"
@@ -314,7 +322,7 @@ export async function generateBotReplyForSlug(
   const secondResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages: toolMessages,
-    maxTokens: 400,
+    maxTokens: 300,
     usageContext: {
       ...usageBase,
       operation: "chat_booking_second"
@@ -330,4 +338,62 @@ export async function generateBotReplyForSlug(
         "Sorry, I couldn't process your booking.");
 
   return finalContent;
+}
+
+
+export async function summarizeConversation(
+  slug: string,
+  conversationId: string
+): Promise<string> {
+  const botConfig = await getBotConfigBySlug(slug);
+  if (!botConfig) {
+    throw new ChatServiceError(
+      `Bot not found for slug '${slug}'`,
+      404
+    );
+  }
+
+  // Get the full history for summarization.
+  // (Assumes getConversationHistoryAsChatMessages returns all turns;
+  // we only window it inside generateBotReplyForSlug, not here.)
+  const historyMessages = await getConversationHistoryAsChatMessages(
+    conversationId
+  );
+
+  if (!historyMessages || historyMessages.length === 0) {
+    return "This conversation is empty, so there is nothing to summarize yet.";
+  }
+
+  const usageBase = {
+    userId: botConfig.ownerUserId ?? null,
+    botId: botConfig.botId ?? null
+  };
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content:
+        "You are an assistant that summarizes conversations between a user and a business's AI assistant.\n" +
+        "Produce a concise summary of what the user wanted and how the assistant responded, followed by a short analysis.\n" +
+        "Structure your answer in two sections: 'Summary' and 'Analysis'.\n" +
+        "Keep the total length under about 300 words."
+    },
+    // All original user/assistant turns become context
+    ...historyMessages,
+    {
+      role: "user",
+      content:
+        "Please provide the 'Summary' and 'Analysis' for this entire conversation as described."
+    }
+  ];
+
+  // For summaries a slightly larger cap is fine
+  return await getChatCompletion({
+    messages,
+    maxTokens: 400,
+    usageContext: {
+      ...usageBase,
+      operation: "conversation_summary"
+    }
+  });
 }
