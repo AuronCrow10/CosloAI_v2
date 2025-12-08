@@ -273,7 +273,7 @@ export async function generateBotReplyForSlug(
   if (!bookingEnabled) {
     return await getChatCompletion({
       messages,
-      maxTokens: 300,
+      maxTokens: 250,
       usageContext: {
         ...usageBase,
         operation: "chat_basic"
@@ -285,7 +285,7 @@ export async function generateBotReplyForSlug(
   const firstResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages,
-    maxTokens: 300,
+    maxTokens: 250,
     tools: [bookingTool],
     toolChoice: "auto",
     usageContext: {
@@ -348,7 +348,7 @@ export async function generateBotReplyForSlug(
     const secondResponse = await createChatCompletionWithUsage({
       model: "gpt-4.1-mini",
       messages: toolMessages,
-      maxTokens: 300,
+      maxTokens: 250,
       usageContext: {
         ...usageBase,
         operation: "chat_booking_second"
@@ -379,7 +379,7 @@ export async function generateBotReplyForSlug(
   const secondResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages: toolMessages,
-    maxTokens: 300,
+    maxTokens: 250,
     usageContext: {
       ...usageBase,
       operation: "chat_booking_second"
@@ -442,7 +442,7 @@ export async function summarizeConversation(
 
   return await getChatCompletion({
     messages,
-    maxTokens: 400,
+    maxTokens: 250,
     usageContext: {
       ...usageBase,
       operation: "conversation_summary"
