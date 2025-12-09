@@ -16,7 +16,7 @@ import { getConversationHistoryAsChatMessages } from "./conversationService";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
-const HISTORY_TURNS_TO_KEEP = 3; // 5 user+assistant turns = 10 messages total
+const HISTORY_TURNS_TO_KEEP = 2; // 2 user+assistant turns = 4 messages total
 
 export class ChatServiceError extends Error {
   public readonly statusCode: number;
@@ -275,7 +275,7 @@ export async function generateBotReplyForSlug(
   if (!bookingEnabled) {
     return await getChatCompletion({
       messages,
-      maxTokens: 250,
+      maxTokens: 200,
       usageContext: {
         ...usageBase,
         operation: "chat_basic"
@@ -287,7 +287,7 @@ export async function generateBotReplyForSlug(
   const firstResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages,
-    maxTokens: 250,
+    maxTokens: 200,
     tools: [bookingTool],
     toolChoice: "auto",
     usageContext: {
@@ -350,7 +350,7 @@ export async function generateBotReplyForSlug(
     const secondResponse = await createChatCompletionWithUsage({
       model: "gpt-4.1-mini",
       messages: toolMessages,
-      maxTokens: 250,
+      maxTokens: 200,
       usageContext: {
         ...usageBase,
         operation: "chat_booking_second"
@@ -381,7 +381,7 @@ export async function generateBotReplyForSlug(
   const secondResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages: toolMessages,
-    maxTokens: 250,
+    maxTokens: 200,
     usageContext: {
       ...usageBase,
       operation: "chat_booking_second"
@@ -444,7 +444,7 @@ export async function summarizeConversation(
 
   return await getChatCompletion({
     messages,
-    maxTokens: 250,
+    maxTokens: 200,
     usageContext: {
       ...usageBase,
       operation: "conversation_summary"

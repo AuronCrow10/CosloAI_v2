@@ -51,7 +51,7 @@ export async function createChatCompletionWithUsage(params: {
   const {
     messages,
     model = "gpt-4.1-mini",
-    maxTokens = 300,
+    maxTokens = 200,
     tools,
     toolChoice,
     usageContext
@@ -112,7 +112,7 @@ export async function getChatCompletion(params: {
   const {
     messages,
     model = "gpt-4.1-mini",
-    maxTokens = 250,
+    maxTokens = 200,
     usageContext
   } = params;
 
