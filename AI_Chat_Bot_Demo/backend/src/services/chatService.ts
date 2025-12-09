@@ -285,7 +285,7 @@ export async function generateBotReplyForSlug(
 
   // 6) Booking-enabled path: use tools
   const firstResponse = await createChatCompletionWithUsage({
-    model: "gpt-4.1-mini",
+    model: "gpt-4o-mini",
     messages,
     maxTokens: 200,
     tools: [bookingTool],
@@ -348,7 +348,7 @@ export async function generateBotReplyForSlug(
     ];
 
     const secondResponse = await createChatCompletionWithUsage({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o-mini",
       messages: toolMessages,
       maxTokens: 200,
       usageContext: {
@@ -379,7 +379,7 @@ export async function generateBotReplyForSlug(
   ];
 
   const secondResponse = await createChatCompletionWithUsage({
-    model: "gpt-4.1-mini",
+    model: "gpt-4o-mini",
     messages: toolMessages,
     maxTokens: 200,
     usageContext: {

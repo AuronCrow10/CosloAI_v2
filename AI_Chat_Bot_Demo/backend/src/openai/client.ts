@@ -50,7 +50,7 @@ export async function createChatCompletionWithUsage(params: {
 }): Promise<OpenAI.Chat.Completions.ChatCompletion> {
   const {
     messages,
-    model = "gpt-4.1-mini",
+    model = "gpt-4o-mini",
     maxTokens = 200,
     tools,
     toolChoice,
@@ -111,7 +111,7 @@ export async function getChatCompletion(params: {
 }): Promise<string> {
   const {
     messages,
-    model = "gpt-4.1-mini",
+    model = "gpt-4o-mini",
     maxTokens = 200,
     usageContext
   } = params;
