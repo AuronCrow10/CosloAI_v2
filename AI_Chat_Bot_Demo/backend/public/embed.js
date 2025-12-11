@@ -1,6 +1,6 @@
 (function () {
   function getConfigScript() {
-    // 1) prova currentScript
+    // 1) currentScript
     if (document.currentScript) {
       return document.currentScript;
     }
@@ -25,8 +25,22 @@
     var iconUrl = script.getAttribute("data-bot-icon");
     var position = script.getAttribute("data-bot-position") || "bottom-left";
 
+    console.log(iconUrl);
+
+    // optional: attention sentences (separated by "|")
+    // es: data-bot-hints="Serve aiuto?|Fai una domanda|Parla con me 🙂"
+    var hintsAttr = script.getAttribute("data-bot-hints");
+    var hints = hintsAttr
+      ? hintsAttr.split("|").map(function (h) { return h.trim(); }).filter(Boolean)
+      : [
+          "Hai bisogno di una mano?",
+          "Fai una domanda, sono qui 👋",
+          "Vuoi un consiglio veloce?",
+          "Scrivimi, rispondo subito!"
+        ];
+
     if (!slug) {
-      console.warn("[Bot Widget] Missing data-bot-slug on script tag");
+      console.warn("[Bot Widget] Missing data-bot-slug on script tag CAZZO");
       return;
     }
 
@@ -38,50 +52,76 @@
       baseUrl = "";
     }
 
-    console.log("[Bot Widget] init on", baseUrl, "slug=", slug);
+    console.log("[Bot Widget] init on", baseUrl, "slug=CAZZO", slug);
 
-    // --- launcher (icona) ---
-    var launcher = document.createElement("button");
-    launcher.type = "button";
+var launcher = document.createElement("button");
+launcher.type = "button";
 
-    launcher.style.position = "fixed";
-    launcher.style.zIndex = "2147483647";
-    launcher.style.width = "56px";
-    launcher.style.height = "56px";
-    launcher.style.borderRadius = "28px";
-    launcher.style.border = "none";
-    launcher.style.cursor = "pointer";
-    launcher.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)";
-    launcher.style.display = "flex";
-    launcher.style.alignItems = "center";
-    launcher.style.justifyContent = "center";
-    launcher.style.padding = "0";
-    launcher.style.backgroundColor = "#4f46e5";
-    launcher.style.color = "#fff";
-    launcher.style.touchAction = "manipulation";
+launcher.style.position = "fixed";
+launcher.style.zIndex = "2147483647";
 
-    if (position === "bottom-left") {
-      launcher.style.left = "16px";
-      launcher.style.bottom = "16px";
-    } else {
-      launcher.style.right = "16px";
-      launcher.style.bottom = "16px";
-    }
+// BIGGER CIRCLE
+launcher.style.width = "88px";
+launcher.style.height = "88px";
+launcher.style.borderRadius = "50%";
 
-    if (iconUrl) {
-      var img = document.createElement("img");
-      img.src = iconUrl;
-      img.alt = "Chat bot";
-      img.style.width = "100%";
-      img.style.height = "100%";
-      img.style.objectFit = "cover";
-      img.style.borderRadius = "50%";
-      img.referrerPolicy = "no-referrer";
-      launcher.appendChild(img);
-    } else {
-      launcher.textContent = "💬";
-      launcher.style.fontSize = "24px";
-    }
+// PURE WHITE BACKGROUND (no more purple)
+launcher.style.backgroundColor = "#ffffff";
+launcher.style.backgroundImage = "none";
+
+launcher.style.border = "none";
+launcher.style.cursor = "pointer";
+launcher.style.boxShadow = "0 6px 18px rgba(0,0,0,0.18)";
+launcher.style.display = "flex";
+launcher.style.alignItems = "center";
+launcher.style.justifyContent = "center";
+launcher.style.padding = "0";
+launcher.style.color = "#4f46e5";
+launcher.style.touchAction = "manipulation";
+launcher.style.transition =
+  "transform 0.15s ease-out, box-shadow 0.15s ease-out";
+
+if (position === "bottom-left") {
+  launcher.style.left = "16px";
+  launcher.style.bottom = "16px";
+} else {
+  launcher.style.right = "16px";
+  launcher.style.bottom = "16px";
+}
+
+launcher.addEventListener("mouseenter", function () {
+  launcher.style.transform = "translateY(-2px) scale(1.04)";
+  launcher.style.boxShadow = "0 10px 26px rgba(0,0,0,0.25)";
+});
+launcher.addEventListener("mouseleave", function () {
+  launcher.style.transform = "translateY(0) scale(1)";
+  launcher.style.boxShadow = "0 6px 18px rgba(0,0,0,0.18)";
+});
+
+console.warn(iconUrl);
+if (iconUrl) {
+  var img = document.createElement("img");
+  img.src = iconUrl; // GIF
+  img.alt = "Chat bot";
+
+  // MAKE GIF BIGGER BUT WITH ROOM TO JUMP
+  img.style.width = "76%";
+  img.style.height = "76%";
+  img.style.objectFit = "contain";
+
+  // keep it nicely centered, no extra clipping
+  img.style.display = "block";
+
+  // transparency works with white circle behind
+  img.style.borderRadius = "0"; // we already have a circular button
+  img.referrerPolicy = "no-referrer";
+  launcher.appendChild(img);
+} else {
+  launcher.textContent = "💬";
+  launcher.style.fontSize = "32px";
+  launcher.style.backgroundColor = "#4f46e5";
+  launcher.style.color = "#fff";
+}
 
     // --- pannello ---
     var panel = document.createElement("div");
@@ -99,10 +139,10 @@
 
     if (position === "bottom-left") {
       panel.style.left = "16px";
-      panel.style.bottom = "80px";
+      panel.style.bottom = "90px";
     } else {
       panel.style.right = "16px";
-      panel.style.bottom = "80px";
+      panel.style.bottom = "90px";
     }
 
     var header = document.createElement("div");
@@ -148,10 +188,78 @@
     launcher.addEventListener("click", function () {
       var isOpen = panel.style.display === "block";
       panel.style.display = isOpen ? "none" : "block";
+      // hide hint bubble when opening/closing
+      hideHint();
     });
 
     document.body.appendChild(launcher);
     document.body.appendChild(panel);
+
+    // --- hint bubble (frasi che cambiano) ---
+    var hintBubble = document.createElement("div");
+    hintBubble.style.position = "fixed";
+    hintBubble.style.zIndex = "2147483646";
+    hintBubble.style.maxWidth = "260px";
+    hintBubble.style.padding = "8px 12px";
+    hintBubble.style.borderRadius = "999px";
+    hintBubble.style.background = "#ffffff";
+    hintBubble.style.boxShadow = "0 8px 24px rgba(0,0,0,0.18)";
+    hintBubble.style.fontFamily = "system-ui, sans-serif";
+    hintBubble.style.fontSize = "13px";
+    hintBubble.style.lineHeight = "1.4";
+    hintBubble.style.color = "#111827";
+    hintBubble.style.opacity = "0";
+    hintBubble.style.transform = "translateY(10px)";
+    hintBubble.style.pointerEvents = "none";
+    hintBubble.style.transition = "opacity 0.25s ease-out, transform 0.25s ease-out";
+
+    if (position === "bottom-left") {
+      hintBubble.style.left = "90px";
+      hintBubble.style.bottom = "32px";
+    } else {
+      hintBubble.style.right = "90px";
+      hintBubble.style.bottom = "32px";
+    }
+
+    document.body.appendChild(hintBubble);
+
+    var hintTimeoutId = null;
+    var hintIntervalId = null;
+
+    function hideHint() {
+      hintBubble.style.opacity = "0";
+      hintBubble.style.transform = "translateY(10px)";
+      if (hintTimeoutId) {
+        window.clearTimeout(hintTimeoutId);
+        hintTimeoutId = null;
+      }
+    }
+
+    function showHint() {
+      // non disturbare se la chat è aperta o non ci sono messaggi
+      if (panel.style.display === "block" || !hints.length) return;
+
+      var msg = hints[Math.floor(Math.random() * hints.length)];
+      hintBubble.textContent = msg;
+      hintBubble.style.opacity = "1";
+      hintBubble.style.transform = "translateY(0)";
+
+      if (hintTimeoutId) {
+        window.clearTimeout(hintTimeoutId);
+      }
+      hintTimeoutId = window.setTimeout(hideHint, 5000); // nasconde dopo 5s
+    }
+
+    function startHints() {
+      // niente hint su schermi piccolissimi
+      if (window.innerWidth < 480) return;
+
+      // primo hint dopo 8s, poi ogni 20s
+      window.setTimeout(showHint, 8000);
+      hintIntervalId = window.setInterval(showHint, 20000);
+    }
+
+    startHints();
   }
 
   if (document.readyState === "complete" || document.readyState === "interactive") {
