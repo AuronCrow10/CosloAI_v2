@@ -8,6 +8,7 @@ export const openai = new OpenAI({
   apiKey: config.openaiApiKey
 });
 
+// Keep the same types the rest of your code expects
 export type ChatMessage =
   OpenAI.Chat.Completions.ChatCompletionMessageParam;
 export type ChatTool =
@@ -38,7 +39,7 @@ function normalizeUsageContext(
 
 /**
  * Low-level helper: calls OpenAI and records usage if usageContext is provided.
- * Returns the full ChatCompletion.
+ * Always uses the Chat Completions API (no Responses API).
  */
 export async function createChatCompletionWithUsage(params: {
   messages: ChatMessage[];
@@ -57,6 +58,8 @@ export async function createChatCompletionWithUsage(params: {
     usageContext
   } = params;
 
+  const normCtx = normalizeUsageContext(usageContext);
+
   const completion = await openai.chat.completions.create({
     model,
     messages,
@@ -66,9 +69,7 @@ export async function createChatCompletionWithUsage(params: {
   } as any);
 
   const usage = (completion as any).usage;
-  const normCtx = normalizeUsageContext(usageContext);
 
-  // 🔍 LOG DI DEBUG SUI TOKEN
   if (usage) {
     const info = {
       model,
@@ -76,31 +77,28 @@ export async function createChatCompletionWithUsage(params: {
       promptTokens: usage.prompt_tokens ?? 0,
       completionTokens: usage.completion_tokens ?? 0,
       totalTokens: usage.total_tokens ?? 0,
-      // opzionale: conta messaggi nel prompt, utile per capire la dimensione
       messageCount: messages.length
     };
-
     console.log("[OpenAI usage]", info);
+
+    if (normCtx) {
+      await recordOpenAIUsage({
+        userId: normCtx.userId,
+        botId: normCtx.botId,
+        model,
+        operation: normCtx.operation,
+        promptTokens: usage.prompt_tokens ?? 0,
+        completionTokens: usage.completion_tokens ?? 0,
+        totalTokens: usage.total_tokens ?? 0
+      });
+    }
   }
 
-  if (usage && normCtx) {
-    await recordOpenAIUsage({
-      userId: normCtx.userId,
-      botId: normCtx.botId,
-      model,
-      operation: normCtx.operation,
-      promptTokens: usage.prompt_tokens ?? 0,
-      completionTokens: usage.completion_tokens ?? 0,
-      totalTokens: usage.total_tokens ?? 0
-    });
-  }
-
-  return completion;
+  return completion as OpenAI.Chat.Completions.ChatCompletion;
 }
 
-
 /**
- * Convenience wrapper: returns only the assistant content.
+ * Convenience wrapper: returns only the assistant content as a string.
  * Still records token usage if usageContext is provided.
  */
 export async function getChatCompletion(params: {
@@ -124,11 +122,31 @@ export async function getChatCompletion(params: {
   });
 
   const choice = completion.choices[0];
-  const content = choice?.message?.content;
+  const content = (choice as any)?.message?.content;
 
-  if (!content) {
+  // Extra debug log for tricky cases
+  console.log(
+    "[getChatCompletion] model=",
+    model,
+    " rawChoiceContent=",
+    JSON.stringify(content)?.slice(0, 500)
+  );
+
+  if (content == null) {
     throw new Error("No content returned from OpenAI");
   }
 
-  return content;
+  // If some model ever returns array-of-parts style content
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((part: any) =>
+        typeof part === "string"
+          ? part
+          : part?.text?.value ?? part?.text ?? ""
+      )
+      .join("");
+    return joined;
+  }
+
+  return content as string;
 }

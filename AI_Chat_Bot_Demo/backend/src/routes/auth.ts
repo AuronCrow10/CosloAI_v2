@@ -8,9 +8,12 @@ import {
   createRefreshToken,
   revokeRefreshToken,
   sendVerificationEmail,
-  googleClient
+  googleClient,
+  signMfaToken,
+  verifyMfaToken
 } from "../services/authService";
 import { config } from "../config";
+import { authenticator } from "otplib";
 
 const router = Router();
 
@@ -109,6 +112,12 @@ router.post("/login", async (req: Request, res: Response) => {
 
   if (!user.emailVerified) {
     console.warn("User logging in without verified email", { userId: user.id });
+  }
+
+  // If MFA is enabled, return an MFA challenge instead of full session
+  if (user.mfaEnabled && user.mfaTotpSecret) {
+    const mfaToken = signMfaToken(user.id);
+    return res.json({ mfaRequired: true, mfaToken });
   }
 
   const payload = { sub: user.id, role: user.role };
@@ -249,7 +258,72 @@ router.post("/google", async (req: Request, res: Response) => {
     });
   }
 
+  // If MFA is enabled, return MFA challenge (same as email/password flow)
+  if (user.mfaEnabled && user.mfaTotpSecret) {
+    const mfaToken = signMfaToken(user.id);
+    return res.json({ mfaRequired: true, mfaToken });
+  }
+
   const tokenPayload = { sub: user.id, role: user.role };
+  const accessToken = signAccessToken(tokenPayload);
+  const refreshToken = await createRefreshToken(user.id);
+
+  return res.json({
+    accessToken,
+    refreshToken,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      emailVerified: user.emailVerified
+    }
+  });
+});
+
+// ---- MFA TOTP verification for login ----
+
+const mfaTotpVerifySchema = z.object({
+  mfaToken: z.string(),
+  code: z
+    .string()
+    .regex(/^\d{6}$/, "Invalid code format. It should be a 6-digit code.")
+});
+
+router.post("/mfa/totp/verify", async (req: Request, res: Response) => {
+  const parsed = mfaTotpVerifySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { mfaToken, code } = parsed.data;
+
+  let payload;
+  try {
+    payload = verifyMfaToken(mfaToken);
+  } catch {
+    return res.status(400).json({ error: "Invalid or expired MFA token" });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: payload.sub }
+  });
+
+  if (!user || !user.mfaEnabled || !user.mfaTotpSecret) {
+    return res
+      .status(400)
+      .json({ error: "Two-factor authentication is not enabled for this user." });
+  }
+
+  const isValid = authenticator.verify({
+    token: code,
+    secret: user.mfaTotpSecret
+  });
+
+  if (!isValid) {
+    return res.status(400).json({ error: "Invalid authentication code." });
+  }
+
+  const tokenPayload = { sub: user.id, role: user.role as "ADMIN" | "CLIENT" | "REFERRER" };
   const accessToken = signAccessToken(tokenPayload);
   const refreshToken = await createRefreshToken(user.id);
 

@@ -1,9 +1,13 @@
-// routes/stripeWebhook.ts
 import { Request, Response } from "express";
 import Stripe from "stripe";
 import { prisma } from "../prisma/prisma";
 import { stripe } from "../services/billingService";
 import { config } from "../config";
+import {
+  computeCommissionCents,
+  monthKeyForDate,
+  validateReferralCode
+} from "../services/referralService";
 
 function parsePlanSnapshot(metadata: Stripe.Metadata | null | undefined) {
   const raw = metadata?.planSnapshot;
@@ -13,6 +17,10 @@ function parsePlanSnapshot(metadata: Stripe.Metadata | null | undefined) {
   } catch {
     return null;
   }
+}
+
+function isStripeSubActive(status: Stripe.Subscription.Status): boolean {
+  return status === "active" || status === "trialing";
 }
 
 export async function stripeWebhookHandler(req: Request, res: Response) {
@@ -90,6 +98,38 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           data: { status: "ACTIVE" }
         });
 
+        // ✅ Referral attribution creation (if referralCode metadata exists)
+        const referralCode = (session.metadata?.referralCode as string | undefined)?.trim();
+        if (referralCode) {
+          const valid = await validateReferralCode(referralCode);
+          if (valid) {
+            const bot = await prisma.bot.findUnique({ where: { id: botId } });
+            if (bot && valid.partnerUserId !== bot.userId) {
+              const dbSub = await prisma.subscription.findUnique({ where: { botId } });
+
+              // idempotent via unique stripeSubscriptionId
+              await prisma.referralAttribution.upsert({
+                where: { stripeSubscriptionId: subscriptionId },
+                create: {
+                  referralCodeId: valid.referralCodeId,
+                  partnerId: valid.partnerId,
+                  referredUserId: bot.userId,
+                  botId,
+                  subscriptionId: dbSub?.id,
+                  stripeCustomerId: customerId ?? undefined,
+                  stripeSubscriptionId: subscriptionId,
+                  checkoutSessionId: session.id
+                },
+                update: {
+                  subscriptionId: dbSub?.id ?? undefined,
+                  stripeCustomerId: customerId ?? undefined,
+                  endedAt: null
+                }
+              });
+            }
+          }
+        }
+
         break;
       }
 
@@ -97,6 +137,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
       case "customer.subscription.deleted": {
         const sub = event.data.object as Stripe.Subscription;
         const stripeSubscriptionId = sub.id;
+
         const dbSub = await prisma.subscription.findFirst({
           where: { stripeSubscriptionId }
         });
@@ -118,12 +159,10 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           data: {
             status,
             currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
-            // usagePlanId is not changed here (we set it at checkout time)
           }
         });
 
         let botStatus: "ACTIVE" | "SUSPENDED" | "CANCELED";
-
         if (status === "ACTIVE" || status === "TRIALING") {
           botStatus = "ACTIVE";
         } else if (status === "CANCELED") {
@@ -136,6 +175,20 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           where: { id: dbSub.botId },
           data: { status: botStatus }
         });
+
+        // ✅ End attribution when subscription is not active/trialing
+        const isActive = isStripeSubActive(sub.status);
+        if (!isActive) {
+          await prisma.referralAttribution.updateMany({
+            where: { stripeSubscriptionId },
+            data: { endedAt: new Date() }
+          });
+        } else {
+          await prisma.referralAttribution.updateMany({
+            where: { stripeSubscriptionId },
+            data: { endedAt: null }
+          });
+        }
 
         break;
       }
@@ -160,18 +213,19 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
 
         const firstLine = invoice.lines.data[0];
         const period = firstLine?.period;
-        const periodStart = period?.start
-          ? new Date(period.start * 1000)
-          : null;
+        const periodStart = period?.start ? new Date(period.start * 1000) : null;
         const periodEnd = period?.end ? new Date(period.end * 1000) : null;
 
         // Identify bot via subscription record
         let botId: string | undefined;
+        let subscriptionDbId: string | undefined;
+
         if (stripeSubscriptionId) {
           const dbSub = await prisma.subscription.findFirst({
             where: { stripeSubscriptionId }
           });
           botId = dbSub?.botId;
+          subscriptionDbId = dbSub?.id;
         }
 
         if (!botId) {
@@ -182,7 +236,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           break;
         }
 
-        await prisma.payment.create({
+        const payment = await prisma.payment.create({
           data: {
             botId,
             stripeCustomerId,
@@ -194,13 +248,88 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             status: invoice.status ?? "succeeded",
             billingEmail,
             billingName,
-            billingAddressJson: billingAddress
-              ? (billingAddress as any)
-              : undefined,
+            billingAddressJson: billingAddress ? (billingAddress as any) : undefined,
             periodStart: periodStart ?? undefined,
             periodEnd: periodEnd ?? undefined
           }
         });
+
+        // ✅ Referral commission ledger per paid invoice
+        if (stripeSubscriptionId) {
+          const attribution = await prisma.referralAttribution.findUnique({
+            where: { stripeSubscriptionId },
+            include: { partner: true }
+          });
+
+          if (attribution && attribution.partner.status === "ACTIVE") {
+            // Prefer subtotal (pre-tax). If not present, fall back to amount_paid.
+            const base =
+              typeof (invoice as any).subtotal === "number" && (invoice as any).subtotal > 0
+                ? (invoice as any).subtotal
+                : amountCents;
+
+            const commissionCents = computeCommissionCents(
+              base,
+              attribution.partner.commissionBps
+            );
+
+            const monthKey = monthKeyForDate(
+              periodStart ?? new Date(invoice.created * 1000)
+            );
+
+            // ✅ Avoid tx callback form to prevent implicit-any on `tx`
+            // 1) create commission (idempotent via unique stripeInvoiceId+kind)
+            // 2) upsert payout period and increment
+            try {
+              await prisma.$transaction([
+                prisma.referralCommission.create({
+                  data: {
+                    partnerId: attribution.partnerId,
+                    attributionId: attribution.id,
+                    botId,
+                    subscriptionId: subscriptionDbId,
+                    paymentId: payment.id,
+                    stripeSubscriptionId,
+                    stripeInvoiceId,
+                    kind: "EARNED",
+                    status: "PENDING",
+                    amountBaseCents: base,
+                    commissionCents,
+                    currency,
+                    periodStart: periodStart ?? undefined,
+                    periodEnd: periodEnd ?? undefined,
+                    monthKey
+                  }
+                }),
+
+                prisma.referralPayoutPeriod.upsert({
+                  where: {
+                    partnerId_month_currency: {
+                      partnerId: attribution.partnerId,
+                      monthKey,
+                      currency
+                    }
+                  },
+                  create: {
+                    partnerId: attribution.partnerId,
+                    monthKey,
+                    currency,
+                    amountCents: commissionCents,
+                    status: "OPEN"
+                  },
+                  update: {
+                    amountCents: { increment: commissionCents }
+                  }
+                })
+              ]);
+            } catch (e: any) {
+              // Likely a webhook retry
+              if (e?.code !== "P2002") {
+                console.error("Failed to create referral commission", e);
+              }
+            }
+          }
+        }
 
         break;
       }
@@ -223,10 +352,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         }
 
         if (!botId) {
-          console.warn(
-            "invoice.payment_failed without identifiable botId",
-            invoice.id
-          );
+          console.warn("invoice.payment_failed without identifiable botId", invoice.id);
           break;
         }
 
@@ -242,6 +368,71 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             status: "failed"
           }
         });
+
+        break;
+      }
+
+      // ✅ Optional but recommended: reversal when invoice is voided
+      case "invoice.voided": {
+        const invoice = event.data.object as Stripe.Invoice;
+        const stripeInvoiceId = invoice.id;
+        const stripeSubscriptionId = invoice.subscription as string | null;
+        if (!stripeSubscriptionId) break;
+
+        const earned = await prisma.referralCommission.findFirst({
+          where: { stripeInvoiceId, kind: "EARNED" }
+        });
+        if (!earned) break;
+
+        try {
+          const reversalCommissionCents = -Math.abs(earned.commissionCents);
+          const reversalBaseCents = -Math.abs(earned.amountBaseCents);
+
+          await prisma.$transaction([
+            prisma.referralCommission.create({
+              data: {
+                partnerId: earned.partnerId,
+                attributionId: earned.attributionId ?? undefined,
+                botId: earned.botId,
+                subscriptionId: earned.subscriptionId ?? undefined,
+                stripeSubscriptionId: earned.stripeSubscriptionId,
+                stripeInvoiceId: earned.stripeInvoiceId,
+                kind: "REVERSAL",
+                status: "PENDING",
+                amountBaseCents: reversalBaseCents,
+                commissionCents: reversalCommissionCents,
+                currency: earned.currency,
+                periodStart: earned.periodStart ?? undefined,
+                periodEnd: earned.periodEnd ?? undefined,
+                monthKey: earned.monthKey
+              }
+            }),
+
+            prisma.referralPayoutPeriod.upsert({
+              where: {
+                partnerId_month_currency: {
+                  partnerId: earned.partnerId,
+                  monthKey: earned.monthKey,
+                  currency: earned.currency
+                }
+              },
+              create: {
+                partnerId: earned.partnerId,
+                monthKey: earned.monthKey,
+                currency: earned.currency,
+                amountCents: reversalCommissionCents,
+                status: "OPEN"
+              },
+              update: {
+                amountCents: { increment: reversalCommissionCents }
+              }
+            })
+          ]);
+        } catch (e: any) {
+          if (e?.code !== "P2002") {
+            console.error("Failed to reverse referral commission", e);
+          }
+        }
 
         break;
       }

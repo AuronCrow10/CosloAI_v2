@@ -15,13 +15,13 @@ export type BotUsageBreakdown = {
   userId: string;
   userEmail: string | null;
 
-  // High-level totals
+  // High-level totals (used for plan limits / billing)
   trainingTokens: number; // crawler ingestion
-  inputTokens: number;    // chat prompt + crawler search
-  outputTokens: number;   // chat completion
+  inputTokens: number;    // chat prompt + crawler search + analytics
+  outputTokens: number;   // chat completion + analytics
   totalTokens: number;
 
-  // More detailed breakdown, if you need it
+  // More detailed breakdown
   chat: {
     promptTokens: number;
     completionTokens: number;
@@ -32,7 +32,22 @@ export type BotUsageBreakdown = {
     searchTokens: number;   // embeddings_search totalTokens
     totalTokens: number;
   };
+
+  // Background analytics (summaries, evals, etc.) – counted in totals but broken out
+  analysis?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
 };
+
+// Operations we consider "analytics" (summaries, evals, UI summaries, etc.)
+const BACKGROUND_OPERATIONS = [
+  "conversation_memory_summary",
+  "conversation_eval_auto",
+  "conversation_eval_manual",
+  "conversation_summary_ui"
+];
 
 /**
  * Given a knowledge usage summary, compute crawler training + search tokens.
@@ -62,7 +77,13 @@ function computeCrawlerTokens(
 }
 
 /**
- * Compute usage for a single bot (chat + crawler).
+ * Compute usage for a single bot (chat + crawler + analytics).
+ *
+ * IMPORTANT:
+ *  - High-level totals (inputTokens/outputTokens/totalTokens) now INCLUDE
+ *    analytics operations (summaries, evals, etc.) so they count against
+ *    the same plan token budget as normal chat.
+ *  - The `analysis` block is just a breakdown for the UI.
  */
 export async function getUsageForBot(params: {
   bot: Bot & { user: User };
@@ -71,16 +92,19 @@ export async function getUsageForBot(params: {
 }): Promise<BotUsageBreakdown> {
   const { bot, from, to } = params;
 
-  // 1) Chat usage from OpenAIUsage (per bot)
-  const chatWhere: any = { botId: bot.id };
+  // 1) Primary chat usage from OpenAIUsage (per bot), excluding analytics ops
+  const primaryChatWhere: any = { botId: bot.id };
   if (from || to) {
-    chatWhere.createdAt = {};
-    if (from) chatWhere.createdAt.gte = from;
-    if (to) chatWhere.createdAt.lte = to;
+    primaryChatWhere.createdAt = {};
+    if (from) primaryChatWhere.createdAt.gte = from;
+    if (to) primaryChatWhere.createdAt.lte = to;
   }
+  primaryChatWhere.operation = {
+    notIn: BACKGROUND_OPERATIONS
+  };
 
   const chatAgg = await prisma.openAIUsage.aggregate({
-    where: chatWhere,
+    where: primaryChatWhere,
     _sum: {
       promptTokens: true,
       completionTokens: true,
@@ -91,6 +115,31 @@ export async function getUsageForBot(params: {
   const chatPromptTokens = chatAgg._sum.promptTokens ?? 0;
   const chatCompletionTokens = chatAgg._sum.completionTokens ?? 0;
   const chatTotalTokens = chatAgg._sum.totalTokens ?? 0;
+
+  // 1b) Background analytics (summaries, evals, etc.) – we track separately
+  // but they WILL be included in the high-level totals below.
+  const backgroundWhere: any = {
+    botId: bot.id,
+    operation: { in: BACKGROUND_OPERATIONS }
+  };
+  if (from || to) {
+    backgroundWhere.createdAt = {};
+    if (from) backgroundWhere.createdAt.gte = from;
+    if (to) backgroundWhere.createdAt.lte = to;
+  }
+
+  const backgroundAgg = await prisma.openAIUsage.aggregate({
+    where: backgroundWhere,
+    _sum: {
+      promptTokens: true,
+      completionTokens: true,
+      totalTokens: true
+    }
+  });
+
+  const analysisPromptTokens = backgroundAgg._sum.promptTokens ?? 0;
+  const analysisCompletionTokens = backgroundAgg._sum.completionTokens ?? 0;
+  const analysisTotalTokens = backgroundAgg._sum.totalTokens ?? 0;
 
   // 2) Crawler usage from Knowledge backend (per knowledgeClientId)
   let knowledgeSummary: KnowledgeUsageSummary | null = null;
@@ -107,12 +156,13 @@ export async function getUsageForBot(params: {
   // 3) High-level classification:
   //
   // Training  = crawler ingestion embeddings
-  // Input     = chat prompts  + crawler search embeddings
-  // Output    = chat completions
+  // Input     = chat prompts + analytics prompts + crawler search embeddings
+  // Output    = chat completions + analytics completions
   //
   const trainingTokens = crawler.trainingTokens;
-  const inputTokens = chatPromptTokens + crawler.searchTokens;
-  const outputTokens = chatCompletionTokens;
+  const inputTokens =
+    chatPromptTokens + analysisPromptTokens + crawler.searchTokens;
+  const outputTokens = chatCompletionTokens + analysisCompletionTokens;
   const totalTokens = trainingTokens + inputTokens + outputTokens;
 
   return {
@@ -136,6 +186,11 @@ export async function getUsageForBot(params: {
       trainingTokens: crawler.trainingTokens,
       searchTokens: crawler.searchTokens,
       totalTokens: crawler.totalTokens
+    },
+    analysis: {
+      promptTokens: analysisPromptTokens,
+      completionTokens: analysisCompletionTokens,
+      totalTokens: analysisTotalTokens
     }
   };
 }

@@ -2,11 +2,22 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../prisma/prisma";
-import { verifyAccessToken, verifyPassword, hashPassword, revokeAllRefreshTokensForUser, googleClient } from "../services/authService";
+import {
+  verifyAccessToken,
+  verifyPassword,
+  hashPassword,
+  revokeAllRefreshTokensForUser,
+  googleClient,
+  signTotpSetupToken,
+  verifyTotpSetupToken
+} from "../services/authService";
 import { JwtPayload } from "../services/authService";
 import { passwordSchema } from "./auth"; // or re-export it there
 import { deleteKnowledgeClient } from "../services/knowledgeClient";
 import { config } from "../config";
+import { authenticator } from "otplib";
+import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
 
 const router = Router();
 
@@ -56,7 +67,8 @@ router.get("/me", async (req: Request, res: Response) => {
     avatarUrl: user.avatarUrl ?? null,
     emailVerified: user.emailVerified,
     hasPassword,
-    authProvider
+    authProvider,
+    mfaEnabled: user.mfaEnabled
   });
 });
 
@@ -111,7 +123,8 @@ router.put("/profile", async (req: Request, res: Response) => {
     avatarUrl: updated.avatarUrl ?? null,
     emailVerified: updated.emailVerified,
     hasPassword,
-    authProvider
+    authProvider,
+    mfaEnabled: updated.mfaEnabled
   });
 });
 
@@ -157,8 +170,207 @@ router.post("/change-password", async (req: Request, res: Response) => {
   return res.json({ message: "Password updated successfully." });
 });
 
-// TODO: 2FA endpoints later (TOTP / backup codes etc.)
+// ── MFA (TOTP) endpoints ───────────────────────────────────
 
+const confirmTotpSchema = z.object({
+  setupToken: z.string(),
+  code: z
+    .string()
+    .regex(/^\d{6}$/, "Invalid code format. It should be a 6-digit code.")
+});
+
+const disableTotpSchema = z.object({
+  code: z
+    .string()
+    .regex(/^\d{6}$/, "Invalid code format. It should be a 6-digit code.")
+    .optional(),
+  backupCode: z.string().optional()
+});
+
+function generateBackupCode(): string {
+  const charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = randomBytes(10);
+  let code = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    code += charset[bytes[i] % charset.length];
+  }
+  // Format like XXXX-XXXX-XX for readability
+  return code.match(/.{1,4}/g)?.join("-") ?? code;
+}
+
+router.post("/mfa/totp/start", async (req: Request, res: Response) => {
+  const user = await getAuthenticatedUser(req, res);
+  if (!user) return;
+
+  if (user.mfaEnabled && user.mfaTotpSecret) {
+    return res
+      .status(400)
+      .json({ error: "Two-factor authentication is already enabled." });
+  }
+
+  const secret = authenticator.generateSecret();
+  const otpauthUrl = authenticator.keyuri(user.email, "Coslo", secret);
+  const setupToken = signTotpSetupToken(user.id, secret);
+
+  return res.json({
+    otpauthUrl,
+    secret,
+    setupToken
+  });
+});
+
+router.post("/mfa/totp/confirm", async (req: Request, res: Response) => {
+  const authUser = await getAuthenticatedUser(req, res);
+  if (!authUser) return;
+
+  const parsed = confirmTotpSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { setupToken, code } = parsed.data;
+
+  let payload;
+  try {
+    payload = verifyTotpSetupToken(setupToken);
+  } catch {
+    return res.status(400).json({ error: "Invalid or expired setup token." });
+  }
+
+  if (payload.sub !== authUser.id) {
+    return res.status(400).json({
+      error: "This TOTP setup token does not belong to the current user."
+    });
+  }
+
+  const secret = payload.secret;
+
+  const isValid = authenticator.verify({
+    token: code,
+    secret
+  });
+
+  if (!isValid) {
+    return res.status(400).json({ error: "Invalid authentication code." });
+  }
+
+  const backupCodes: string[] = [];
+  const backupHashes: string[] = [];
+
+  for (let i = 0; i < 10; i += 1) {
+    const rawCode = generateBackupCode();
+    backupCodes.push(rawCode);
+    const hash = await bcrypt.hash(rawCode, 10);
+    backupHashes.push(hash);
+  }
+
+  await prisma.$transaction(async (tx: any) => {
+    await tx.mfaBackupCode.deleteMany({ where: { userId: authUser.id } });
+
+    for (const codeHash of backupHashes) {
+      await tx.mfaBackupCode.create({
+        data: {
+          userId: authUser.id,
+          codeHash
+        }
+      });
+    }
+
+    await tx.user.update({
+      where: { id: authUser.id },
+      data: {
+        mfaEnabled: true,
+        mfaTotpSecret: secret
+      }
+    });
+  });
+
+  return res.json({
+    mfaEnabled: true,
+    backupCodes
+  });
+});
+
+router.post("/mfa/totp/disable", async (req: Request, res: Response) => {
+  const authUser = await getAuthenticatedUser(req, res);
+  if (!authUser) return;
+
+  const parsed = disableTotpSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { code, backupCode } = parsed.data;
+
+  if (!code && !backupCode) {
+    return res
+      .status(400)
+      .json({ error: "Provide either a TOTP code or a backup code." });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: authUser.id }
+  });
+
+  if (!user || !user.mfaEnabled || !user.mfaTotpSecret) {
+    return res
+      .status(400)
+      .json({ error: "Two-factor authentication is not enabled." });
+  }
+
+  let allowed = false;
+
+  if (code) {
+    const isValid = authenticator.verify({
+      token: code,
+      secret: user.mfaTotpSecret
+    });
+    if (isValid) {
+      allowed = true;
+    }
+  }
+
+  if (!allowed && backupCode) {
+    const backups = await prisma.mfaBackupCode.findMany({
+      where: { userId: authUser.id, used: false }
+    });
+
+    for (const b of backups) {
+      const ok = await bcrypt.compare(backupCode, b.codeHash);
+      if (ok) {
+        allowed = true;
+        // Mark used (even though we’ll delete all backup codes, this keeps history sane)
+        await prisma.mfaBackupCode.update({
+          where: { id: b.id },
+          data: { used: true, usedAt: new Date() }
+        });
+        break;
+      }
+    }
+  }
+
+  if (!allowed) {
+    return res
+      .status(400)
+      .json({ error: "Invalid authentication code or backup code." });
+  }
+
+  await prisma.$transaction(async (tx: any) => {
+    await tx.mfaBackupCode.deleteMany({ where: { userId: authUser.id } });
+    await tx.user.update({
+      where: { id: authUser.id },
+      data: {
+        mfaEnabled: false,
+        mfaTotpSecret: null
+      }
+    });
+  });
+
+  return res.json({
+    message: "Two-factor authentication has been disabled.",
+    mfaEnabled: false
+  });
+});
 
 // ── DELETE /account ─────────────────────────────────────────
 // Permanently delete the logged-in user and ALL related data.
@@ -264,13 +476,13 @@ router.delete("/", async (req: Request, res: Response) => {
     return res.status(404).json({ error: "User not found" });
   }
 
-  const botIds = userWithBots.bots.map((b) => b.id);
+  const botIds = userWithBots.bots.map((b: any) => b.id);
   const knowledgeClientIds = userWithBots.bots
-    .map((b) => b.knowledgeClientId)
-    .filter((id): id is string => !!id);
+    .map((b: any) => b.knowledgeClientId)
+    .filter((id :any): id is string => !!id);
 
   // 3) Delete everything in a transaction (DB side)
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx :any) => {
     if (botIds.length > 0) {
       await tx.botChannel.deleteMany({ where: { botId: { in: botIds } } });
       await tx.metaConnectSession.deleteMany({
@@ -294,6 +506,7 @@ router.delete("/", async (req: Request, res: Response) => {
       where: { userId: user.id }
     });
     await tx.openAIUsage.deleteMany({ where: { userId: user.id } });
+    await tx.mfaBackupCode.deleteMany({ where: { userId: user.id } });
 
     await tx.user.delete({ where: { id: user.id } });
   });

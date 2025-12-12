@@ -32,7 +32,10 @@ const botCreateSchema = z.object({
 
   calendarId: z.string().optional().nullable(),
   timeZone: z.string().optional().nullable(),
-  defaultDurationMinutes: z.number().int().positive().optional().nullable()
+  defaultDurationMinutes: z.number().int().positive().optional().nullable(),
+
+  // NEW: per-bot toggle for automatic conversation evaluation
+  autoEvaluateConversations: z.boolean().optional().default(false)
 });
 
 const botUpdateSchema = botCreateSchema.partial().omit({ slug: true });
@@ -75,7 +78,6 @@ router.get("/bots", async (req: Request, res: Response) => {
 // Create bot
 router.post("/bots", async (req: Request, res: Response) => {
   const parsed = botCreateSchema.safeParse(req.body);
-  console.log(parsed);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
@@ -105,23 +107,13 @@ router.post("/bots", async (req: Request, res: Response) => {
       calendarId: data.calendarId ?? null,
       timeZone: data.timeZone ?? null,
       defaultDurationMinutes: data.defaultDurationMinutes ?? 30,
-      status: "DRAFT"
+      status: "DRAFT",
+
+      autoEvaluateConversations: data.autoEvaluateConversations
     }
   });
 
-  // No crawl / knowledge client creation here: that happens from Content & Knowledge.
   res.status(201).json(bot);
-});
-
-// Get bot
-router.get("/bots/:id", async (req: Request, res: Response) => {
-  console.log("ciao");
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
-  });
-  console.log(bot);
-  if (!bot) return res.status(404).json({ error: "Not found" });
-  res.json(bot);
 });
 
 // Update bot (features, basics, etc.)
@@ -132,14 +124,14 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
   }
   const data = parsed.data;
 
-  // Carichiamo il bot con la subscription (se esiste)
+  // load bot with subscription (if any)
   const bot = await prisma.bot.findFirst({
     where: { id: req.params.id, userId: req.user!.id },
     include: { subscription: true }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
 
-  // Calcoliamo i flag di feature "nuovi" applicando i valori del body sopra quelli esistenti
+  // feature flags for pricing (unchanged)
   const nextFeatureFlags = {
     useDomainCrawler:
       typeof data.useDomainCrawler === "boolean"
@@ -178,8 +170,6 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     nextFeatureFlags.channelMessenger !== bot.channelMessenger ||
     nextFeatureFlags.useCalendar !== bot.useCalendar;
 
-  // Se il bot è attivo e ha una subscription, e i flag sono cambiati,
-  // aggiorniamo i prezzi su Stripe con proration.
   if (bot.subscription && bot.status === "ACTIVE" && featuresChanged) {
     try {
       await updateBotSubscriptionForFeatureChange(
@@ -212,8 +202,6 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     }
   }
 
-  // A questo punto Stripe è allineato (o non c'era subscription attiva),
-  // possiamo salvare le modifiche del bot nel DB.
   const updated = await prisma.bot.update({
     where: { id: bot.id },
     data: {
@@ -221,9 +209,20 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     }
   });
 
-  // Note: no automatic crawl here either.
   res.json(updated);
 });
+
+// Get bot
+router.get("/bots/:id", async (req: Request, res: Response) => {
+  console.log("ciao");
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id }
+  });
+  console.log(bot);
+  if (!bot) return res.status(404).json({ error: "Not found" });
+  res.json(bot);
+});
+
 
 // Delete bot (hard delete with slug confirmation and full cascade)
 router.delete("/bots/:id", async (req: Request, res: Response) => {

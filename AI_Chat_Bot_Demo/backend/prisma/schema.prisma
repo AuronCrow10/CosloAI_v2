@@ -17,9 +17,14 @@ model User {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  // NEW
-  name       String?
-  avatarUrl  String?
+  // Profile
+  name      String?
+  avatarUrl String?
+
+  // MFA (TOTP)
+  mfaEnabled     Boolean         @default(false)
+  mfaTotpSecret  String?
+  mfaBackupCodes MfaBackupCode[]
 
   bots             Bot[]
   refreshTokens    RefreshToken[]
@@ -27,37 +32,66 @@ model User {
   metaSessions     MetaConnectSession[]
   whatsappSessions WhatsappConnectSession[]
 
-  openaiUsages     OpenAIUsage[]
+  openaiUsages OpenAIUsage[]
+
+  // =========================
+  // REFERRALS (NEW)
+  // =========================
+
+  // If this user is an allowed referrer/partner, this row exists.
+  referralPartner ReferralPartner?
+
+  // If this user was referred by someone else, their attributions live here.
+  referralAttributionsAsLead ReferralAttribution[] @relation("ReferredUserAttributions")
+}
+
+model MfaBackupCode {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  // Hash of the backup code (never store raw codes)
+  codeHash String
+
+  used      Boolean  @default(false)
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 enum UserRole {
   ADMIN
   CLIENT
+  REFERRER
 }
 
 model Bot {
-  id                     String       @id @default(uuid())
+  id                     String    @id @default(uuid())
   userId                 String
-  user                   User         @relation(fields: [userId], references: [id])
-  slug                   String       @unique
+  user                   User      @relation(fields: [userId], references: [id])
+  slug                   String    @unique
   name                   String
   description            String?
   systemPrompt           String
   knowledgeClientId      String?
   domain                 String?
-  useDomainCrawler       Boolean      @default(false)
-  usePdfCrawler          Boolean      @default(false)
-  channelWeb             Boolean      @default(true)
-  channelWhatsapp        Boolean      @default(false)
-  channelInstagram       Boolean      @default(false)
-  channelMessenger       Boolean      @default(false)
-  useCalendar            Boolean      @default(false)
+  useDomainCrawler       Boolean   @default(false)
+  usePdfCrawler          Boolean   @default(false)
+  channelWeb             Boolean   @default(true)
+  channelWhatsapp        Boolean   @default(false)
+  channelInstagram       Boolean   @default(false)
+  channelMessenger       Boolean   @default(false)
+  useCalendar            Boolean   @default(false)
   calendarId             String?
   timeZone               String?
-  defaultDurationMinutes Int?         @default(30)
-  status                 BotStatus    @default(DRAFT)
-  createdAt              DateTime     @default(now())
-  updatedAt              DateTime     @updatedAt
+  defaultDurationMinutes Int?      @default(30)
+  status                 BotStatus @default(DRAFT)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  // NEW: automatic per-conversation evaluation toggle
+  autoEvaluateConversations Boolean @default(false)
 
   channels         BotChannel[]
   subscription     Subscription?
@@ -66,7 +100,13 @@ model Bot {
   metaSessions     MetaConnectSession[]
   whatsappSessions WhatsappConnectSession[]
 
-  openaiUsages     OpenAIUsage[]
+  openaiUsages OpenAIUsage[]
+
+  // =========================
+  // REFERRALS (NEW)
+  // =========================
+  referralAttributions ReferralAttribution[]
+  referralCommissions  ReferralCommission[]
 }
 
 enum BotStatus {
@@ -78,15 +118,15 @@ enum BotStatus {
 }
 
 model BotChannel {
-  id          String       @id @default(uuid())
+  id          String      @id @default(uuid())
   botId       String
-  bot         Bot          @relation(fields: [botId], references: [id])
+  bot         Bot         @relation(fields: [botId], references: [id])
   type        ChannelType
   externalId  String
   accessToken String
   meta        Json?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
   @@index([botId])
   @@index([type, externalId])
@@ -101,21 +141,27 @@ enum ChannelType {
 }
 
 model Subscription {
-  id                   String               @id @default(uuid())
-  botId                String               @unique
-  bot                  Bot                  @relation(fields: [botId], references: [id])
+  id                   String             @id @default(uuid())
+  botId                String             @unique
+  bot                  Bot                @relation(fields: [botId], references: [id])
   stripeCustomerId     String
   stripeSubscriptionId String
-  stripePriceId        String               // kept for backwards compatibility (first / primary price)
+  stripePriceId        String // kept for backwards compatibility (first / primary price)
   status               SubscriptionStatus
   currency             String?
   planSnapshotJson     Json?
-  createdAt            DateTime             @default(now())
-  updatedAt            DateTime             @updatedAt
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
 
   // selected usage plan for this bot
-  usagePlanId          String?
-  usagePlan            UsagePlan?           @relation(fields: [usagePlanId], references: [id])
+  usagePlanId String?
+  usagePlan   UsagePlan? @relation(fields: [usagePlanId], references: [id])
+
+  // =========================
+  // REFERRALS (NEW)
+  // =========================
+  referralAttribution ReferralAttribution?
+  referralCommissions ReferralCommission[]
 }
 
 enum SubscriptionStatus {
@@ -129,28 +175,34 @@ enum SubscriptionStatus {
 }
 
 model Conversation {
-  id             String       @id @default(uuid())
+  id             String      @id @default(uuid())
   botId          String
-  bot            Bot          @relation(fields: [botId], references: [id])
+  bot            Bot         @relation(fields: [botId], references: [id])
   channel        ChannelType
   externalUserId String
-  lastMessageAt  DateTime     @default(now())
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  lastMessageAt  DateTime    @default(now())
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
 
-  messages       Message[]
+  // NEW: long-term memory summary for the conversation
+  memorySummary          String?
+  memorySummaryModel     String?
+  memorySummaryUpdatedAt DateTime?
+
+  messages Message[]
+  evals    ConversationEval[]
 
   @@unique([botId, channel, externalUserId], name: "botId_channel_externalUserId")
 }
 
 model Message {
-  id               String       @id @default(uuid())
-  conversationId   String
-  conversation     Conversation @relation(fields: [conversationId], references: [id])
-  role             MessageRole
-  content          String
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  role           MessageRole
+  content        String
   channelMessageId String?
-  createdAt        DateTime     @default(now())
+  createdAt      DateTime     @default(now())
 
   @@index([conversationId])
 }
@@ -159,6 +211,23 @@ enum MessageRole {
   USER
   ASSISTANT
   SYSTEM
+}
+
+// NEW: stored evaluation(s) for a conversation
+model ConversationEval {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  score   Int
+  label   String?
+  details String?
+  model   String
+  isAuto  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
 }
 
 model RefreshToken {
@@ -187,26 +256,26 @@ model EmailVerificationToken {
 // DB-driven feature pricing (LEGACY – still there, but we’ll move to plans)
 //
 model FeaturePrice {
-  id                 String   @id @default(uuid())
-  code               String   @unique  // e.g. "DOMAIN_CRAWLER", "PDF_CRAWLER", etc.
+  id                 String  @id @default(uuid())
+  code               String  @unique // e.g. "DOMAIN_CRAWLER", "PDF_CRAWLER", etc.
   label              String
   monthlyAmountCents Int
   currency           String
   stripePriceId      String?
-  isActive           Boolean  @default(true)
+  isActive           Boolean @default(true)
 
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 //
 // Usage-based plan definition (per bot)
 //
 model UsagePlan {
-  id           String   @id @default(uuid())
-  code         String   @unique   // e.g. "STARTER", "GROWTH", "SCALE", "CUSTOM"
-  name         String
-  description  String?
+  id          String  @id @default(uuid())
+  code        String  @unique // e.g. "STARTER", "GROWTH", "SCALE", "CUSTOM"
+  name        String
+  description String?
 
   // Token limit per month (for all operations combined).
   // Null = no limit (or “unlimited”).
@@ -215,43 +284,48 @@ model UsagePlan {
   // Billing info
   monthlyAmountCents Int
   currency           String
-  stripePriceId      String?  // Stripe recurring price ID for this plan
+  stripePriceId      String? // Stripe recurring price ID for this plan
 
-  isActive           Boolean  @default(true)
+  isActive Boolean @default(true)
 
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  subscriptions      Subscription[]
+  subscriptions Subscription[]
 }
 
 //
 // Legal payment / invoice log
 //
 model Payment {
-  id                    String   @id @default(uuid())
+  id String @id @default(uuid())
 
-  botId                 String
-  bot                   Bot      @relation(fields: [botId], references: [id])
+  botId String
+  bot   Bot    @relation(fields: [botId], references: [id])
 
   stripeCustomerId      String
   stripeSubscriptionId  String?
   stripeInvoiceId       String?
   stripePaymentIntentId String?
 
-  amountCents           Int
-  currency              String
-  status                String
+  amountCents Int
+  currency    String
+  status      String
 
-  billingEmail          String?
-  billingName           String?
-  billingAddressJson    Json?
+  billingEmail       String?
+  billingName        String?
+  billingAddressJson Json?
 
-  periodStart           DateTime?
-  periodEnd             DateTime?
+  periodStart DateTime?
+  periodEnd   DateTime?
 
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // =========================
+  // REFERRALS (NEW)
+  // =========================
+  referralCommission ReferralCommission?
 }
 
 model MetaConnectSession {
@@ -287,21 +361,192 @@ model WhatsappConnectSession {
 }
 
 model OpenAIUsage {
-  id               String   @id @default(uuid())
-  userId           String?
-  user             User?    @relation(fields: [userId], references: [id])
-  botId            String?
-  bot              Bot?     @relation(fields: [botId], references: [id])
+  id   String  @id @default(uuid())
+  userId String?
+  user   User? @relation(fields: [userId], references: [id])
+  botId  String?
+  bot    Bot?  @relation(fields: [botId], references: [id])
 
-  model            String
-  operation        String
+  model     String
+  operation String
 
   promptTokens     Int
   completionTokens Int
   totalTokens      Int
 
-  createdAt        DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([userId, createdAt])
   @@index([botId, createdAt])
+}
+
+enum ReferralPartnerStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ReferralCommissionKind {
+  EARNED
+  REVERSAL
+}
+
+enum ReferralCommissionStatus {
+  PENDING
+  PAID
+}
+
+enum ReferralPayoutStatus {
+  OPEN
+  PAID
+}
+
+model ReferralPartner {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  status ReferralPartnerStatus @default(ACTIVE)
+
+  // 8% = 800 bps
+  commissionBps Int @default(800)
+
+  // Optional: payout info (PayPal email, IBAN, etc.)
+  payoutDetailsJson Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  codes         ReferralCode[]
+  attributions  ReferralAttribution[]
+  commissions   ReferralCommission[]
+  payoutPeriods ReferralPayoutPeriod[]
+}
+
+model ReferralCode {
+  id        String          @id @default(uuid())
+  partnerId String
+  partner   ReferralPartner @relation(fields: [partnerId], references: [id])
+
+  code     String  @unique
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clicks       ReferralClick[]
+  attributions ReferralAttribution[]
+
+  @@index([partnerId])
+}
+
+model ReferralClick {
+  id             String       @id @default(uuid())
+  referralCodeId String
+  referralCode   ReferralCode @relation(fields: [referralCodeId], references: [id])
+
+  landingPath String?
+  referrerUrl String?
+  userAgent   String?
+  ipHash      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([referralCodeId, createdAt])
+}
+
+model ReferralAttribution {
+  id String @id @default(uuid())
+
+  referralCodeId String
+  referralCode   ReferralCode @relation(fields: [referralCodeId], references: [id])
+
+  partnerId String
+  partner   ReferralPartner @relation(fields: [partnerId], references: [id])
+
+  referredUserId String
+  referredUser   User @relation("ReferredUserAttributions", fields: [referredUserId], references: [id])
+
+  botId String
+  bot   Bot @relation(fields: [botId], references: [id])
+
+  // Link to your Subscription record once it exists
+  subscriptionId String?        @unique
+  subscription   Subscription?  @relation(fields: [subscriptionId], references: [id])
+
+  stripeCustomerId     String?
+  stripeSubscriptionId String @unique
+
+  checkoutSessionId String?
+
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Opposite for ReferralCommission.attribution
+  commissions ReferralCommission[]
+
+  @@index([partnerId, startedAt])
+  @@index([referredUserId])
+  @@index([botId])
+}
+
+model ReferralCommission {
+  id String @id @default(uuid())
+
+  partnerId String
+  partner   ReferralPartner @relation(fields: [partnerId], references: [id])
+
+  attributionId String?
+  attribution   ReferralAttribution? @relation(fields: [attributionId], references: [id])
+
+  botId String
+  bot   Bot @relation(fields: [botId], references: [id])
+
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  paymentId String? @unique
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+
+  stripeSubscriptionId String
+  stripeInvoiceId      String
+
+  kind   ReferralCommissionKind   @default(EARNED)
+  status ReferralCommissionStatus @default(PENDING)
+
+  amountBaseCents Int
+  commissionCents Int
+  currency        String
+
+  periodStart DateTime?
+  periodEnd   DateTime?
+  monthKey    String // "YYYY-MM"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([partnerId, monthKey])
+  @@unique([stripeInvoiceId, kind], name: "stripeInvoiceId_kind")
+}
+
+model ReferralPayoutPeriod {
+  id String @id @default(uuid())
+
+  partnerId String
+  partner   ReferralPartner @relation(fields: [partnerId], references: [id])
+
+  monthKey  String // "YYYY-MM"
+  currency  String
+  amountCents Int @default(0)
+
+  status ReferralPayoutStatus @default(OPEN)
+  paidAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([partnerId, monthKey, currency], name: "partnerId_month_currency")
+  @@index([partnerId, monthKey])
 }

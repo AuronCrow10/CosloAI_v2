@@ -48,6 +48,12 @@ export interface AppConfig {
   metaAppId: string | null;
   metaAppSecret: string | null;
   metaRedirectUri: string | null;
+
+  // Referrals
+  referralCookieName: string;
+  referralCookieMaxAgeDays: number;
+  referralDefaultCommissionBps: number; // 800 = 8%
+  referralIpHashSalt: string | null;
 }
 
 function requireEnv(key: string): string {
@@ -102,5 +108,11 @@ export const config: AppConfig = {
 
   metaAppId: process.env.META_APP_ID || null,
   metaAppSecret: process.env.META_APP_SECRET || null,
-  metaRedirectUri: process.env.META_REDIRECT_URI || null
+  metaRedirectUri: process.env.META_REDIRECT_URI || null,
+
+  // Referrals
+  referralCookieName: process.env.REFERRAL_COOKIE_NAME || "ref",
+  referralCookieMaxAgeDays: Number(process.env.REFERRAL_COOKIE_MAX_AGE_DAYS || 30),
+  referralDefaultCommissionBps: Number(process.env.REFERRAL_DEFAULT_COMMISSION_BPS || 800),
+  referralIpHashSalt: process.env.REFERRAL_IP_HASH_SALT || null
 };

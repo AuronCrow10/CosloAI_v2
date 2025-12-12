@@ -15,14 +15,17 @@ import metaWebhookRouter from "./routes/metaWebhook";
 import { stripeWebhookHandler } from "./routes/stripeWebhook";
 import conversationsRouter from "./routes/conversations";
 import metaAuthRouter from "./routes/metaAuth";
-import whatsappEmbeddedRouter from "./routes/whatsappEmbedded"; // NEW
+import whatsappEmbeddedRouter from "./routes/whatsappEmbedded";
 import { scheduleMetaTokenRefreshJob } from "./services/metaTokenService";
-import usageRouter from "./routes/usage"; // NEW
+import usageRouter from "./routes/usage";
 import accountRouter from "./routes/account";
 import dashboardRouter from "./routes/dashboard";
-
+import referralsRouter from "./routes/referrals";
 
 const app = express();
+
+// IMPORTANT behind proxies (Render/Fly/Nginx/Cloudflare)
+app.set("trust proxy", 1);
 
 // Stripe webhook uses raw body; mount BEFORE json middleware
 app.post(
@@ -34,9 +37,51 @@ app.post(
 app.use(express.json());
 app.use(cookieParser());
 
+/**
+ * Fix OAuth / postMessage console warning:
+ * COOP "same-origin" can break auth popups; allow-popups keeps it safe while enabling sign-in flows.
+ * If nginx sets headers, mirror this there too (nginx can override Express).
+ */
+app.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  next();
+});
+
+/**
+ * CORS:
+ * - Your prod is same-origin (nginx serves frontend), so CORS is mostly irrelevant there.
+ * - But in local dev, if origin differs, `credentials: true` cannot be combined with `origin: "*"`
+ *   or browsers will block.
+ *
+ * Behavior:
+ * - If FRONTEND_ORIGIN is set (comma-separated allowed origins), only allow those.
+ * - If not set:
+ *    - in development: allow all origins (reflected) to avoid dev breakage
+ *    - in production: do not add CORS headers (same-origin setup)
+ */
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_ORIGIN || "*",
+    origin: (origin, cb) => {
+      // Non-browser clients / same-origin requests might not send Origin
+      if (!origin) return cb(null, true);
+
+      if (allowedOrigins.length > 0) {
+        return cb(null, allowedOrigins.includes(origin));
+      }
+
+      if (process.env.NODE_ENV !== "production") {
+        // reflect any origin in dev
+        return cb(null, true);
+      }
+
+      // prod: no CORS headers (same-origin expected)
+      return cb(null, false);
+    },
     credentials: true
   })
 );
@@ -52,13 +97,15 @@ app.use("/api", botChannelsRouter);
 app.use("/api", botKnowledgeRouter);
 app.use("/api", billingRouter);
 app.use("/api", conversationsRouter);
-app.use("/api", metaAuthRouter); // ⬅️ HERE
-app.use("/api", whatsappEmbeddedRouter); // NEW
-app.use("/api", usageRouter); // NEW
+app.use("/api", metaAuthRouter);
+app.use("/api", whatsappEmbeddedRouter);
+app.use("/api", usageRouter);
 
 app.use("/api/account", accountRouter);
-app.use("/api", dashboardRouter); // 👈 NEW
+app.use("/api", dashboardRouter);
 
+// ✅ Referrals (NEW)
+app.use("/api", referralsRouter);
 
 // Chat & webhooks
 app.use("/api", chatRouter);
@@ -95,6 +142,5 @@ app.listen(config.port, () => {
   console.log(`SaaS bot backend listening on port ${config.port}`);
 });
 
-
-  // Start Meta token refresh cron-like job
-  scheduleMetaTokenRefreshJob();
+// Start Meta token refresh cron-like job
+scheduleMetaTokenRefreshJob();

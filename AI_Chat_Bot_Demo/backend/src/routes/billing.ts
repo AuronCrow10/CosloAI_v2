@@ -2,11 +2,56 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../prisma/prisma";
-import { stripe, computeBotPricingForBot, updateBotSubscriptionForUsagePlanChange } from "../services/billingService";
-import { config } from "../config";
-import { getUsageForBot } from "../services/usageAggregationService"; // ⬅️ NEW
+import {
+  stripe,
+  computeBotPricingForBot,
+  updateBotSubscriptionForUsagePlanChange
+} from "../services/billingService";
+import { getUsageForBot } from "../services/usageAggregationService";
+
+// ✅ Referrals
+import {
+  validateReferralCode,
+  REFERRAL_COOKIE_NAME
+} from "../services/referralService";
 
 const router = Router();
+
+/**
+ * IMPORTANT:
+ * Your TS setup is strict and your Prisma client types are not being picked up
+ * (or they don't export model/types in your environment). So we use structural
+ * typing for the fields we actually read from Prisma results.
+ */
+
+type UsagePlanLite = {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  monthlyTokens: number | null;
+  monthlyAmountCents: number;
+  currency: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type PaymentWithBotLite = {
+  id: string;
+  botId: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  createdAt: Date;
+  periodStart: Date | null;
+  periodEnd: Date | null;
+  stripeInvoiceId: string | null;
+  bot: {
+    id: string;
+    name: string;
+    userId: string;
+  };
+};
 
 function formatAmountForUi(amountCents: number, currency: string): string {
   return new Intl.NumberFormat("en-GB", {
@@ -16,15 +61,17 @@ function formatAmountForUi(amountCents: number, currency: string): string {
   }).format(amountCents / 100);
 }
 
-// Require auth for all billing routes
+// Require auth for all /billing/* routes
 router.use("/billing", requireAuth);
 
-// GET /api/billing/overview
+/**
+ * GET /api/billing/overview
+ * - For logged-in user: lists subscriptions + usage + totals + recent payments.
+ */
 router.get("/billing/overview", async (req, res) => {
   try {
     const userId = (req as any).user.id as string;
 
-    // 1) Load all bots for this user with subscription + usage plan + user
     const bots = await prisma.bot.findMany({
       where: { userId },
       include: {
@@ -49,7 +96,6 @@ router.get("/billing/overview", async (req, res) => {
 
       const usagePlan = sub.usagePlan ?? null;
 
-      // 2) Usage for current month (tokens)
       const usage = await getUsageForBot({ bot, from, to });
       const usedTokens = usage.totalTokens;
       const monthlyTokens = usagePlan?.monthlyTokens ?? null;
@@ -58,7 +104,6 @@ router.get("/billing/overview", async (req, res) => {
           ? Math.min(100, Math.round((usedTokens / monthlyTokens) * 100))
           : null;
 
-      // 3) Money: derive from planSnapshotJson or recompute features if needed
       const snap: any = sub.planSnapshotJson ?? null;
 
       let featuresAmountCents: number | null =
@@ -130,6 +175,7 @@ router.get("/billing/overview", async (req, res) => {
       (sum, s) => sum + (s.totalMonthlyAmountCents || 0),
       0
     );
+
     const currency =
       subscriptions[0]?.currency ??
       (subscriptions.length > 0 ? subscriptions[0].currency : "eur");
@@ -139,21 +185,20 @@ router.get("/billing/overview", async (req, res) => {
       currency
     );
 
-    // 4) Payments history (most recent first)
-    const payments = await prisma.payment.findMany({
+    // Payments history (most recent first)
+    const payments = (await prisma.payment.findMany({
       where: {
-        bot: {
-          userId
-        }
+        bot: { userId }
       },
       include: {
         bot: true
       },
       orderBy: { createdAt: "desc" },
       take: 50
-    });
+    })) as unknown as PaymentWithBotLite[];
 
-    const paymentSummaries = payments.map((p) => ({
+    // ✅ Explicit param type => noImplicitAny fixed
+    const paymentSummaries = payments.map((p: PaymentWithBotLite) => ({
       id: p.id,
       botId: p.botId,
       botName: p.bot.name,
@@ -178,8 +223,9 @@ router.get("/billing/overview", async (req, res) => {
   }
 });
 
-
-// GET /api/billing/payments/:id/invoice-url
+/**
+ * GET /api/billing/payments/:id/invoice-url
+ */
 router.get("/billing/payments/:id/invoice-url", async (req, res) => {
   try {
     const userId = (req as any).user.id as string;
@@ -194,7 +240,8 @@ router.get("/billing/payments/:id/invoice-url", async (req, res) => {
       include: { bot: true }
     });
 
-    if (!payment || payment.bot.userId !== userId) {
+    // payment includes bot due to include
+    if (!payment || (payment as any).bot.userId !== userId) {
       return res.status(404).json({ error: "Payment not found" });
     }
 
@@ -221,14 +268,18 @@ router.get("/billing/payments/:id/invoice-url", async (req, res) => {
   }
 });
 
-
-router.post("/bots/:id/pricing-preview", async (req, res) => {
+/**
+ * POST /api/bots/:id/pricing-preview
+ * - Protected + ownership checked
+ */
+router.post("/bots/:id/pricing-preview", requireAuth, async (req, res) => {
   try {
     const botId = req.params.id;
+    const userId = (req as any).user.id as string;
+
     const bot = await prisma.bot.findUnique({ where: { id: botId } });
-    if (!bot) {
-      return res.status(404).json({ error: "Bot not found" });
-    }
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (bot.userId !== userId) return res.status(403).json({ error: "Forbidden" });
 
     const body = (req.body || {}) as Partial<{
       useDomainCrawler: boolean;
@@ -250,9 +301,7 @@ router.post("/bots/:id/pricing-preview", async (req, res) => {
           ? body.usePdfCrawler
           : bot.usePdfCrawler,
       channelWeb:
-        typeof body.channelWeb === "boolean"
-          ? body.channelWeb
-          : bot.channelWeb,
+        typeof body.channelWeb === "boolean" ? body.channelWeb : bot.channelWeb,
       channelWhatsapp:
         typeof body.channelWhatsapp === "boolean"
           ? body.channelWhatsapp
@@ -266,9 +315,7 @@ router.post("/bots/:id/pricing-preview", async (req, res) => {
           ? body.channelInstagram
           : bot.channelInstagram,
       useCalendar:
-        typeof body.useCalendar === "boolean"
-          ? body.useCalendar
-          : bot.useCalendar
+        typeof body.useCalendar === "boolean" ? body.useCalendar : bot.useCalendar
     };
 
     const pricing = await computeBotPricingForBot(flags);
@@ -285,16 +332,20 @@ router.post("/bots/:id/pricing-preview", async (req, res) => {
   }
 });
 
-// NEW: list active usage plans for selection in frontend
+/**
+ * GET /api/usage-plans
+ * - Public list of active usage plans
+ */
 router.get("/usage-plans", async (_req, res) => {
   try {
-    const plans = await prisma.usagePlan.findMany({
+    const plans = (await prisma.usagePlan.findMany({
       where: { isActive: true },
       orderBy: { monthlyAmountCents: "asc" }
-    });
+    })) as unknown as UsagePlanLite[];
 
+    // ✅ Explicit param type => noImplicitAny fixed
     return res.json(
-      plans.map((p) => ({
+      plans.map((p: UsagePlanLite) => ({
         id: p.id,
         code: p.code,
         name: p.name,
@@ -312,15 +363,19 @@ router.get("/usage-plans", async (_req, res) => {
   }
 });
 
-// Subscription checkout for bot (Stripe Checkout, subscription mode)
-// Now requires a usagePlanId and charges: features + plan
-router.post("/bots/:id/checkout", async (req, res) => {
+/**
+ * POST /api/bots/:id/checkout
+ * - Protected + ownership checked
+ * - Adds referralCode to Stripe metadata (cookie or body)
+ */
+router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
   try {
     if (!stripe) {
       return res.status(500).json({ error: "Stripe is not configured" });
     }
 
     const botId = req.params.id;
+    const userId = (req as any).user.id as string;
     const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
 
     if (!usagePlanId) {
@@ -331,28 +386,19 @@ router.post("/bots/:id/checkout", async (req, res) => {
       where: { id: botId },
       include: { user: true }
     });
-    if (!bot) {
-      return res.status(404).json({ error: "Bot not found" });
-    }
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (bot.userId !== userId) return res.status(403).json({ error: "Forbidden" });
 
     const usagePlan = await prisma.usagePlan.findFirst({
-      where: {
-        id: usagePlanId,
-        isActive: true
-      }
+      where: { id: usagePlanId, isActive: true }
     });
-
-    if (!usagePlan) {
-      return res.status(404).json({ error: "Usage plan not found" });
-    }
-
+    if (!usagePlan) return res.status(404).json({ error: "Usage plan not found" });
     if (!usagePlan.stripePriceId) {
       return res.status(500).json({
         error: `Usage plan ${usagePlan.code} has no Stripe price configured`
       });
     }
 
-    // Compute pricing based on currently stored feature flags (features-only)
     const featurePricing = await computeBotPricingForBot({
       useDomainCrawler: bot.useDomainCrawler,
       usePdfCrawler: bot.usePdfCrawler,
@@ -363,7 +409,6 @@ router.post("/bots/:id/checkout", async (req, res) => {
       useCalendar: bot.useCalendar
     });
 
-    // Ensure currency matches between features and plan
     if (featurePricing.currency !== usagePlan.currency) {
       return res.status(500).json({
         error: `Currency mismatch between features (${featurePricing.currency}) and plan (${usagePlan.currency})`
@@ -374,7 +419,22 @@ router.post("/bots/:id/checkout", async (req, res) => {
       featurePricing.totalAmountCents + usagePlan.monthlyAmountCents;
     const currency = featurePricing.currency;
 
-    // Find or create Stripe customer for this bot/user
+    // Referral attribution (cookie-first, optional body override)
+    const rawReferral =
+      (req.body?.referralCode as string | undefined) ||
+      (req as any).cookies?.[REFERRAL_COOKIE_NAME];
+
+    let referralCodeToApply: string | null = null;
+
+    if (rawReferral) {
+      const valid = await validateReferralCode(rawReferral);
+
+      // Prevent self-referral
+      if (valid && valid.partnerUserId !== bot.userId) {
+        referralCodeToApply = valid.code;
+      }
+    }
+
     let stripeCustomerId: string | null = null;
     const existingSub = await prisma.subscription.findUnique({
       where: { botId }
@@ -386,14 +446,11 @@ router.post("/bots/:id/checkout", async (req, res) => {
     if (!stripeCustomerId) {
       const customer = await stripe.customers.create({
         email: bot.user.email,
-        metadata: {
-          userId: bot.userId
-        }
+        metadata: { userId: bot.userId }
       });
       stripeCustomerId = customer.id;
     }
 
-    // Mark bot as pending payment
     await prisma.bot.update({
       where: { id: botId },
       data: { status: "PENDING_PAYMENT" }
@@ -402,22 +459,18 @@ router.post("/bots/:id/checkout", async (req, res) => {
     const frontendOrigin =
       process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
-    // Compact snapshot for Stripe metadata (keep under 500 chars)
     const compactPlanSnapshot = {
-      f: featurePricing.featureCodes,           // feature codes
-      fp: featurePricing.totalAmountCents,      // features amount
-      p: usagePlan.code,                        // plan code
-      pt: usagePlan.monthlyAmountCents,         // plan amount
-      t: totalAmountCents,                      // total (features + plan)
-      c: currency                               // currency
+      f: featurePricing.featureCodes,
+      fp: featurePricing.totalAmountCents,
+      p: usagePlan.code,
+      pt: usagePlan.monthlyAmountCents,
+      t: totalAmountCents,
+      c: currency
     };
 
     const lineItemsForStripe = [
       ...featurePricing.lineItemsForStripe,
-      {
-        price: usagePlan.stripePriceId,
-        quantity: 1
-      }
+      { price: usagePlan.stripePriceId, quantity: 1 }
     ];
 
     const session = await stripe.checkout.sessions.create({
@@ -427,18 +480,10 @@ router.post("/bots/:id/checkout", async (req, res) => {
       success_url: `${frontendOrigin}/app/bots/${bot.id}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${frontendOrigin}/app/bots/${bot.id}?checkout=cancelled`,
 
-      // TAX & BILLING COLLECTION
-      automatic_tax: {
-        enabled: true
-      },
+      automatic_tax: { enabled: true },
       billing_address_collection: "required",
-      customer_update: {
-        address: "auto",
-        name: "auto"
-      },
-      tax_id_collection: {
-        enabled: true
-      },
+      customer_update: { address: "auto", name: "auto" },
+      tax_id_collection: { enabled: true },
 
       metadata: {
         botId,
@@ -451,13 +496,17 @@ router.post("/bots/:id/checkout", async (req, res) => {
         totalAmountCents: String(totalAmountCents),
         currency,
         usagePlanId: usagePlan.id,
-        planSnapshot: JSON.stringify(compactPlanSnapshot)
+        planSnapshot: JSON.stringify(compactPlanSnapshot),
+
+        referralCode: referralCodeToApply ?? ""
       },
+
       subscription_data: {
         metadata: {
           botId,
           userId: bot.userId,
-          usagePlanId: usagePlan.id
+          usagePlanId: usagePlan.id,
+          referralCode: referralCodeToApply ?? ""
         }
       }
     });
@@ -465,17 +514,18 @@ router.post("/bots/:id/checkout", async (req, res) => {
     return res.json({ checkoutUrl: session.url });
   } catch (err: any) {
     console.error("Error starting checkout session:", err);
-    return res
-      .status(500)
-      .json({ error: "Unable to start checkout session" });
+    return res.status(500).json({ error: "Unable to start checkout session" });
   }
 });
 
-// POST /api/bots/:id/cancel-subscription
-router.post("/bots/:id/cancel-subscription", async (req, res) => {
+/**
+ * POST /api/bots/:id/cancel-subscription
+ * - Protected + ownership checked
+ */
+router.post("/bots/:id/cancel-subscription", requireAuth, async (req, res) => {
   try {
     const botId = req.params.id;
-    const userId = (req as any).user.id;
+    const userId = (req as any).user.id as string;
 
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
@@ -487,35 +537,27 @@ router.post("/bots/:id/cancel-subscription", async (req, res) => {
     }
 
     if (!bot.subscription) {
-      return res
-        .status(400)
-        .json({ error: "No active subscription for this bot" });
+      return res.status(400).json({ error: "No active subscription for this bot" });
     }
 
     const stripeSubscriptionId = bot.subscription.stripeSubscriptionId;
 
-    // Cancel Stripe subscription immediately
     if (stripe) {
       try {
         await stripe.subscriptions.cancel(stripeSubscriptionId);
       } catch (err) {
         console.error("Error canceling Stripe subscription", err);
-        // Even if Stripe fails, we still mark bot as canceled
       }
     }
 
     await prisma.subscription.update({
       where: { id: bot.subscription.id },
-      data: {
-        status: "CANCELED"
-      }
+      data: { status: "CANCELED" }
     });
 
     const updatedBot = await prisma.bot.update({
       where: { id: botId },
-      data: {
-        status: "CANCELED"
-      }
+      data: { status: "CANCELED" }
     });
 
     return res.json(updatedBot);
@@ -525,8 +567,9 @@ router.post("/bots/:id/cancel-subscription", async (req, res) => {
   }
 });
 
-
-// POST /api/bots/:id/change-plan
+/**
+ * POST /api/bots/:id/change-plan
+ */
 router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
   try {
     if (!stripe) {
@@ -551,15 +594,11 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
     });
 
     if (!bot || !bot.subscription) {
-      return res
-        .status(404)
-        .json({ error: "Bot or subscription not found" });
+      return res.status(404).json({ error: "Bot or subscription not found" });
     }
 
     if (bot.status !== "ACTIVE") {
-      return res
-        .status(400)
-        .json({ error: "Bot must be ACTIVE to change plan" });
+      return res.status(400).json({ error: "Bot must be ACTIVE to change plan" });
     }
 
     if (!bot.subscription.usagePlanId) {
@@ -569,7 +608,6 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
       });
     }
 
-    // No-op if they pick the same plan
     if (bot.subscription.usagePlanId === usagePlanId) {
       return res.json({ ok: true, unchanged: true });
     }
@@ -591,6 +629,5 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
     return res.status(500).json({ error: "Failed to change usage plan" });
   }
 });
-
 
 export default router;

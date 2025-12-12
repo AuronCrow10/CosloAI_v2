@@ -12,7 +12,18 @@ const SALT_ROUNDS = 10;
 
 export interface JwtPayload {
   sub: string;
-  role: "ADMIN" | "CLIENT";
+  role: "ADMIN" | "CLIENT" | "REFERRER";
+}
+
+export interface MfaTokenPayload {
+  sub: string;
+  purpose: "mfa_login";
+}
+
+export interface TotpSetupTokenPayload {
+  sub: string;
+  secret: string;
+  purpose: "totp_setup";
 }
 
 export async function hashPassword(raw: string): Promise<string> {
@@ -31,6 +42,47 @@ export function signAccessToken(payload: JwtPayload): string {
 
 export function verifyAccessToken(token: string): JwtPayload {
   return jwt.verify(token, config.jwtAccessSecret) as JwtPayload;
+}
+
+/**
+ * Short-lived token used during MFA login step (no session yet).
+ */
+export function signMfaToken(userId: string): string {
+  const payload: MfaTokenPayload = { sub: userId, purpose: "mfa_login" };
+  return jwt.sign(payload, config.jwtAccessSecret, {
+    expiresIn: 60 * 5 // 5 minutes
+  });
+}
+
+export function verifyMfaToken(token: string): MfaTokenPayload {
+  const payload = jwt.verify(token, config.jwtAccessSecret) as MfaTokenPayload;
+  if (payload.purpose !== "mfa_login" || !payload.sub) {
+    throw new Error("Invalid MFA token");
+  }
+  return payload;
+}
+
+/**
+ * Short-lived token used while the user is setting up TOTP on their device.
+ * Carries the secret until they confirm with a valid code.
+ */
+export function signTotpSetupToken(userId: string, secret: string): string {
+  const payload: TotpSetupTokenPayload = {
+    sub: userId,
+    secret,
+    purpose: "totp_setup"
+  };
+  return jwt.sign(payload, config.jwtAccessSecret, {
+    expiresIn: 60 * 10 // 10 minutes
+  });
+}
+
+export function verifyTotpSetupToken(token: string): TotpSetupTokenPayload {
+  const payload = jwt.verify(token, config.jwtAccessSecret) as TotpSetupTokenPayload;
+  if (payload.purpose !== "totp_setup" || !payload.sub || !payload.secret) {
+    throw new Error("Invalid TOTP setup token");
+  }
+  return payload;
 }
 
 /**

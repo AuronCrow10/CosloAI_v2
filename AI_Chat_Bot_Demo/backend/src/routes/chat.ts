@@ -2,7 +2,10 @@
 
 import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
-import { generateBotReplyForSlug, ChatServiceError } from "../services/chatService";
+import {
+  generateBotReplyForSlug,
+  ChatServiceError
+} from "../services/chatService";
 import { getBotConfigBySlug } from "../bots/config";
 
 import { prisma } from "../prisma/prisma";
@@ -10,6 +13,7 @@ import {
   findOrCreateConversation,
   logMessage
 } from "../services/conversationService";
+import { evaluateConversation } from "../services/conversationAnalyticsService";
 
 const router = Router();
 
@@ -53,7 +57,7 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
   let dbConversationId: string | null = null;
 
   try {
-    // --- NEW: conversation creation BEFORE OpenAI, so we can load history ---
+    // Conversation creation BEFORE OpenAI, so we can load history & store logs
     const dbBot = await prisma.bot.findUnique({ where: { slug } });
 
     if (dbBot) {
@@ -70,7 +74,7 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
       conversationId: dbConversationId ?? undefined
     });
 
-    // --- Conversation logging (same behavior, now reusing dbConversationId) ---
+    // --- Conversation logging ---
     try {
       if (dbConversationId) {
         await logMessage({
@@ -84,13 +88,35 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
           role: "ASSISTANT",
           content: reply
         });
-      } else {
-        // Non fatal: slug exists only in DEMO_BOTS, no logging in DB
-        // console.debug(`No DB bot found for slug=${slug}, skipping logging`);
       }
     } catch (logErr) {
       console.error("Failed to log conversation/messages", logErr);
       // Do not block the response if logging fails
+    }
+
+    // --- Optional automatic evaluation for this conversation ---
+    try {
+      if (dbConversationId && dbBot && dbBot.autoEvaluateConversations) {
+        const messageCount = await prisma.message.count({
+          where: { conversationId: dbConversationId }
+        });
+
+        if (messageCount >= 6) {
+          const existingAutoEval = await prisma.conversationEval.findFirst({
+            where: {
+              conversationId: dbConversationId,
+              isAuto: true
+            }
+          });
+
+          if (!existingAutoEval) {
+            await evaluateConversation(slug, dbConversationId, true);
+          }
+        }
+      }
+    } catch (evalErr) {
+      console.error("Failed to auto-evaluate conversation", evalErr);
+      // Never break chat flow because of eval issues
     }
 
     return res.json({
