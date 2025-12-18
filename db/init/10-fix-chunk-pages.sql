@@ -9,3 +9,5 @@ ALTER TABLE page_chunks_small
 ALTER TABLE page_chunks_large
   ADD CONSTRAINT page_chunks_large_chunk_hash_unique
   UNIQUE (client_id, chunk_hash);
+
+  
