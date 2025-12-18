@@ -1,6 +1,6 @@
 // services/chatService.ts
 
-import { getBotConfigBySlug } from "../bots/config";
+import { getBotConfigBySlug, BookingConfig } from "../bots/config";
 import { searchKnowledge } from "../knowledge/client";
 import {
   ChatMessage,
@@ -22,6 +22,8 @@ const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
 const HISTORY_TURNS_TO_KEEP = 2; // 2 user+assistant turns = 4 messages total
 
+const BASE_BOOKING_FIELDS = ["name", "email", "phone", "service", "datetime"] as const;
+
 export class ChatServiceError extends Error {
   public readonly statusCode: number;
 
@@ -31,51 +33,161 @@ export class ChatServiceError extends Error {
   }
 }
 
-// Tool schema for booking
-const bookingTool: ChatTool = {
-  type: "function",
-  function: {
-    name: "book_appointment",
-    description: "Create an appointment for the user in the business calendar.",
-    parameters: {
-      type: "object",
-      properties: {
-        name: {
-          type: "string",
-          description: "User's full name"
-        },
-        phone: {
-          type: "string",
-          description:
-            "User's phone number including country code if possible"
-        },
-        service: {
-          type: "string",
-          description:
-            "Requested service or treatment (e.g. haircut, dinner for 2, etc.)"
-        },
-        datetime: {
-          type: "string",
-          description:
-            "Requested appointment date and time in ISO 8601 (e.g. 2025-11-23T15:00:00). Treat as local time in the business's time zone."
-        }
-      },
-      required: ["name", "phone", "service", "datetime"]
-    }
-  }
+/**
+ * Narrowed/normalized view of booking config that the chat layer needs.
+ * We don't care about provider, calendarId, templates, etc. here – that's
+ * handled in bookingService.ts.
+ */
+type BotBookingConfig = {
+  requiredFields: string[];
+  customFields: string[];
+  minLeadHours: number | null;
+  maxAdvanceDays: number | null;
 };
 
+function normalizeBookingConfigForChat(
+  booking?: BookingConfig
+): BotBookingConfig | null {
+  if (!booking || !booking.enabled) return null;
+
+  const minLeadHours =
+    typeof booking.minLeadHours === "number" && booking.minLeadHours > 0
+      ? booking.minLeadHours
+      : null;
+
+  const maxAdvanceDays =
+    typeof booking.maxAdvanceDays === "number" && booking.maxAdvanceDays > 0
+      ? booking.maxAdvanceDays
+      : null;
+
+  let requiredFields: string[] =
+    Array.isArray(booking.requiredFields) && booking.requiredFields.length > 0
+      ? booking.requiredFields
+      : BASE_BOOKING_FIELDS.slice();
+
+  // Clean + dedupe + ensure base fields exist
+  const set = new Set<string>();
+  for (const f of requiredFields) {
+    const trimmed = f.trim();
+    if (trimmed) set.add(trimmed);
+  }
+  for (const base of BASE_BOOKING_FIELDS) {
+    set.add(base);
+  }
+  requiredFields = Array.from(set);
+
+  const customFields = requiredFields.filter(
+    (f) => !BASE_BOOKING_FIELDS.includes(f as (typeof BASE_BOOKING_FIELDS)[number])
+  );
+
+  return {
+    requiredFields,
+    customFields,
+    minLeadHours,
+    maxAdvanceDays
+  };
+}
+
+function buildBookingTool(bookingCfg: BotBookingConfig): ChatTool {
+  const properties: Record<string, any> = {
+    name: {
+      type: "string",
+      description: "User's full name"
+    },
+    email: {
+      type: "string",
+      description:
+        "User's email address, used for booking confirmations and reminders"
+    },
+    phone: {
+      type: "string",
+      description:
+        "User's phone number including country code if possible"
+    },
+    service: {
+      type: "string",
+      description:
+        "Requested service or treatment (e.g. haircut, dinner for 2, etc.)"
+    },
+    datetime: {
+      type: "string",
+      description:
+        "Requested appointment date and time in ISO 8601 (e.g. 2025-11-23T15:00:00). Treat as local time in the business's time zone."
+    }
+  };
+
+  // Add custom fields from config so the model can pass them through
+  for (const customField of bookingCfg.customFields) {
+    if (properties[customField]) continue;
+    properties[customField] = {
+      type: "string",
+      description: `Custom booking field '${customField}' as free text provided by the user.`
+    };
+  }
+
+  const required = bookingCfg.requiredFields.slice();
+
+  return {
+    type: "function",
+    function: {
+      name: "book_appointment",
+      description: "Create an appointment for the user in the business calendar.",
+      parameters: {
+        type: "object",
+        properties,
+        required
+      }
+    }
+  };
+}
+
 // Generic booking instructions injected as extra system message
-function getBookingInstructions(): string {
+function getBookingInstructions(bookingCfg: BotBookingConfig): string {
+  const requiredList = bookingCfg.requiredFields.join(", ");
+  const customList =
+    bookingCfg.customFields.length > 0
+      ? bookingCfg.customFields.join(", ")
+      : "none";
+
+  const timingParts: string[] = [];
+  if (typeof bookingCfg.minLeadHours === "number" && bookingCfg.minLeadHours > 0) {
+    timingParts.push(
+      `- The appointment must be at least ${bookingCfg.minLeadHours} hour(s) in the future.`
+    );
+  }
+  if (typeof bookingCfg.maxAdvanceDays === "number" && bookingCfg.maxAdvanceDays > 0) {
+    timingParts.push(
+      `- Do not offer or accept dates more than ${bookingCfg.maxAdvanceDays} day(s) from now.`
+    );
+  }
+
+  const timingText =
+    timingParts.length > 0
+      ? "\nBooking time constraints:\n" + timingParts.join("\n")
+      : "";
+
   return (
     "You can create appointments by calling the tool `book_appointment`.\n" +
-    "Use conversation to collect the user's full name, phone number, service, and desired date/time.\n" +
-    "Only call `book_appointment` once you have all of these fields clearly.\n" +
+    `The backend requires the following booking fields in the tool call: ${requiredList}.\n` +
+    `Custom extra fields configured for this bot: ${customList}.\n` +
+    "Use conversation to collect all required fields clearly before calling the tool.\n" +
     "If information is missing or ambiguous (especially date/time), ask the user follow-up questions.\n" +
     "Treat the `datetime` as local time in the business's time zone.\n" +
     "If the requested time is in the past or clearly unreasonable, ask the user to choose another time.\n" +
     "If you ask follow-up questions, do NOT call the tool yet; only call the tool when the user provides all required information in a single clear message.\n" +
-    "After the tool is called and the booking result is returned, confirm the booking details to the user. If booking fails, apologize and suggest they contact the business directly or choose another time."
+    timingText +
+    "\n\n" +
+    "After the tool is called and the booking result is returned, you will receive JSON including:\n" +
+    "- `success` (boolean)\n" +
+    "- `start`, `end` (strings)\n" +
+    "- `addToCalendarUrl` (string, a Google Calendar link)\n" +
+    "- `confirmationEmailSent` (boolean | undefined)\n" +
+    "- `confirmationEmailError` (string | undefined)\n" +
+    "\n" +
+    "When composing your reply:\n" +
+    "- If `success` is false, apologize, show the error message to the user in natural language, and help them choose another time.\n" +
+    "- If `success` is true and `confirmationEmailSent` is true, say that the booking is confirmed and that a confirmation email has been sent. You do NOT need to paste the Google Calendar link, unless helpful.\n" +
+    "- If `success` is true but `confirmationEmailSent` is false or missing, assume the email was NOT sent and instead provide a full booking confirmation in chat, including the date and time. Also share the `addToCalendarUrl` so the user can add it to their calendar themselves.\n"
   );
 }
 
@@ -250,7 +362,11 @@ export async function generateBotReplyForSlug(
     };
   }
 
-  // 2) Base messages for OpenAI
+  // 2) Booking config for chat (normalized)
+  const botBookingCfg = normalizeBookingConfigForChat(botConfig.booking);
+  const bookingEnabled = !!botBookingCfg;
+
+  // 3) Base messages for OpenAI
   const messages: ChatMessage[] = [
     {
       role: "system",
@@ -269,16 +385,16 @@ export async function generateBotReplyForSlug(
 
   messages.push(contextSystemMessage);
 
-  const bookingEnabled = botConfig.booking && botConfig.booking.enabled;
-
-  if (bookingEnabled) {
+  let bookingTool: ChatTool | null = null;
+  if (bookingEnabled && botBookingCfg) {
+    bookingTool = buildBookingTool(botBookingCfg);
     messages.push({
       role: "system",
-      content: getBookingInstructions()
+      content: getBookingInstructions(botBookingCfg)
     });
   }
 
-  // 3) Attach recent history
+  // 4) Attach recent history
   if (historyMessages.length > 0) {
     messages.push({
       role: "system",
@@ -288,14 +404,14 @@ export async function generateBotReplyForSlug(
     messages.push(...historyMessages);
   }
 
-  // 4) Current user turn
+  // 5) Current user turn
   messages.push({
     role: "user",
     content: message
   });
 
-  // 5) If booking is disabled, simple path: one OpenAI call, no tools.
-  if (!bookingEnabled) {
+  // 6) If booking is disabled, simple path: one OpenAI call, no tools.
+  if (!bookingEnabled || !bookingTool) {
     return await getChatCompletion({
       messages,
       maxTokens: 200,
@@ -306,7 +422,7 @@ export async function generateBotReplyForSlug(
     });
   }
 
-  // 6) Booking-enabled path: use tools
+  // 7) Booking-enabled path: use tools
   const firstResponse = await createChatCompletionWithUsage({
     model: "gpt-4o-mini",
     messages,
@@ -357,7 +473,7 @@ export async function generateBotReplyForSlug(
     const bookingResult = {
       success: false,
       errorMessage:
-        "Invalid booking data. Please provide your name, phone, service and desired date/time clearly."
+        "Invalid booking data. Please provide your name, email, phone, service and desired date/time clearly."
     };
 
     const toolMessages: ChatMessage[] = [
@@ -390,7 +506,7 @@ export async function generateBotReplyForSlug(
   // Actually perform booking
   const bookingResult = await handleBookAppointment(slug, args);
 
-  // 7) Second call: feed tool result back to model, no tools this time
+  // 8) Second call: feed tool result back to model, no tools this time
   const toolMessages: ChatMessage[] = [
     ...messages,
     firstMessage as ChatMessage,

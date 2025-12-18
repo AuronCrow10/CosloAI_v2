@@ -1,8 +1,12 @@
 // src/routes/dashboard.ts
 import { Router, Request, Response } from "express";
-import { subDays, startOfDay, startOfMonth } from "date-fns";
+import { subDays, startOfDay, startOfMonth, addDays } from "date-fns";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
+import {
+  fetchKnowledgeUsageForClient,
+  KnowledgeUsageSummary
+} from "../services/knowledgeUsageService";
 
 const router = Router();
 
@@ -10,12 +14,41 @@ const router = Router();
 router.use("/dashboard", requireAuth);
 
 /**
+ * Given a knowledge usage summary, compute crawler training + search tokens.
+ * We use totalTokens here because that's what you pay on (same logic as usageAggregationService).
+ */
+function computeCrawlerTokens(
+  knowledge: KnowledgeUsageSummary | null
+): { trainingTokens: number; searchTokens: number; totalTokens: number } {
+  if (!knowledge) {
+    return { trainingTokens: 0, searchTokens: 0, totalTokens: 0 };
+  }
+
+  let trainingTokens = 0;
+  let searchTokens = 0;
+
+  for (const op of knowledge.byOperation || []) {
+    if (op.operation === "embeddings_ingest") {
+      trainingTokens += op.totalTokens;
+    } else if (op.operation === "embeddings_search") {
+      searchTokens += op.totalTokens;
+    }
+  }
+
+  return {
+    trainingTokens,
+    searchTokens,
+    totalTokens: trainingTokens + searchTokens
+  };
+}
+
+/**
  * GET /api/dashboard/overview
  *
  * Returns:
  * - KPIs
  * - Conversations last 10 days per bot
- * - Tokens last 10 days per bot
+ * - Tokens last 10 days per bot (AI + Knowledge)
  * - Top bots by conversations in last 30 days
  */
 router.get(
@@ -29,40 +62,56 @@ router.get(
     const thirtyDaysAgo = subDays(today, 29);
     const monthStart = startOfMonth(now);
 
-    // 1) Load bots, conversations, and usage for this user
-    const [bots, conversationsLast30, usageSinceMonthStart] = await Promise.all([
-      prisma.bot.findMany({
-        where: { userId },
-        select: {
-          id: true,
-          name: true,
-          status: true
-        }
-      }),
-      prisma.conversation.findMany({
-        where: {
-          bot: { userId },
-          lastMessageAt: { gte: thirtyDaysAgo }
-        },
-        select: {
-          id: true,
-          botId: true,
-          lastMessageAt: true
-        }
-      }),
-      prisma.openAIUsage.findMany({
-        where: {
-          bot: { userId },
-          botId: { not: null },
-          createdAt: { gte: monthStart }
-        },
-        select: {
-          botId: true,
-          totalTokens: true,
-          createdAt: true
-        }
-      })
-    ]);
+    // Important:
+    // We need:
+    // - tokens "this month" => monthStart..now
+    // - tokens "last 10 days" => tenDaysAgo..now
+    // So fetch OpenAI usage from the earlier of those two dates.
+    const windowStart = tenDaysAgo < monthStart ? tenDaysAgo : monthStart;
+
+    type BotLite = {
+      id: string;
+      name: string;
+      status: string;
+      knowledgeClientId: string | null;
+    };
+
+    // 1) Load bots + conversations + OpenAI usage for this user
+    const [bots, conversationsLast30, openAiUsageSinceWindowStart] =
+      await Promise.all([
+        prisma.bot.findMany({
+          where: { userId },
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            knowledgeClientId: true
+          }
+        }) as unknown as Promise<BotLite[]>,
+        prisma.conversation.findMany({
+          where: {
+            bot: { userId },
+            lastMessageAt: { gte: thirtyDaysAgo }
+          },
+          select: {
+            id: true,
+            botId: true,
+            lastMessageAt: true
+          }
+        }),
+        prisma.openAIUsage.findMany({
+          where: {
+            bot: { userId },
+            botId: { not: null },
+            createdAt: { gte: windowStart }
+          },
+          select: {
+            botId: true,
+            totalTokens: true,
+            createdAt: true
+          }
+        })
+      ]);
 
     // Map botId -> { name, status }
     const botMap = new Map<string, { name: string; status: string }>();
@@ -77,18 +126,50 @@ router.get(
     const totalBots = bots.length;
     const activeBots = bots.filter((b) => b.status === "ACTIVE").length;
     const totalConversationsLast30Days = conversationsLast30.length;
-    const totalTokensThisMonth = usageSinceMonthStart.reduce(
-      (sum, u) => sum + u.totalTokens,
-      0
-    );
+
+    // AI tokens this month (filter to monthStart..now)
+    const aiTokensThisMonth = openAiUsageSinceWindowStart
+      .filter((u) => u.createdAt >= monthStart)
+      .reduce((sum, u) => sum + u.totalTokens, 0);
+
+    // Knowledge tokens this month (sum ingest + search)
+    const knowledgeBots = bots.filter((b) => !!b.knowledgeClientId);
+
+    const knowledgeTokensThisMonth = (
+      await Promise.all(
+        knowledgeBots.map(async (b) => {
+          try {
+            const summary = await fetchKnowledgeUsageForClient({
+              clientId: b.knowledgeClientId as string,
+              from: monthStart,
+              to: now
+            });
+
+            return computeCrawlerTokens(summary).totalTokens;
+          } catch (err) {
+            console.error(
+              "Failed to fetch monthly knowledge usage for bot",
+              b.id,
+              err
+            );
+            return 0;
+          }
+        })
+      )
+    ).reduce((sum, v) => sum + v, 0);
+
+    const totalTokensThisMonth = aiTokensThisMonth + knowledgeTokensThisMonth;
 
     // Helper: format a date as YYYY-MM-DD
     const toDayString = (d: Date): string => d.toISOString().slice(0, 10);
 
-    // Prebuild the last 10 days array (e.g. ["2025-12-01", ..., "2025-12-10"])
+    // Prebuild the last 10 days array + their day-start Date objects
     const dates: string[] = [];
+    const dateStarts: Date[] = [];
     for (let i = 9; i >= 0; i--) {
-      dates.push(toDayString(subDays(today, i)));
+      const d = startOfDay(subDays(today, i));
+      dateStarts.push(d);
+      dates.push(toDayString(d));
     }
 
     // ----- Conversations last 10 days per bot -----
@@ -122,13 +203,14 @@ router.get(
     });
 
     // ----- Tokens last 10 days per bot -----
-    const usageLast10 = usageSinceMonthStart.filter(
+    // 1) AI tokens
+    const openAiUsageLast10 = openAiUsageSinceWindowStart.filter(
       (u) => u.createdAt >= tenDaysAgo
     );
 
     const tokensDailyMap = new Map<string, number>(); // `${day}|${botId}` -> tokens
 
-    usageLast10.forEach((u) => {
+    openAiUsageLast10.forEach((u) => {
       const botId = u.botId;
       if (!botId) return;
 
@@ -136,6 +218,43 @@ router.get(
       const key = `${dayKey}|${botId}`;
       tokensDailyMap.set(key, (tokensDailyMap.get(key) || 0) + u.totalTokens);
     });
+
+    // 2) Knowledge tokens (ingest+search), fetched per day
+    // NOTE: This keeps your API response unchanged; it just makes the numbers correct.
+    await Promise.all(
+      knowledgeBots.flatMap((b) => {
+        const clientId = b.knowledgeClientId as string;
+
+        return dateStarts.map(async (dayStart) => {
+          const dayEnd = addDays(dayStart, 1);
+          const dayKey = toDayString(dayStart);
+          const key = `${dayKey}|${b.id}`;
+
+          try {
+            const summary = await fetchKnowledgeUsageForClient({
+              clientId,
+              from: dayStart,
+              to: dayEnd
+            });
+
+            const crawlerTokens = computeCrawlerTokens(summary).totalTokens;
+            if (crawlerTokens > 0) {
+              tokensDailyMap.set(
+                key,
+                (tokensDailyMap.get(key) || 0) + crawlerTokens
+              );
+            }
+          } catch (err) {
+            console.error(
+              "Failed to fetch daily knowledge usage for bot",
+              b.id,
+              dayKey,
+              err
+            );
+          }
+        });
+      })
+    );
 
     const tokensSeries = bots.map((bot) => {
       const values = dates.map((day) => {

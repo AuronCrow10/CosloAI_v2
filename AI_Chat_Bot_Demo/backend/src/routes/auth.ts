@@ -33,6 +33,32 @@ const registerSchema = z.object({
   password: passwordSchema
 });
 
+async function markLegalAcceptanceIfMissing(userId: string) {
+  const now = new Date();
+  const currentTerms = config.termsVersion ?? "2025-12-18";
+  const currentPrivacy = config.privacyVersion ?? "2025-12-18";
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) return;
+
+  const needsTerms = !user.termsAcceptedAt || user.termsVersion !== currentTerms;
+  const needsPrivacy = !user.privacyAcceptedAt || user.privacyVersion !== currentPrivacy;
+
+  if (!needsTerms && !needsPrivacy) return;
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      ...(needsTerms
+        ? { termsAcceptedAt: now, termsVersion: currentTerms }
+        : {}),
+      ...(needsPrivacy
+        ? { privacyAcceptedAt: now, privacyVersion: currentPrivacy }
+        : {}),
+    },
+  });
+}
+
 router.post("/register", async (req: Request, res: Response) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -123,6 +149,8 @@ router.post("/login", async (req: Request, res: Response) => {
   const payload = { sub: user.id, role: user.role };
   const accessToken = signAccessToken(payload);
   const refreshToken = await createRefreshToken(user.id);
+
+  await markLegalAcceptanceIfMissing(user.id);
 
   return res.json({
     accessToken,
@@ -268,6 +296,8 @@ router.post("/google", async (req: Request, res: Response) => {
   const accessToken = signAccessToken(tokenPayload);
   const refreshToken = await createRefreshToken(user.id);
 
+  await markLegalAcceptanceIfMissing(user.id);
+
   return res.json({
     accessToken,
     refreshToken,
@@ -326,6 +356,8 @@ router.post("/mfa/totp/verify", async (req: Request, res: Response) => {
   const tokenPayload = { sub: user.id, role: user.role as "ADMIN" | "CLIENT" | "REFERRER" };
   const accessToken = signAccessToken(tokenPayload);
   const refreshToken = await createRefreshToken(user.id);
+
+  await markLegalAcceptanceIfMissing(user.id);
 
   return res.json({
     accessToken,

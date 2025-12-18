@@ -1,3 +1,5 @@
+// index.ts
+
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -21,6 +23,8 @@ import usageRouter from "./routes/usage";
 import accountRouter from "./routes/account";
 import dashboardRouter from "./routes/dashboard";
 import referralsRouter from "./routes/referrals";
+// NEW: booking reminder scheduler
+import { scheduleBookingReminderJob } from "./services/bookingReminderService";
 
 const app = express();
 
@@ -49,15 +53,8 @@ app.use((_req, res, next) => {
 
 /**
  * CORS:
- * - Your prod is same-origin (nginx serves frontend), so CORS is mostly irrelevant there.
- * - But in local dev, if origin differs, `credentials: true` cannot be combined with `origin: "*"`
- *   or browsers will block.
- *
- * Behavior:
- * - If FRONTEND_ORIGIN is set (comma-separated allowed origins), only allow those.
- * - If not set:
- *    - in development: allow all origins (reflected) to avoid dev breakage
- *    - in production: do not add CORS headers (same-origin setup)
+ * ...
+ * (your existing CORS block unchanged)
  */
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
   .split(",")
@@ -144,3 +141,6 @@ app.listen(config.port, () => {
 
 // Start Meta token refresh cron-like job
 scheduleMetaTokenRefreshJob();
+
+// NEW: Start booking reminder job
+scheduleBookingReminderJob();

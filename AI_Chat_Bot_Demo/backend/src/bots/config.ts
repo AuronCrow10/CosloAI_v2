@@ -1,7 +1,10 @@
+// bots/config.ts
+
 import { prisma } from "../prisma/prisma";
 import { Bot as DbBot, BotChannel, ChannelType } from "@prisma/client";
 
-// Booking config (already present)
+// Base booking config, extended with optional advanced fields.
+// Static demo bots can omit advanced fields; DB bots will have them filled.
 export type BookingConfig =
   | { enabled: false }
   | {
@@ -10,6 +13,30 @@ export type BookingConfig =
       calendarId: string;
       timeZone: string;
       defaultDurationMinutes: number;
+
+      // Advanced booking rules (optional, normalized downstream)
+      minLeadHours?: number | null;
+      maxAdvanceDays?: number | null;
+
+      // Reminder timing (optional, normalized downstream)
+      reminderWindowHours?: number | null;
+      reminderMinLeadHours?: number | null;
+
+      // Email toggles
+      bookingConfirmationEmailEnabled?: boolean;
+      bookingReminderEmailEnabled?: boolean;
+
+      // Email templates (optional)
+      bookingConfirmationSubjectTemplate?: string | null;
+      bookingReminderSubjectTemplate?: string | null;
+      bookingConfirmationBodyTextTemplate?: string | null;
+      bookingReminderBodyTextTemplate?: string | null;
+      bookingConfirmationBodyHtmlTemplate?: string | null;
+      bookingReminderBodyHtmlTemplate?: string | null;
+
+      // Booking fields for this bot
+      requiredFields?: string[];
+      customFields?: string[];
     };
 
 // Channels config
@@ -39,6 +66,7 @@ export type BotChannels = {
 };
 
 export type DemoBotConfig = {
+  id: string;
   slug: string;
   name: string;
   knowledgeClientId: string | null;
@@ -57,6 +85,7 @@ export type DemoBotConfig = {
 
 const DEMO_BOTS: DemoBotConfig[] = [
   {
+    id: "1",
     slug: "cosmin-marica",
     name: "Cosmin Marica Full Stack Developer",
     knowledgeClientId: "fba15b42-da66-402f-84dc-13aafa6ddc38",
@@ -71,6 +100,7 @@ const DEMO_BOTS: DemoBotConfig[] = [
         "611eccf5c3e127d2498eee1f5d2dc33afdc8e550d31a1302328f5bd610c7daea@group.calendar.google.com",
       timeZone: "Europe/Rome",
       defaultDurationMinutes: 60
+      // Advanced options omitted for static demo → normalized later with defaults
     },
     channels: {
       web: { enabled: true },
@@ -88,6 +118,40 @@ const DEMO_BOTS: DemoBotConfig[] = [
   }
   // ... other static demo bots if you want ...
 ];
+
+// --- Helper: booking fields ---
+
+const BASE_BOOKING_FIELDS = [
+  "name",
+  "email",
+  "phone",
+  "service",
+  "datetime"
+];
+
+function computeBookingFields(
+  dbFields?: string[] | null
+): { required: string[]; custom: string[] } {
+  const set = new Set<string>();
+
+  // From DB config (if any)
+  for (const raw of dbFields || []) {
+    const trimmed = raw.trim();
+    if (trimmed) set.add(trimmed);
+  }
+
+  // Always ensure base fields exist
+  for (const base of BASE_BOOKING_FIELDS) {
+    set.add(base);
+  }
+
+  const required = Array.from(set);
+  const custom = required.filter(
+    (f) => !BASE_BOOKING_FIELDS.includes(f)
+  );
+
+  return { required, custom };
+}
 
 // --- Helper: map DB Bot (+ channels) -> DemoBotConfig ---
 
@@ -123,16 +187,54 @@ function buildChannelsFromDb(
 
 function buildBookingFromDb(dbBot: DbBot): BookingConfig | undefined {
   if (!dbBot.useCalendar) return { enabled: false };
+
   if (!dbBot.calendarId || !dbBot.timeZone || !dbBot.defaultDurationMinutes) {
     // Calendar feature flagged on but config incomplete → treat as disabled for safety
     return { enabled: false };
   }
+
+  const { required, custom } = computeBookingFields(
+    // this field is added in the updated Prisma schema
+    (dbBot as any).bookingRequiredFields ?? undefined
+  );
+
   return {
     enabled: true,
     provider: "google_calendar",
     calendarId: dbBot.calendarId,
     timeZone: dbBot.timeZone,
-    defaultDurationMinutes: dbBot.defaultDurationMinutes
+    defaultDurationMinutes: dbBot.defaultDurationMinutes,
+
+    // Advanced rules (may be null in DB, normalized downstream)
+    minLeadHours: (dbBot as any).bookingMinLeadHours ?? null,
+    maxAdvanceDays: (dbBot as any).bookingMaxAdvanceDays ?? null,
+    reminderWindowHours: (dbBot as any).bookingReminderWindowHours ?? null,
+    reminderMinLeadHours:
+      (dbBot as any).bookingReminderMinLeadHours ?? null,
+
+    // Email toggles + templates (from DB)
+    bookingConfirmationEmailEnabled:
+      (dbBot as any).bookingConfirmationEmailEnabled ?? true,
+    bookingReminderEmailEnabled:
+      (dbBot as any).bookingReminderEmailEnabled ?? true,
+
+    bookingConfirmationSubjectTemplate:
+      (dbBot as any).bookingConfirmationSubjectTemplate ?? null,
+    bookingReminderSubjectTemplate:
+      (dbBot as any).bookingReminderSubjectTemplate ?? null,
+
+    bookingConfirmationBodyTextTemplate:
+      (dbBot as any).bookingConfirmationBodyTextTemplate ?? null,
+    bookingReminderBodyTextTemplate:
+      (dbBot as any).bookingReminderBodyTextTemplate ?? null,
+
+    bookingConfirmationBodyHtmlTemplate:
+      (dbBot as any).bookingConfirmationBodyHtmlTemplate ?? null,
+    bookingReminderBodyHtmlTemplate:
+      (dbBot as any).bookingReminderBodyHtmlTemplate ?? null,
+
+    requiredFields: required,
+    customFields: custom
   };
 }
 
@@ -140,6 +242,7 @@ function mapDbBotToDemoConfig(
   dbBot: DbBot & { channels: BotChannel[] }
 ): DemoBotConfig {
   return {
+    id: dbBot.id,
     slug: dbBot.slug,
     name: dbBot.name,
     knowledgeClientId: dbBot.knowledgeClientId,

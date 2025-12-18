@@ -54,6 +54,9 @@ export interface AppConfig {
   referralCookieMaxAgeDays: number;
   referralDefaultCommissionBps: number; // 800 = 8%
   referralIpHashSalt: string | null;
+
+  termsVersion: string | null,
+  privacyVersion: string | null,
 }
 
 function requireEnv(key: string): string {
@@ -114,5 +117,8 @@ export const config: AppConfig = {
   referralCookieName: process.env.REFERRAL_COOKIE_NAME || "ref",
   referralCookieMaxAgeDays: Number(process.env.REFERRAL_COOKIE_MAX_AGE_DAYS || 30),
   referralDefaultCommissionBps: Number(process.env.REFERRAL_DEFAULT_COMMISSION_BPS || 800),
-  referralIpHashSalt: process.env.REFERRAL_IP_HASH_SALT || null
+  referralIpHashSalt: process.env.REFERRAL_IP_HASH_SALT || null,
+
+  termsVersion: process.env.TERMS_VERSION || "2025-12-18",
+  privacyVersion: process.env.PRIVACY_VERSION || "2025-12-18",
 };

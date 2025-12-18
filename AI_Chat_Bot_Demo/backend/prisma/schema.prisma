@@ -1,3 +1,5 @@
+// prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -8,14 +10,19 @@ datasource db {
 }
 
 model User {
-  id             String   @id @default(uuid())
-  email          String   @unique
-  passwordHash   String?
-  googleId       String?  @unique
-  role           UserRole @default(CLIENT)
-  emailVerified  Boolean  @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String?
+  googleId      String?  @unique
+  role          UserRole @default(CLIENT)
+  emailVerified Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  termsAcceptedAt   DateTime?
+  termsVersion      String?
+  privacyAcceptedAt DateTime?
+  privacyVersion    String?
 
   // Profile
   name      String?
@@ -53,9 +60,9 @@ model MfaBackupCode {
   // Hash of the backup code (never store raw codes)
   codeHash String
 
-  used      Boolean  @default(false)
+  used      Boolean   @default(false)
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId])
 }
@@ -107,6 +114,53 @@ model Bot {
   // =========================
   referralAttributions ReferralAttribution[]
   referralCommissions  ReferralCommission[]
+
+  // NEW: Booking records
+  bookings Booking[]
+
+  // =========================
+  // BOOKING CONFIG (NEW)
+  // =========================
+
+  // Minimum hours between "now" and booking start when creating a booking.
+  // Null = no extra limit (only "must not be in the past").
+  bookingMinLeadHours Int?
+
+  // Maximum days in advance the user can book.
+  // Null = no upper limit.
+  bookingMaxAdvanceDays Int?
+
+  // Reminder window before the start time (in hours).
+  // Within this window, reminders are eligible to be sent.
+  bookingReminderWindowHours  Int?
+  // Minimum hours between booking creation and start time for which a reminder will be sent.
+  bookingReminderMinLeadHours Int?
+
+  // Email toggles
+  bookingConfirmationEmailEnabled Boolean @default(true)
+  bookingReminderEmailEnabled     Boolean @default(true)
+
+  // Email templates (optional – fall back to sensible defaults if null)
+  bookingConfirmationSubjectTemplate  String?
+  bookingReminderSubjectTemplate      String?
+  bookingConfirmationBodyTextTemplate String?
+  bookingReminderBodyTextTemplate     String?
+  bookingConfirmationBodyHtmlTemplate String?
+  bookingReminderBodyHtmlTemplate     String?
+
+  // Which fields the bot should collect for bookings.
+  // NOTE: the backend always requires at least: name, email, service, datetime.
+  bookingRequiredFields String[] @default(["name", "email", "phone", "service", "datetime"])
+
+  // NEW: Email usage records (for per-plan email limits)
+  emailUsages EmailUsage[]
+
+    // Knowledge crawl tracking (latest job)
+  knowledgeLastCrawlJobId     String?
+  knowledgeLastCrawlDomain    String?
+  knowledgeLastCrawlStartedAt DateTime?
+  knowledgeLastCrawlFinishedAt DateTime?
+
 }
 
 enum BotStatus {
@@ -128,9 +182,9 @@ model BotChannel {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
+  @@unique([botId, type, externalId], name: "botId_type_externalId")
   @@index([botId])
   @@index([type, externalId])
-  @@unique([botId, type, externalId], name: "botId_type_externalId")
 }
 
 enum ChannelType {
@@ -180,14 +234,19 @@ model Conversation {
   bot            Bot         @relation(fields: [botId], references: [id])
   channel        ChannelType
   externalUserId String
+
   lastMessageAt  DateTime    @default(now())
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
-  // NEW: long-term memory summary for the conversation
   memorySummary          String?
   memorySummaryModel     String?
   memorySummaryUpdatedAt DateTime?
+
+  // NEW: rate limiting state
+  rateLimitBlockedUntil DateTime?
+  rateLimitStrikeCount  Int       @default(0)
+  rateLimitLastStrikeAt DateTime?
 
   messages Message[]
   evals    ConversationEval[]
@@ -196,13 +255,13 @@ model Conversation {
 }
 
 model Message {
-  id             String       @id @default(uuid())
-  conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id])
-  role           MessageRole
-  content        String
+  id               String       @id @default(uuid())
+  conversationId   String
+  conversation     Conversation @relation(fields: [conversationId], references: [id])
+  role             MessageRole
+  content          String
   channelMessageId String?
-  createdAt      DateTime     @default(now())
+  createdAt        DateTime     @default(now())
 
   @@index([conversationId])
 }
@@ -281,6 +340,10 @@ model UsagePlan {
   // Null = no limit (or “unlimited”).
   monthlyTokens Int?
 
+  // NEW: Email limit per month for this plan (per bot).
+  // Null = unlimited emails.
+  monthlyEmails Int?
+
   // Billing info
   monthlyAmountCents Int
   currency           String
@@ -320,7 +383,7 @@ model Payment {
   periodEnd   DateTime?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now())
 
   // =========================
   // REFERRALS (NEW)
@@ -361,11 +424,11 @@ model WhatsappConnectSession {
 }
 
 model OpenAIUsage {
-  id   String  @id @default(uuid())
+  id     String  @id @default(uuid())
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
   botId  String?
-  bot    Bot?  @relation(fields: [botId], references: [id])
+  bot    Bot?    @relation(fields: [botId], references: [id])
 
   model     String
   operation String
@@ -464,17 +527,17 @@ model ReferralAttribution {
   partner   ReferralPartner @relation(fields: [partnerId], references: [id])
 
   referredUserId String
-  referredUser   User @relation("ReferredUserAttributions", fields: [referredUserId], references: [id])
+  referredUser   User   @relation("ReferredUserAttributions", fields: [referredUserId], references: [id])
 
   botId String
-  bot   Bot @relation(fields: [botId], references: [id])
+  bot   Bot    @relation(fields: [botId], references: [id])
 
   // Link to your Subscription record once it exists
-  subscriptionId String?        @unique
-  subscription   Subscription?  @relation(fields: [subscriptionId], references: [id])
+  subscriptionId String?       @unique
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
 
   stripeCustomerId     String?
-  stripeSubscriptionId String @unique
+  stripeSubscriptionId String  @unique
 
   checkoutSessionId String?
 
@@ -502,12 +565,12 @@ model ReferralCommission {
   attribution   ReferralAttribution? @relation(fields: [attributionId], references: [id])
 
   botId String
-  bot   Bot @relation(fields: [botId], references: [id])
+  bot   Bot    @relation(fields: [botId], references: [id])
 
   subscriptionId String?
   subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
 
-  paymentId String? @unique
+  paymentId String?  @unique
   payment   Payment? @relation(fields: [paymentId], references: [id])
 
   stripeSubscriptionId String
@@ -527,8 +590,8 @@ model ReferralCommission {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([partnerId, monthKey])
   @@unique([stripeInvoiceId, kind], name: "stripeInvoiceId_kind")
+  @@index([partnerId, monthKey])
 }
 
 model ReferralPayoutPeriod {
@@ -537,9 +600,9 @@ model ReferralPayoutPeriod {
   partnerId String
   partner   ReferralPartner @relation(fields: [partnerId], references: [id])
 
-  monthKey  String // "YYYY-MM"
-  currency  String
-  amountCents Int @default(0)
+  monthKey    String // "YYYY-MM"
+  currency    String
+  amountCents Int    @default(0)
 
   status ReferralPayoutStatus @default(OPEN)
   paidAt DateTime?
@@ -549,4 +612,43 @@ model ReferralPayoutPeriod {
 
   @@unique([partnerId, monthKey, currency], name: "partnerId_month_currency")
   @@index([partnerId, monthKey])
+}
+
+// NEW: Booking model
+model Booking {
+  id    String @id @default(uuid())
+  botId String
+  bot   Bot    @relation(fields: [botId], references: [id])
+
+  name    String
+  email   String
+  phone   String
+  service String
+
+  start           DateTime
+  end             DateTime
+  timeZone        String
+  calendarId      String
+  calendarEventId String?
+
+  // null until we successfully send a reminder email
+  reminderEmailSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([botId, start])
+  @@index([email])
+}
+
+// NEW: Email usage per bot (for plan email quotas)
+model EmailUsage {
+  id        String   @id @default(uuid())
+  botId     String
+  bot       Bot      @relation(fields: [botId], references: [id])
+  kind      String // e.g. "booking_confirmation", "booking_reminder"
+  to        String
+  createdAt DateTime @default(now())
+
+  @@index([botId, createdAt])
 }

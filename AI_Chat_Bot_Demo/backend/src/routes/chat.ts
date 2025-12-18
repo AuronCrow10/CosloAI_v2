@@ -14,6 +14,10 @@ import {
   logMessage
 } from "../services/conversationService";
 import { evaluateConversation } from "../services/conversationAnalyticsService";
+import {
+  checkConversationRateLimit,
+  buildRateLimitMessage
+} from "../services/rateLimitService";
 
 const router = Router();
 
@@ -30,7 +34,7 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Invalid bot slug format" });
   }
 
-  // Ensure the bot exists in the DEMO_BOTS registry (existing behavior)
+  // Ensure the bot exists in the DEMO_BOTS/DB registry (existing behavior)
   const botConfig = await getBotConfigBySlug(slug);
   if (!botConfig) {
     return res.status(404).json({ error: "Bot not found" });
@@ -67,6 +71,37 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
         externalUserId
       });
       dbConversationId = convo.id;
+
+      // --- Rate limiting for this conversation (DB bots only) ---
+      const rateResult = await checkConversationRateLimit(dbConversationId);
+      if (rateResult.isLimited) {
+        const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
+
+        // Best-effort logging; do not block on errors
+        try {
+          await logMessage({
+            conversationId: dbConversationId,
+            role: "USER",
+            content: trimmedMessage
+          });
+
+          await logMessage({
+            conversationId: dbConversationId,
+            role: "ASSISTANT",
+            content: rateMessage
+          });
+        } catch (logErr) {
+          console.error(
+            "Failed to log rate-limited web conversation/messages",
+            logErr
+          );
+        }
+
+        return res.json({
+          conversationId: convId,
+          reply: rateMessage
+        });
+      }
     }
 
     // --- Call chat service with optional DB conversationId for memory ---

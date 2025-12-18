@@ -1,4 +1,3 @@
-// routes/billing.ts
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../prisma/prisma";
@@ -8,6 +7,7 @@ import {
   updateBotSubscriptionForUsagePlanChange
 } from "../services/billingService";
 import { getUsageForBot } from "../services/usageAggregationService";
+import { getEmailUsageForBot } from "../services/emailUsageService";
 
 // ✅ Referrals
 import {
@@ -30,6 +30,7 @@ type UsagePlanLite = {
   name: string;
   description: string | null;
   monthlyTokens: number | null;
+  monthlyEmails: number | null;
   monthlyAmountCents: number;
   currency: string;
   createdAt: Date;
@@ -104,6 +105,19 @@ router.get("/billing/overview", async (req, res) => {
           ? Math.min(100, Math.round((usedTokens / monthlyTokens) * 100))
           : null;
 
+      // NEW: email usage
+      const emailUsage = await getEmailUsageForBot({
+        botId: bot.id,
+        from,
+        to
+      });
+      const usedEmails = emailUsage.count;
+      const monthlyEmails = usagePlan?.monthlyEmails ?? null;
+      const emailUsagePercent =
+        monthlyEmails && monthlyEmails > 0
+          ? Math.min(100, Math.round((usedEmails / monthlyEmails) * 100))
+          : null;
+
       const snap: any = sub.planSnapshotJson ?? null;
 
       let featuresAmountCents: number | null =
@@ -166,6 +180,12 @@ router.get("/billing/overview", async (req, res) => {
         monthlyTokens,
         usedTokensThisPeriod: usedTokens,
         usagePercent,
+
+        // NEW: email quota info
+        monthlyEmails,
+        usedEmailsThisPeriod: usedEmails,
+        emailUsagePercent,
+
         periodStart: from,
         periodEnd: to
       });
@@ -197,7 +217,6 @@ router.get("/billing/overview", async (req, res) => {
       take: 50
     })) as unknown as PaymentWithBotLite[];
 
-    // ✅ Explicit param type => noImplicitAny fixed
     const paymentSummaries = payments.map((p: PaymentWithBotLite) => ({
       id: p.id,
       botId: p.botId,
@@ -240,7 +259,6 @@ router.get("/billing/payments/:id/invoice-url", async (req, res) => {
       include: { bot: true }
     });
 
-    // payment includes bot due to include
     if (!payment || (payment as any).bot.userId !== userId) {
       return res.status(404).json({ error: "Payment not found" });
     }
@@ -343,7 +361,6 @@ router.get("/usage-plans", async (_req, res) => {
       orderBy: { monthlyAmountCents: "asc" }
     })) as unknown as UsagePlanLite[];
 
-    // ✅ Explicit param type => noImplicitAny fixed
     return res.json(
       plans.map((p: UsagePlanLite) => ({
         id: p.id,
@@ -351,6 +368,7 @@ router.get("/usage-plans", async (_req, res) => {
         name: p.name,
         description: p.description,
         monthlyTokens: p.monthlyTokens,
+        monthlyEmails: p.monthlyEmails,
         monthlyAmountCents: p.monthlyAmountCents,
         currency: p.currency,
         createdAt: p.createdAt,

@@ -12,6 +12,10 @@ import {
   logMessage
 } from "../services/conversationService";
 import { generateBotReplyForSlug } from "../services/chatService";
+import {
+  checkConversationRateLimit,
+  buildRateLimitMessage
+} from "../services/rateLimitService";
 
 const router = Router();
 
@@ -65,7 +69,10 @@ async function sendFacebookReply(
       timeout: 10000
     });
   } catch (err: any) {
-    console.error("Failed to send FB message (first attempt)", err?.response?.data || err);
+    console.error(
+      "Failed to send FB message (first attempt)",
+      err?.response?.data || err
+    );
 
     if (isMetaTokenErrorNeedingRefresh(err)) {
       console.log("Attempting to refresh FB page access token for channel", {
@@ -73,9 +80,12 @@ async function sendFacebookReply(
       });
       const refreshed = await refreshPageAccessTokenForChannel(channelId);
       if (!refreshed || !refreshed.accessToken) {
-        console.error("Could not refresh FB page token; channel may need reconnect", {
-          channelId
-        });
+        console.error(
+          "Could not refresh FB page token; channel may need reconnect",
+          {
+            channelId
+          }
+        );
         return;
       }
 
@@ -87,9 +97,6 @@ async function sendFacebookReply(
             "Content-Type": "application/json"
           },
           timeout: 10000
-        });
-        console.log("FB message sent successfully after token refresh", {
-          channelId
         });
       } catch (err2) {
         console.error("Failed to send FB message after token refresh", err2);
@@ -122,6 +129,7 @@ async function sendInstagramReply(
   const url = `${config.metaGraphApiBaseUrl}/${igBusinessId}/messages`;
 
   const body = {
+    messaging_type: "RESPONSE",
     recipient: { id: userId },
     message: { text: reply }
   };
@@ -135,7 +143,10 @@ async function sendInstagramReply(
       timeout: 10000
     });
   } catch (err: any) {
-    console.error("Failed to send IG message (first attempt)", err?.response?.data || err);
+    console.error(
+      "Failed to send IG message (first attempt)",
+      err?.response?.data || err
+    );
 
     if (isMetaTokenErrorNeedingRefresh(err)) {
       console.log("Attempting to refresh IG page access token for channel", {
@@ -143,9 +154,12 @@ async function sendInstagramReply(
       });
       const refreshed = await refreshPageAccessTokenForChannel(channelId);
       if (!refreshed || !refreshed.accessToken) {
-        console.error("Could not refresh IG page token; channel may need reconnect", {
-          channelId
-        });
+        console.error(
+          "Could not refresh IG page token; channel may need reconnect",
+          {
+            channelId
+          }
+        );
         return;
       }
 
@@ -177,6 +191,7 @@ router.post("/", async (req: Request, res: Response) => {
 
   try {
     if (body.object === "page") {
+      // Facebook Messenger
       const entries = Array.isArray(body.entry) ? body.entry : [];
       for (const entry of entries) {
         const pageId: string = entry.id;
@@ -208,12 +223,45 @@ router.post("/", async (req: Request, res: Response) => {
           const bot = channel.bot;
           if (bot.status !== "ACTIVE") continue;
 
-          const reply = await generateBotReplyForSlug(bot.slug, text);
-
+          // Create/find conversation BEFORE OpenAI so we can rate-limit and use memory
           const convo = await findOrCreateConversation({
             botId: bot.id,
             channel: "FACEBOOK",
             externalUserId: userId
+          });
+
+          // --- Rate limiting ---
+          const rateResult = await checkConversationRateLimit(convo.id);
+          if (rateResult.isLimited) {
+            const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
+
+            try {
+              await logMessage({
+                conversationId: convo.id,
+                role: "USER",
+                content: text,
+                channelMessageId: message.mid
+              });
+
+              await logMessage({
+                conversationId: convo.id,
+                role: "ASSISTANT",
+                content: rateMessage
+              });
+            } catch (logErr) {
+              console.error(
+                "Failed to log rate-limited FB conversation/messages",
+                logErr
+              );
+            }
+
+            await sendFacebookReply(channel.id, pageId, userId, rateMessage);
+            continue;
+          }
+
+          // --- Normal path: call chat service with conversationId for memory ---
+          const reply = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id
           });
 
           await logMessage({
@@ -233,6 +281,7 @@ router.post("/", async (req: Request, res: Response) => {
         }
       }
     } else if (body.object === "instagram") {
+      // Instagram DM
       const entries = Array.isArray(body.entry) ? body.entry : [];
       for (const entry of entries) {
         const igBusinessId: string = entry.id;
@@ -266,12 +315,50 @@ router.post("/", async (req: Request, res: Response) => {
           const bot = channel.bot;
           if (bot.status !== "ACTIVE") continue;
 
-          const reply = await generateBotReplyForSlug(bot.slug, text);
-
+          // Create/find conversation BEFORE OpenAI so we can rate-limit and use memory
           const convo = await findOrCreateConversation({
             botId: bot.id,
             channel: "INSTAGRAM",
             externalUserId: userId
+          });
+
+          // --- Rate limiting ---
+          const rateResult = await checkConversationRateLimit(convo.id);
+          if (rateResult.isLimited) {
+            const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
+
+            try {
+              await logMessage({
+                conversationId: convo.id,
+                role: "USER",
+                content: text,
+                channelMessageId: message.mid
+              });
+
+              await logMessage({
+                conversationId: convo.id,
+                role: "ASSISTANT",
+                content: rateMessage
+              });
+            } catch (logErr) {
+              console.error(
+                "Failed to log rate-limited IG conversation/messages",
+                logErr
+              );
+            }
+
+            await sendInstagramReply(
+              channel.id,
+              igBusinessId,
+              userId,
+              rateMessage
+            );
+            continue;
+          }
+
+          // --- Normal path: call chat service with conversationId for memory ---
+          const reply = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id
           });
 
           await logMessage({

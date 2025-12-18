@@ -12,6 +12,11 @@ const router = Router();
 const DEFAULT_SYSTEM_PROMPT =
   "You are a helpful AI assistant for this business. Answer using only the provided context from the website and documents.";
 
+/**
+ * CREATE schema
+ * - All new booking-related fields are included.
+ * - bookingRequiredFields is an optional *array*, not nullable → matches Prisma String[].
+ */
 const botCreateSchema = z.object({
   slug: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string().min(1),
@@ -35,7 +40,37 @@ const botCreateSchema = z.object({
   defaultDurationMinutes: z.number().int().positive().optional().nullable(),
 
   // NEW: per-bot toggle for automatic conversation evaluation
-  autoEvaluateConversations: z.boolean().optional().default(false)
+  autoEvaluateConversations: z.boolean().optional().default(false),
+
+  // --- NEW: Booking configuration fields ---
+
+  // Min hours between "now" and booking start
+  bookingMinLeadHours: z.number().int().min(0).optional(),
+
+  // Max days in advance bookings are allowed
+  bookingMaxAdvanceDays: z.number().int().min(0).optional(),
+
+  // Reminder window & min lead
+  bookingReminderWindowHours: z.number().int().min(0).optional(),
+  bookingReminderMinLeadHours: z.number().int().min(0).optional(),
+
+  // Email toggles
+  bookingConfirmationEmailEnabled: z.boolean().optional(),
+  bookingReminderEmailEnabled: z.boolean().optional(),
+
+  // Email templates (subject + body)
+  bookingConfirmationSubjectTemplate: z.string().max(200).optional().nullable(),
+  bookingReminderSubjectTemplate: z.string().max(200).optional().nullable(),
+
+  bookingConfirmationBodyTextTemplate: z.string().optional().nullable(),
+  bookingReminderBodyTextTemplate: z.string().optional().nullable(),
+
+  bookingConfirmationBodyHtmlTemplate: z.string().optional().nullable(),
+  bookingReminderBodyHtmlTemplate: z.string().optional().nullable(),
+
+  // Extra booking fields beyond the base ones (name, email, phone, service, datetime)
+  // IMPORTANT: not nullable → matches Prisma String[].
+  bookingRequiredFields: z.array(z.string()).optional()
 });
 
 const botUpdateSchema = botCreateSchema.partial().omit({ slug: true });
@@ -109,7 +144,41 @@ router.post("/bots", async (req: Request, res: Response) => {
       defaultDurationMinutes: data.defaultDurationMinutes ?? 30,
       status: "DRAFT",
 
-      autoEvaluateConversations: data.autoEvaluateConversations
+      autoEvaluateConversations: data.autoEvaluateConversations,
+
+      // --- NEW: booking config persisted on Bot ---
+
+      bookingMinLeadHours: data.bookingMinLeadHours ?? null,
+      bookingMaxAdvanceDays: data.bookingMaxAdvanceDays ?? null,
+      bookingReminderWindowHours: data.bookingReminderWindowHours ?? null,
+      bookingReminderMinLeadHours: data.bookingReminderMinLeadHours ?? null,
+
+      bookingConfirmationEmailEnabled:
+        typeof data.bookingConfirmationEmailEnabled === "boolean"
+          ? data.bookingConfirmationEmailEnabled
+          : true,
+      bookingReminderEmailEnabled:
+        typeof data.bookingReminderEmailEnabled === "boolean"
+          ? data.bookingReminderEmailEnabled
+          : true,
+
+      bookingConfirmationSubjectTemplate:
+        data.bookingConfirmationSubjectTemplate ?? null,
+      bookingReminderSubjectTemplate:
+        data.bookingReminderSubjectTemplate ?? null,
+
+      bookingConfirmationBodyTextTemplate:
+        data.bookingConfirmationBodyTextTemplate ?? null,
+      bookingReminderBodyTextTemplate:
+        data.bookingReminderBodyTextTemplate ?? null,
+
+      bookingConfirmationBodyHtmlTemplate:
+        data.bookingConfirmationBodyHtmlTemplate ?? null,
+      bookingReminderBodyHtmlTemplate:
+        data.bookingReminderBodyHtmlTemplate ?? null,
+
+      // Stored as extra-required fields (base fields are always enforced in code)
+      bookingRequiredFields: data.bookingRequiredFields ?? []
     }
   });
 
@@ -202,11 +271,19 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     }
   }
 
+  // Build update data. We mostly spread `data`, which now has types that align
+  // with Prisma, especially `bookingRequiredFields` (string[] | undefined).
+  const updateData: any = {
+    ...data
+  };
+
+  // If client explicitly *omits* bookingRequiredFields, Prisma won't touch it.
+  // If they provide [], we store [] (clears extra required fields).
+  // No special null handling needed since Zod no longer allows null here.
+
   const updated = await prisma.bot.update({
     where: { id: bot.id },
-    data: {
-      ...data
-    }
+    data: updateData
   });
 
   res.json(updated);
@@ -222,7 +299,6 @@ router.get("/bots/:id", async (req: Request, res: Response) => {
   if (!bot) return res.status(404).json({ error: "Not found" });
   res.json(bot);
 });
-
 
 // Delete bot (hard delete with slug confirmation and full cascade)
 router.delete("/bots/:id", async (req: Request, res: Response) => {
@@ -279,6 +355,9 @@ router.delete("/bots/:id", async (req: Request, res: Response) => {
 
     // Usage
     await tx.openAIUsage.deleteMany({ where: { botId: bot.id } });
+
+    // Email usage
+    await tx.emailUsage.deleteMany({ where: { botId: bot.id } });
 
     // Finally the bot itself
     await tx.bot.delete({ where: { id: bot.id } });
