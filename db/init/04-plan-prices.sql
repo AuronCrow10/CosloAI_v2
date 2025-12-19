@@ -10,6 +10,7 @@ INSERT INTO "UsagePlan" (
   "name",
   "description",
   "monthlyTokens",
+  "monthlyEmails",
   "monthlyAmountCents",
   "currency",
   "stripePriceId",
@@ -23,8 +24,9 @@ INSERT INTO "UsagePlan" (
     'STARTER',
     'Starter',
     'For small projects and testing.',
-    500000,      -- monthlyInputTokens
-    2899,       -- €19.00
+    5000000,      -- monthlyInputTokens
+    1000,       -- monthlyEmails
+    2799,       -- €19.00
     'eur',
     'price_1SagU9GSx2QSwLkUo1XAOg5n',  -- TODO: replace with real Stripe price ID
     TRUE,
@@ -37,7 +39,8 @@ INSERT INTO "UsagePlan" (
     'GROWTH',
     'Growth',
     'For serious usage across multiple channels.',
-    2000000,     -- monthlyInputTokens
+    25000000,     -- monthlyInputTokens
+    5000,
     8999,       -- €49.00
     'eur',
     'price_1SagWbGSx2QSwLkU0h6ZAYX5',   -- TODO: replace with real Stripe price ID
@@ -51,8 +54,9 @@ INSERT INTO "UsagePlan" (
     'SCALE',
     'Scale',
     'For high-volume bots in production.',
-    1000000,    -- monthlyInputTokens
-    23999,      -- €129.00
+    110000000,    -- monthlyInputTokens
+    20000,
+    27999,      -- €129.00
     'eur',
     'price_1SagZ5GSx2QSwLkUvuDdr17o',    -- TODO: replace with real Stripe price ID
     TRUE,
@@ -66,6 +70,7 @@ INSERT INTO "UsagePlan" (
     'Custom',
     'For custom limits and enterprise deals.',
     NULL,       -- monthlyInputTokens
+    NULL,       -- monthlyEmails
     0,
     'eur',
     NULL,
@@ -78,6 +83,7 @@ SET
   "name"                  = EXCLUDED."name",
   "description"           = EXCLUDED."description",
   "monthlyTokens"         = EXCLUDED."monthlyTokens",
+  "monthlyEmails"         = EXCLUDED."monthlyEmails",
   "monthlyAmountCents"    = EXCLUDED."monthlyAmountCents",
   "currency"              = EXCLUDED."currency",
   "stripePriceId"         = EXCLUDED."stripePriceId",
