@@ -64,8 +64,8 @@ router.get(
 
     // Important:
     // We need:
-    // - tokens "this month" => monthStart..now
-    // - tokens "last 10 days" => tenDaysAgo..now
+    // - tokens "this month" => monthStart.now
+    // - tokens "last 10 days" => tenDaysAgo.now
     // So fetch OpenAI usage from the earlier of those two dates.
     const windowStart = tenDaysAgo < monthStart ? tenDaysAgo : monthStart;
 
@@ -113,6 +113,31 @@ router.get(
         })
       ]);
 
+    const botIds = bots.map((b) => b.id);
+
+    // 1.5) Load plan limits + monthly email usage
+    const [subscriptions, totalEmailsThisMonth] = await Promise.all([
+      prisma.subscription.findMany({
+        where: { botId: { in: botIds } },
+        select: {
+          botId: true,
+          status: true,
+          usagePlan: {
+            select: {
+              monthlyTokens: true,
+              monthlyEmails: true
+            }
+          }
+        }
+      }),
+      prisma.emailUsage.count({
+        where: {
+          botId: { in: botIds },
+          createdAt: { gte: monthStart, lt: now }
+        }
+      })
+    ]);
+
     // Map botId -> { name, status }
     const botMap = new Map<string, { name: string; status: string }>();
     bots.forEach((b) =>
@@ -127,7 +152,7 @@ router.get(
     const activeBots = bots.filter((b) => b.status === "ACTIVE").length;
     const totalConversationsLast30Days = conversationsLast30.length;
 
-    // AI tokens this month (filter to monthStart..now)
+    // AI tokens this month (filter to monthStart.now)
     const aiTokensThisMonth = openAiUsageSinceWindowStart
       .filter((u) => u.createdAt >= monthStart)
       .reduce((sum, u) => sum + u.totalTokens, 0);
@@ -159,6 +184,41 @@ router.get(
     ).reduce((sum, v) => sum + v, 0);
 
     const totalTokensThisMonth = aiTokensThisMonth + knowledgeTokensThisMonth;
+
+    // ----- Plan totals (sum across bots) -----
+    // Plans are per-bot (Subscription -> UsagePlan). For the dashboard KPIs we aggregate usage across all bots,
+    // so we also aggregate the limits the same way.
+    // If ANY plan is unlimited (null), the aggregated limit becomes null (unlimited).
+    const allowedStatuses = new Set(["ACTIVE", "TRIALING", "PAST_DUE"]);
+
+    let monthlyTokensLimit: number | null = 0;
+    let monthlyEmailsLimit: number | null = 0;
+
+    for (const s of subscriptions) {
+      if (!allowedStatuses.has(s.status)) continue;
+      const plan = s.usagePlan;
+      if (!plan) continue;
+
+      if (monthlyTokensLimit !== null) {
+        if (plan.monthlyTokens == null) monthlyTokensLimit = null;
+        else monthlyTokensLimit += plan.monthlyTokens;
+      }
+
+      if (monthlyEmailsLimit !== null) {
+        if (plan.monthlyEmails == null) monthlyEmailsLimit = null;
+        else monthlyEmailsLimit += plan.monthlyEmails;
+      }
+    }
+
+    const tokensUsagePercent =
+      monthlyTokensLimit && monthlyTokensLimit > 0
+        ? (totalTokensThisMonth / monthlyTokensLimit) * 100
+        : null;
+
+    const emailsUsagePercent =
+      monthlyEmailsLimit && monthlyEmailsLimit > 0
+        ? (totalEmailsThisMonth / monthlyEmailsLimit) * 100
+        : null;
 
     // Helper: format a date as YYYY-MM-DD
     const toDayString = (d: Date): string => d.toISOString().slice(0, 10);
@@ -286,7 +346,10 @@ router.get(
         };
 
       existing.count += 1;
-      if (!existing.lastConversationAt || c.lastMessageAt > existing.lastConversationAt) {
+      if (
+        !existing.lastConversationAt ||
+        c.lastMessageAt > existing.lastConversationAt
+      ) {
         existing.lastConversationAt = c.lastMessageAt;
       }
 
@@ -313,7 +376,12 @@ router.get(
         totalBots,
         activeBots,
         totalConversationsLast30Days,
-        totalTokensThisMonth
+        totalTokensThisMonth,
+        monthlyTokensLimit,
+        tokensUsagePercent,
+        totalEmailsThisMonth,
+        monthlyEmailsLimit,
+        emailsUsagePercent
       },
       conversationsLast10Days: {
         dates,
