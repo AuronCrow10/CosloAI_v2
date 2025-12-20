@@ -22,7 +22,16 @@ import { scheduleMetaTokenRefreshJob } from "./services/metaTokenService";
 import usageRouter from "./routes/usage";
 import accountRouter from "./routes/account";
 import dashboardRouter from "./routes/dashboard";
+
 import referralsRouter from "./routes/referrals";
+import adminUsersRouter from "./routes/adminUsers";
+import adminBotsRouter from "./routes/adminBots";
+import adminBookingsRouter from "./routes/adminBookings";
+import adminEmailUsageRouter from "./routes/adminEmailUsage";
+import adminPaymentsRouter from "./routes/adminPayments";
+import adminOpenAIUsageRouter from "./routes/adminOpenAIUsage";
+import adminIntegrationsRouter from "./routes/adminIntegrations";
+import adminPlansRouter from "./routes/adminPlans";
 // NEW: booking reminder scheduler
 import { scheduleBookingReminderJob } from "./services/bookingReminderService";
 
@@ -101,8 +110,16 @@ app.use("/api", usageRouter);
 app.use("/api/account", accountRouter);
 app.use("/api", dashboardRouter);
 
-// ✅ Referrals (NEW)
+app.use("/api", adminUsersRouter);
 app.use("/api", referralsRouter);
+app.use("/api", adminBotsRouter);
+app.use("/api", adminBookingsRouter);
+app.use("/api", adminEmailUsageRouter);
+app.use("/api", adminPaymentsRouter);
+app.use("/api", adminOpenAIUsageRouter);
+app.use("/api", adminIntegrationsRouter);
+app.use("/api", adminPlansRouter);
+
 
 // Chat & webhooks
 app.use("/api", chatRouter);
