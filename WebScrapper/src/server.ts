@@ -169,6 +169,8 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
       mainDomain?: string;
     };
 
+    console.log(mainDomain);
+
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (!mainDomain) return res.status(400).json({ error: 'mainDomain is required' });
 
@@ -222,7 +224,7 @@ app.post('/crawl', requireInternalAuth, async (req, res) => {
 
     const job = await db.createCrawlJob({
       clientId,
-      domain: host,
+      domain: domain,
       startUrl,
       totalPagesEstimated: null,
     });
@@ -711,12 +713,15 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
 // --- Search ---
 app.post('/search', requireInternalAuth, async (req, res) => {
   try {
-    const { clientId, query, domain, limit } = req.body;
+    const { clientId, query, domainInput, limit } = req.body;
     if (!clientId || !query) {
       return res.status(400).json({ error: 'clientId and query are required' });
     }
 
+    const domain = extractDomain(domainInput);
+
     const client = await db.getClientById(clientId);
+
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
     const results = await searchClientContent({
@@ -726,6 +731,8 @@ app.post('/search', requireInternalAuth, async (req, res) => {
       query,
       options: { domain, limit },
     });
+
+    console.log(results);
 
     return res.json({ results });
   } catch (err) {

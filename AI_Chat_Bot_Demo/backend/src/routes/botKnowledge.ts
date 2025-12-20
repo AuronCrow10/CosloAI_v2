@@ -36,6 +36,8 @@ async function ensureKnowledgeClient(botId: string, userId: string) {
 
   if (bot.knowledgeClientId) return { bot, knowledgeClientId: bot.knowledgeClientId };
 
+  console.log(bot.domain);
+
   const kc = await createKnowledgeClient({
     name: `${bot.userId}-${bot.slug}`,
     domain: bot.domain ?? undefined
@@ -83,6 +85,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
     const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
 
     const domainToUse = overrideDomain || bot.domain;
+
     if (!domainToUse) {
       return res.status(400).json({ error: "No domain configured for this bot" });
     }

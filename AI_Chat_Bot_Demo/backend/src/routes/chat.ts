@@ -28,7 +28,6 @@ function isValidSlug(slug: string): boolean {
 // POST /api/chat/:slug
 router.post("/chat/:slug", async (req: Request, res: Response) => {
   const { slug } = req.params;
-  console.log(slug);
 
   if (!isValidSlug(slug)) {
     return res.status(400).json({ error: "Invalid bot slug format" });

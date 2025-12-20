@@ -291,11 +291,9 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
 
 // Get bot
 router.get("/bots/:id", async (req: Request, res: Response) => {
-  console.log("ciao");
   const bot = await prisma.bot.findFirst({
     where: { id: req.params.id, userId: req.user!.id }
   });
-  console.log(bot);
   if (!bot) return res.status(404).json({ error: "Not found" });
   res.json(bot);
 });

@@ -5,6 +5,10 @@ import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { monthKeyForDate } from "../services/referralService";
+import {
+  fetchKnowledgeUsageForClient,
+  KnowledgeUsageSummary
+} from "../services/knowledgeUsageService";
 
 const router = Router();
 
@@ -48,9 +52,36 @@ function normalizeNumberParam(
 }
 
 /**
+ * Given a knowledge usage summary, compute crawler training + search tokens.
+ * We use totalTokens here because that's what you pay on.
+ */
+function computeCrawlerTokens(
+  knowledge: KnowledgeUsageSummary | null
+): { trainingTokens: number; searchTokens: number; totalTokens: number } {
+  if (!knowledge) {
+    return { trainingTokens: 0, searchTokens: 0, totalTokens: 0 };
+  }
+
+  let trainingTokens = 0;
+  let searchTokens = 0;
+
+  for (const op of knowledge.byOperation || []) {
+    if (op.operation === "embeddings_ingest") {
+      trainingTokens += op.totalTokens;
+    } else if (op.operation === "embeddings_search") {
+      searchTokens += op.totalTokens;
+    }
+  }
+
+  return {
+    trainingTokens,
+    searchTokens,
+    totalTokens: trainingTokens + searchTokens
+  };
+}
+
+/**
  * Shapes that roughly match Prisma.groupBy outputs.
- * We avoid importing Prisma types to keep things simple
- * with strict TS config.
  */
 type UsageByBotRow = {
   botId: string | null;
@@ -74,52 +105,12 @@ type UsageByModelRow = {
   };
 };
 
-type UsageByUserRow = {
-  userId: string | null;
-  _sum: {
-    totalTokens: number | null;
-  };
-  _count: {
-    _all: number;
-  };
-};
-
 /* =========================
    GET /api/admin/openai-usage
    ========================= */
 
 /**
- * ✅ Admin OpenAI usage dashboard
- *
- * Query params:
- * - month: YYYY-MM (defaults to current UTC month)
- * - q: text filter on bot name / slug / owner email
- * - model: exact model id (e.g. "gpt-4o-mini")
- * - take: page size for bot list (1–200, default 50)
- * - skip: offset for bot list (0+, default 0)
- *
- * Response shape:
- * {
- *   monthKey,
- *   window: { from, to },
- *   filters: { q, model },
- *   paging: { take, skip, total, hasMore },
- *   bots: [
- *     {
- *       botId, slug, name, status,
- *       owner: { id, email, name },
- *       plan: { id, code, name, monthlyTokens } | null,
- *       monthTokens: { totalTokens, promptTokens, completionTokens, requests },
- *       createdAt
- *     }
- *   ],
- *   global: {
- *     totalTokens,
- *     requestCount,
- *     byModel: [{ model, totalTokens, requestCount }],
- *     topUsers: [{ userId, email, name, totalTokens, requestCount }]
- *   }
- * }
+ * ✅ Admin OpenAI + Crawler usage dashboard
  */
 router.get(
   "/admin/openai-usage",
@@ -160,7 +151,7 @@ router.get(
       ];
     }
 
-    // Fetch a page of bots (with owner + plan info)
+    // Fetch a page of bots (with owner + plan info + knowledgeClientId)
     const [totalBots, bots] = await Promise.all([
       prisma.bot.count({ where: botWhere }),
       prisma.bot.findMany({
@@ -186,6 +177,7 @@ router.get(
       baseUsageWhere.model = model;
     }
 
+    // ----- OpenAI aggregations -----
     const usageByBotPromise: Promise<UsageByBotRow[]> = botIds.length
       ? (prisma.openAIUsage.groupBy({
           by: ["botId"],
@@ -210,21 +202,9 @@ router.get(
         _count: { _all: true }
       }) as unknown as Promise<UsageByModelRow[]>;
 
-    const usageByUserPromise: Promise<UsageByUserRow[]> =
-      prisma.openAIUsage.groupBy({
-        by: ["userId"],
-        where: {
-          ...baseUsageWhere,
-          userId: { not: null }
-        },
-        _sum: { totalTokens: true },
-        _count: { _all: true }
-      }) as unknown as Promise<UsageByUserRow[]>;
-
-    const [usageByBot, usageByModelRaw, usageByUserRaw] = await Promise.all([
+    const [usageByBot, usageByModelRaw] = await Promise.all([
       usageByBotPromise,
-      usageByModelPromise,
-      usageByUserPromise
+      usageByModelPromise
     ]);
 
     const usageByBotMap = new Map<string, UsageByBotRow>();
@@ -234,7 +214,8 @@ router.get(
       }
     }
 
-    const byModel = usageByModelRaw
+    // OpenAI models only
+    const byModelOpenAI = usageByModelRaw
       .map((row) => ({
         model: row.model,
         totalTokens: row._sum.totalTokens ?? 0,
@@ -242,52 +223,82 @@ router.get(
       }))
       .sort((a, b) => b.totalTokens - a.totalTokens);
 
-    const usageByUserSorted = usageByUserRaw
-      .filter((row) => !!row.userId)
-      .map((row) => ({
-        userId: row.userId as string,
-        totalTokens: row._sum.totalTokens ?? 0,
-        requestCount: row._count._all ?? 0
-      }))
-      .sort((a, b) => b.totalTokens - a.totalTokens);
+    // ----- Knowledge usage ("Crawler") per bot -----
+    const knowledgeUsageByBot: Record<string, number> = {};
 
-    const topUserUsage = usageByUserSorted.slice(0, 50);
-    const topUserIds = topUserUsage.map((u) => u.userId);
+    const botsWithKnowledge = bots.filter(
+      (b) => b.knowledgeClientId != null
+    ) as Array<(typeof bots)[number] & { knowledgeClientId: string }>;
 
-    const users = topUserIds.length
-      ? await prisma.user.findMany({
-          where: { id: { in: topUserIds } }
+    if (botsWithKnowledge.length > 0) {
+      await Promise.all(
+        botsWithKnowledge.map(async (bot) => {
+          try {
+            const summary = await fetchKnowledgeUsageForClient({
+              clientId: bot.knowledgeClientId,
+              from,
+              to
+            });
+
+            const crawlerTokens = computeCrawlerTokens(summary).totalTokens;
+            knowledgeUsageByBot[bot.id] = crawlerTokens;
+          } catch (err) {
+            console.error(
+              "Failed to fetch knowledge usage for bot in admin openai-usage",
+              bot.id,
+              err
+            );
+            knowledgeUsageByBot[bot.id] = 0;
+          }
         })
-      : [];
+      );
+    }
 
-    const userMap = new Map(users.map((u) => [u.id, u]));
-
-    const topUsers = topUserUsage.map((u) => {
-      const user = userMap.get(u.userId);
-      return {
-        userId: u.userId,
-        email: user?.email ?? "",
-        name: user?.name ?? null,
-        totalTokens: u.totalTokens,
-        requestCount: u.requestCount
-      };
-    });
-
-    const totalTokensGlobal = byModel.reduce(
+    // ----- Global totals (OpenAI + Crawler) -----
+    const totalTokensOpenAI = byModelOpenAI.reduce(
       (sum, m) => sum + m.totalTokens,
       0
     );
-    const totalRequestsGlobal = byModel.reduce(
+    const totalRequestsGlobal = byModelOpenAI.reduce(
       (sum, m) => sum + m.requestCount,
       0
     );
 
+    const totalTokensKnowledge = Object.values(knowledgeUsageByBot).reduce(
+      (sum, v) => sum + v,
+      0
+    );
+    const totalTokensGlobal = totalTokensOpenAI + totalTokensKnowledge;
+
+    // Build combined model list including synthetic "Crawler" model
+    const byModelCombined: {
+      model: string;
+      totalTokens: number;
+      requestCount: number;
+    }[] = [...byModelOpenAI];
+
+    if (totalTokensKnowledge > 0) {
+      byModelCombined.push({
+        model: "Crawler",
+        totalTokens: totalTokensKnowledge,
+        requestCount: 0 // "requests" isn't meaningful for crawler at this level
+      });
+    }
+
+    const byModel = byModelCombined.sort(
+      (a, b) => b.totalTokens - a.totalTokens
+    );
+
+    // ----- Per-bot rows -----
     const botRows = bots.map((bot) => {
       const agg = usageByBotMap.get(bot.id);
-      const totalTokens = agg?.[ "_sum" ]?.totalTokens ?? 0;
-      const promptTokens = agg?.[ "_sum" ]?.promptTokens ?? 0;
-      const completionTokens = agg?.[ "_sum" ]?.completionTokens ?? 0;
+      const totalTokensOpenAiBot = agg?._sum?.totalTokens ?? 0;
+      const promptTokens = agg?._sum?.promptTokens ?? 0;
+      const completionTokens = agg?._sum?.completionTokens ?? 0;
       const requests = agg?._count?._all ?? 0;
+
+      const knowledgeTokens = knowledgeUsageByBot[bot.id] ?? 0;
+      const totalTokensAll = totalTokensOpenAiBot + knowledgeTokens;
 
       return {
         botId: bot.id,
@@ -308,14 +319,51 @@ router.get(
             }
           : null,
         monthTokens: {
-          totalTokens,
+          totalTokens: totalTokensOpenAiBot,
           promptTokens,
           completionTokens,
           requests
         },
+        knowledgeTokens,
+        totalTokensAll,
         createdAt: bot.createdAt
       };
     });
+
+    // ----- Top users (overall: OpenAI + Crawler) -----
+    type UserAgg = {
+      userId: string;
+      email: string;
+      name: string | null;
+      totalTokens: number; // combined OpenAI + Crawler
+      requestCount: number; // OpenAI requests
+    };
+
+    const userAggMap = new Map<string, UserAgg>();
+
+    for (const row of botRows) {
+      const userId = row.owner.id;
+      const existing = userAggMap.get(userId);
+      const combinedTokens = row.totalTokensAll;
+      const requests = row.monthTokens.requests;
+
+      if (existing) {
+        existing.totalTokens += combinedTokens;
+        existing.requestCount += requests;
+      } else {
+        userAggMap.set(userId, {
+          userId,
+          email: row.owner.email,
+          name: row.owner.name,
+          totalTokens: combinedTokens,
+          requestCount: requests
+        });
+      }
+    }
+
+    const topUsers = Array.from(userAggMap.values())
+      .sort((a, b) => b.totalTokens - a.totalTokens)
+      .slice(0, 50);
 
     return res.json({
       monthKey,
@@ -335,6 +383,8 @@ router.get(
       },
       bots: botRows,
       global: {
+        totalTokensOpenAI,
+        totalTokensKnowledge,
         totalTokens: totalTokensGlobal,
         requestCount: totalRequestsGlobal,
         byModel,
