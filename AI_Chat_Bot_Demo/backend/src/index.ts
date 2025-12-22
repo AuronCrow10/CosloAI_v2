@@ -22,6 +22,7 @@ import { scheduleMetaTokenRefreshJob } from "./services/metaTokenService";
 import usageRouter from "./routes/usage";
 import accountRouter from "./routes/account";
 import dashboardRouter from "./routes/dashboard";
+import whatsappTemplatesRouter from "./routes/whatsappTemplates";
 
 import referralsRouter from "./routes/referrals";
 import adminUsersRouter from "./routes/adminUsers";
@@ -109,6 +110,8 @@ app.use("/api", usageRouter);
 
 app.use("/api/account", accountRouter);
 app.use("/api", dashboardRouter);
+app.use("/api", whatsappTemplatesRouter);
+
 
 app.use("/api", adminUsersRouter);
 app.use("/api", referralsRouter);

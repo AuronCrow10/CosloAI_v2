@@ -36,8 +36,6 @@ async function ensureKnowledgeClient(botId: string, userId: string) {
 
   if (bot.knowledgeClientId) return { bot, knowledgeClientId: bot.knowledgeClientId };
 
-  console.log(bot.domain);
-
   const kc = await createKnowledgeClient({
     name: `${bot.userId}-${bot.slug}`,
     domain: bot.domain ?? undefined

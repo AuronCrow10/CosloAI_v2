@@ -15,7 +15,6 @@ export async function createKnowledgeClient(params: {
   name: string;
   domain?: string | null;
 }): Promise<{ client: { id: string } }> {
-  console.log(params.domain);
   const res = await client.post("/clients", {
     name: params.name,
     mainDomain: params.domain || undefined,
@@ -28,7 +27,6 @@ export async function crawlDomain(params: {
   clientId: string;
   domain: string;
 }): Promise<{ status: string; jobId: string; clientId: string; domain: string }> {
-  console.log(params.domain);
   const res = await client.post("/crawl", {
     clientId: params.clientId,
     domain: params.domain
