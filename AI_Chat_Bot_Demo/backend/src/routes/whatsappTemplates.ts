@@ -176,6 +176,8 @@ const listQuerySchema = z.object({
  * - Requires an active WhatsApp channel (no needsReconnect).
  * - Uses the latest WhatsappConnectSession for that bot/user for WABA + token.
  */
+
+/*
 async function getWhatsAppContext(botId: string, userId: string) {
   const bot = await prisma.bot.findFirst({
     where: { id: botId, userId }
@@ -218,6 +220,78 @@ async function getWhatsAppContext(botId: string, userId: string) {
     accessToken: lastSession.waAccessToken
   };
 }
+
+*/
+
+async function getWhatsAppContext(botId: string, userId: string) {
+  const bot = await prisma.bot.findFirst({
+    where: { id: botId, userId }
+  });
+
+  if (!bot) {
+    throw new HttpError(404, "Bot not found");
+  }
+
+  const channel = await prisma.botChannel.findFirst({
+    where: { botId: bot.id, type: "WHATSAPP" }
+  });
+
+  if (!channel) {
+    throw new HttpError(400, "WhatsApp is not connected for this bot.");
+  }
+
+  const meta = (channel.meta as any) || {};
+  if (meta.needsReconnect === true) {
+    throw new HttpError(409, "WhatsApp connection needs to be refreshed.");
+  }
+
+  if (!config.whatsappApiBaseUrl) {
+    throw new HttpError(500, "WhatsApp API base URL is not configured.");
+  }
+
+  // 1) Preferred path: embedded signup session
+  //    (the long-term, “real” integration you care about)
+  const lastSession = await prisma.whatsappConnectSession.findFirst({
+    where: { botId: bot.id, userId },
+    orderBy: { createdAt: "desc" }
+  });
+
+  if (lastSession) {
+    return {
+      bot,
+      channel,
+      wabaId: lastSession.wabaId,
+      accessToken: lastSession.waAccessToken
+    };
+  }
+
+  // 2) Temporary fallback: manual channel config
+  //    Easy to remove later – just delete this block once you drop manual setup.
+  const manualWabaId =
+    typeof meta.wabaId === "string" && meta.wabaId.trim().length > 0
+      ? meta.wabaId.trim()
+      : undefined;
+
+  const manualAccessToken =
+    channel.accessToken || config.whatsappAccessToken;
+
+  if (!manualWabaId || !manualAccessToken) {
+    throw new HttpError(
+      500,
+      "WhatsApp credentials not found. For manual channels, set meta.wabaId and an accessToken on the channel."
+    );
+  }
+
+  return {
+    bot,
+    channel,
+    wabaId: manualWabaId,
+    accessToken: manualAccessToken
+  };
+}
+
+
+
 
 // All routes here require auth and live under /api
 router.use("/bots/", requireAuth);
