@@ -2,6 +2,7 @@
 import { Router, Request, Response } from "express";
 import axios from "axios";
 import crypto from "crypto";
+import util from "node:util";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
 import {
@@ -17,42 +18,72 @@ import {
 
 const router = Router();
 
-/**
- * Structured logging helpers (clean, review-friendly JSON logs).
- * These logs are meant to show:
- * - webhook received (with object + entry counts)
- * - message extracted (mid, sender, page/ig business id)
- * - bot/channel/conversation resolved
- * - reply generated
- * - reply sent to Meta Graph API (+ retry/refresh outcomes)
- */
-type LogLevel = "debug" | "info" | "warn" | "error";
+/** -----------------------------
+ *  Readable “review” logger
+ *  ----------------------------- */
+type Level = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
-function nowIso() {
+const LEVEL_WEIGHT: Record<Level, number> = {
+  DEBUG: 10,
+  INFO: 20,
+  WARN: 30,
+  ERROR: 40
+};
+
+const LOG_LEVEL = ((process.env.LOG_LEVEL || "INFO").toUpperCase() as Level) || "INFO";
+
+function ts() {
   return new Date().toISOString();
 }
 
-function safeSnippet(text: string, maxLen = 120) {
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
+function shortId(v: unknown, keepStart = 6, keepEnd = 4) {
+  if (typeof v !== "string") return v;
+  const s = v.trim();
+  if (s.length <= keepStart + keepEnd + 3) return s;
+  return `${s.slice(0, keepStart)}…${s.slice(-keepEnd)}`;
 }
 
-function logJson(
-  level: LogLevel,
-  event: string,
-  data: Record<string, unknown> = {}
-) {
-  const payload = {
-    ts: nowIso(),
-    level,
-    event,
-    ...data
-  };
+function safeSnippet(text: string, maxLen = 90) {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  const cut = oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
+  return cut;
+}
 
-  // Keep console method consistent with severity.
-  if (level === "error") console.error(JSON.stringify(payload));
-  else if (level === "warn") console.warn(JSON.stringify(payload));
-  else console.log(JSON.stringify(payload));
+function formatVal(v: unknown): string {
+  if (v === undefined || v === null) return "";
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+
+  if (typeof v === "string") {
+    // Quote only if it has spaces / special chars
+    const needsQuotes = /[\s"=|]/.test(v);
+    return needsQuotes ? JSON.stringify(v) : v;
+  }
+
+  // Keep objects compact (only used in error detail lines)
+  return util.inspect(v, { depth: 2, breakLength: 160, compact: true });
+}
+
+function fmtCtx(ctx: Record<string, unknown>) {
+  const entries = Object.entries(ctx)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => [k, v] as const);
+
+  // Sort keys for consistent reading
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+
+  return entries.map(([k, v]) => `${k}=${formatVal(v)}`).join(" ");
+}
+
+function logLine(level: Level, src: "META" | "WA", msg: string, ctx: Record<string, unknown> = {}) {
+  if (LEVEL_WEIGHT[level] < LEVEL_WEIGHT[LOG_LEVEL]) return;
+
+  const line =
+    `${ts()} | ${level.padEnd(5)} | ${src.padEnd(4)} | ${msg.padEnd(28)} | ` +
+    fmtCtx(ctx);
+
+  if (level === "ERROR") console.error(line);
+  else if (level === "WARN") console.warn(line);
+  else console.log(line);
 }
 
 function getRequestId(req: Request) {
@@ -62,20 +93,34 @@ function getRequestId(req: Request) {
   return existing || crypto.randomUUID();
 }
 
+function normalizeAxiosError(err: unknown) {
+  if (!axios.isAxiosError(err)) return { status: undefined, data: err };
+  return { status: err.response?.status, data: err.response?.data ?? err.message };
+}
+
+function extractMetaMessageId(data: unknown): string | undefined {
+  const d: any = data;
+  return (
+    d?.message_id ||
+    d?.messageId ||
+    d?.messages?.[0]?.id ||
+    d?.id
+  );
+}
+
 type SendReplyResult =
   | {
       ok: true;
       attempt: 1 | 2;
       refreshedToken: boolean;
       status?: number;
-      metaResponse?: unknown;
+      metaMessageId?: string;
     }
   | {
       ok: false;
       attempt: 1 | 2;
       refreshedToken: boolean;
       status?: number;
-      metaError?: unknown;
       reason:
         | "CHANNEL_NOT_FOUND"
         | "CONFIG_MISSING"
@@ -83,14 +128,132 @@ type SendReplyResult =
         | "TOKEN_REFRESH_FAILED";
     };
 
-function normalizeAxiosError(err: unknown) {
-  if (!axios.isAxiosError(err)) {
-    return { status: undefined, data: err };
+async function sendGraphText(
+  requestId: string,
+  platform: "FB" | "IG",
+  channelId: string,
+  graphTargetId: string, // pageId or igBusinessId
+  userId: string,
+  reply: string
+): Promise<SendReplyResult> {
+  const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
+  if (!channel) {
+    logLine("ERROR", "META", "reply failed (no channel)", { req: requestId, channel: channelId });
+    return { ok: false, attempt: 1, refreshedToken: false, reason: "CHANNEL_NOT_FOUND" };
   }
-  return {
-    status: err.response?.status,
-    data: err.response?.data ?? err.message
+
+  let accessToken = channel.accessToken || config.metaPageAccessToken;
+  if (!accessToken || !config.metaGraphApiBaseUrl) {
+    logLine("ERROR", "META", "reply failed (config)", {
+      req: requestId,
+      channel: channelId,
+      hasToken: Boolean(accessToken),
+      hasBaseUrl: Boolean(config.metaGraphApiBaseUrl)
+    });
+    return { ok: false, attempt: 1, refreshedToken: false, reason: "CONFIG_MISSING" };
+  }
+
+  const url = `${config.metaGraphApiBaseUrl}/${graphTargetId}/messages`;
+  const body = {
+    messaging_type: "RESPONSE",
+    recipient: { id: userId },
+    message: { text: reply }
   };
+
+  // Attempt 1
+  try {
+    const resp = await axios.post(url, body, {
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      timeout: 10000
+    });
+
+    return {
+      ok: true,
+      attempt: 1,
+      refreshedToken: false,
+      status: resp.status,
+      metaMessageId: extractMetaMessageId(resp.data)
+    };
+  } catch (err: unknown) {
+    const n = normalizeAxiosError(err);
+
+    logLine("WARN", "META", "reply send failed", {
+      req: requestId,
+      plat: platform,
+      channel: channelId,
+      target: shortId(graphTargetId),
+      user: shortId(userId),
+      status: n.status
+    });
+    logLine("DEBUG", "META", "reply send failed details", {
+      req: requestId,
+      details: n.data
+    });
+
+    if (!isMetaTokenErrorNeedingRefresh(err)) {
+      return {
+        ok: false,
+        attempt: 1,
+        refreshedToken: false,
+        status: n.status,
+        reason: "REQUEST_FAILED"
+      };
+    }
+
+    // Refresh + attempt 2
+    logLine("INFO", "META", "refresh token", { req: requestId, channel: channelId });
+
+    const refreshed = await refreshPageAccessTokenForChannel(channelId);
+    if (!refreshed?.accessToken) {
+      logLine("ERROR", "META", "refresh token failed", { req: requestId, channel: channelId });
+      return {
+        ok: false,
+        attempt: 2,
+        refreshedToken: true,
+        status: n.status,
+        reason: "TOKEN_REFRESH_FAILED"
+      };
+    }
+
+    accessToken = refreshed.accessToken;
+
+    try {
+      const resp2 = await axios.post(url, body, {
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        timeout: 10000
+      });
+
+      logLine("INFO", "META", "refresh token ok", { req: requestId, channel: channelId });
+
+      return {
+        ok: true,
+        attempt: 2,
+        refreshedToken: true,
+        status: resp2.status,
+        metaMessageId: extractMetaMessageId(resp2.data)
+      };
+    } catch (err2: unknown) {
+      const n2 = normalizeAxiosError(err2);
+      logLine("ERROR", "META", "reply failed after refresh", {
+        req: requestId,
+        plat: platform,
+        channel: channelId,
+        status: n2.status
+      });
+      logLine("DEBUG", "META", "reply failed after refresh details", {
+        req: requestId,
+        details: n2.data
+      });
+
+      return {
+        ok: false,
+        attempt: 2,
+        refreshedToken: true,
+        status: n2.status,
+        reason: "REQUEST_FAILED"
+      };
+    }
+  }
 }
 
 // GET /webhook/meta (verification)
@@ -103,11 +266,9 @@ router.get("/", (req: Request, res: Response) => {
 
   const ok = mode === "subscribe" && token === config.metaVerifyToken;
 
-  logJson(ok ? "info" : "warn", "meta.webhook.verify", {
-    requestId,
+  logLine(ok ? "INFO" : "WARN", "META", "verify", {
+    req: requestId,
     mode,
-    tokenProvided: Boolean(token),
-    challengeProvided: Boolean(challenge),
     verified: ok
   });
 
@@ -115,367 +276,62 @@ router.get("/", (req: Request, res: Response) => {
   return res.sendStatus(403);
 });
 
-async function sendFacebookReply(
-  requestId: string,
-  channelId: string,
-  pageId: string,
-  userId: string,
-  reply: string
-): Promise<SendReplyResult> {
-  const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
-  if (!channel) {
-    logJson("error", "meta.reply.fb.channel_not_found", { requestId, channelId });
-    return {
-      ok: false,
-      attempt: 1,
-      refreshedToken: false,
-      reason: "CHANNEL_NOT_FOUND"
-    };
-  }
-
-  let accessToken = channel.accessToken || config.metaPageAccessToken;
-  if (!accessToken || !config.metaGraphApiBaseUrl) {
-    logJson("error", "meta.reply.fb.config_missing", {
-      requestId,
-      channelId,
-      hasToken: Boolean(accessToken),
-      hasBaseUrl: Boolean(config.metaGraphApiBaseUrl)
-    });
-    return {
-      ok: false,
-      attempt: 1,
-      refreshedToken: false,
-      reason: "CONFIG_MISSING"
-    };
-  }
-
-  const url = `${config.metaGraphApiBaseUrl}/${pageId}/messages`;
-  const body = {
-    messaging_type: "RESPONSE",
-    recipient: { id: userId },
-    message: { text: reply }
-  };
-
-  // Attempt 1
-  try {
-    const resp = await axios.post(url, body, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      timeout: 10000
-    });
-
-    return {
-      ok: true,
-      attempt: 1,
-      refreshedToken: false,
-      status: resp.status,
-      metaResponse: resp.data
-    };
-  } catch (err: unknown) {
-    const normalized = normalizeAxiosError(err);
-
-    logJson("warn", "meta.reply.fb.send_failed", {
-      requestId,
-      channelId,
-      pageId,
-      userId,
-      attempt: 1,
-      status: normalized.status,
-      error: normalized.data
-    });
-
-    // Attempt refresh if token error
-    if (!isMetaTokenErrorNeedingRefresh(err)) {
-      return {
-        ok: false,
-        attempt: 1,
-        refreshedToken: false,
-        status: normalized.status,
-        metaError: normalized.data,
-        reason: "REQUEST_FAILED"
-      };
-    }
-
-    logJson("info", "meta.reply.fb.refresh_token.start", { requestId, channelId });
-    const refreshed = await refreshPageAccessTokenForChannel(channelId);
-
-    if (!refreshed?.accessToken) {
-      logJson("error", "meta.reply.fb.refresh_token.failed", { requestId, channelId });
-      return {
-        ok: false,
-        attempt: 2,
-        refreshedToken: true,
-        status: normalized.status,
-        metaError: normalized.data,
-        reason: "TOKEN_REFRESH_FAILED"
-      };
-    }
-
-    accessToken = refreshed.accessToken;
-
-    // Attempt 2 (after refresh)
-    try {
-      const resp2 = await axios.post(url, body, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 10000
-      });
-
-      logJson("info", "meta.reply.fb.refresh_token.succeeded", { requestId, channelId });
-
-      return {
-        ok: true,
-        attempt: 2,
-        refreshedToken: true,
-        status: resp2.status,
-        metaResponse: resp2.data
-      };
-    } catch (err2: unknown) {
-      const normalized2 = normalizeAxiosError(err2);
-      logJson("error", "meta.reply.fb.send_failed_after_refresh", {
-        requestId,
-        channelId,
-        pageId,
-        userId,
-        attempt: 2,
-        status: normalized2.status,
-        error: normalized2.data
-      });
-
-      return {
-        ok: false,
-        attempt: 2,
-        refreshedToken: true,
-        status: normalized2.status,
-        metaError: normalized2.data,
-        reason: "REQUEST_FAILED"
-      };
-    }
-  }
-}
-
-async function sendInstagramReply(
-  requestId: string,
-  channelId: string,
-  igBusinessId: string,
-  userId: string,
-  reply: string
-): Promise<SendReplyResult> {
-  const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
-  if (!channel) {
-    logJson("error", "meta.reply.ig.channel_not_found", { requestId, channelId });
-    return {
-      ok: false,
-      attempt: 1,
-      refreshedToken: false,
-      reason: "CHANNEL_NOT_FOUND"
-    };
-  }
-
-  let accessToken = channel.accessToken || config.metaPageAccessToken;
-  if (!accessToken || !config.metaGraphApiBaseUrl) {
-    logJson("error", "meta.reply.ig.config_missing", {
-      requestId,
-      channelId,
-      hasToken: Boolean(accessToken),
-      hasBaseUrl: Boolean(config.metaGraphApiBaseUrl)
-    });
-    return {
-      ok: false,
-      attempt: 1,
-      refreshedToken: false,
-      reason: "CONFIG_MISSING"
-    };
-  }
-
-  const url = `${config.metaGraphApiBaseUrl}/${igBusinessId}/messages`;
-  const body = {
-    messaging_type: "RESPONSE",
-    recipient: { id: userId },
-    message: { text: reply }
-  };
-
-  // Attempt 1
-  try {
-    const resp = await axios.post(url, body, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      timeout: 10000
-    });
-
-    return {
-      ok: true,
-      attempt: 1,
-      refreshedToken: false,
-      status: resp.status,
-      metaResponse: resp.data
-    };
-  } catch (err: unknown) {
-    const normalized = normalizeAxiosError(err);
-
-    logJson("warn", "meta.reply.ig.send_failed", {
-      requestId,
-      channelId,
-      igBusinessId,
-      userId,
-      attempt: 1,
-      status: normalized.status,
-      error: normalized.data
-    });
-
-    if (!isMetaTokenErrorNeedingRefresh(err)) {
-      return {
-        ok: false,
-        attempt: 1,
-        refreshedToken: false,
-        status: normalized.status,
-        metaError: normalized.data,
-        reason: "REQUEST_FAILED"
-      };
-    }
-
-    logJson("info", "meta.reply.ig.refresh_token.start", { requestId, channelId });
-    const refreshed = await refreshPageAccessTokenForChannel(channelId);
-
-    if (!refreshed?.accessToken) {
-      logJson("error", "meta.reply.ig.refresh_token.failed", { requestId, channelId });
-      return {
-        ok: false,
-        attempt: 2,
-        refreshedToken: true,
-        status: normalized.status,
-        metaError: normalized.data,
-        reason: "TOKEN_REFRESH_FAILED"
-      };
-    }
-
-    accessToken = refreshed.accessToken;
-
-    // Attempt 2 (after refresh)
-    try {
-      const resp2 = await axios.post(url, body, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 10000
-      });
-
-      logJson("info", "meta.reply.ig.refresh_token.succeeded", { requestId, channelId });
-
-      return {
-        ok: true,
-        attempt: 2,
-        refreshedToken: true,
-        status: resp2.status,
-        metaResponse: resp2.data
-      };
-    } catch (err2: unknown) {
-      const normalized2 = normalizeAxiosError(err2);
-      logJson("error", "meta.reply.ig.send_failed_after_refresh", {
-        requestId,
-        channelId,
-        igBusinessId,
-        userId,
-        attempt: 2,
-        status: normalized2.status,
-        error: normalized2.data
-      });
-
-      return {
-        ok: false,
-        attempt: 2,
-        refreshedToken: true,
-        status: normalized2.status,
-        metaError: normalized2.data,
-        reason: "REQUEST_FAILED"
-      };
-    }
-  }
-}
-
 // POST /webhook/meta
 router.post("/", async (req: Request, res: Response) => {
   const requestId = getRequestId(req);
-  const receivedAt = Date.now();
+  const startedAt = Date.now();
 
   const body: unknown = req.body;
-
-  // Log receipt (this is the big one you’ll want for review)
-  const objectType =
-    typeof (body as any)?.object === "string" ? (body as any).object : "unknown";
-
+  const objectType = typeof (body as any)?.object === "string" ? (body as any).object : "unknown";
   const entryCount = Array.isArray((body as any)?.entry) ? (body as any).entry.length : 0;
 
-  logJson("info", "meta.webhook.received", {
-    requestId,
+  logLine("INFO", "META", "⇢ webhook received", {
+    req: requestId,
     object: objectType,
-    entryCount,
-    hasSignature:
-      Boolean(req.headers["x-hub-signature"]) || Boolean(req.headers["x-hub-signature-256"]),
-    userAgent: req.headers["user-agent"],
-    durationMs: Date.now() - receivedAt
+    entries: entryCount
   });
 
-  // Always ack Meta quickly; processing continues but we still respond at the end.
   if (!body || typeof body !== "object" || !(body as any).object) {
-    logJson("warn", "meta.webhook.ignored", {
-      requestId,
-      reason: "missing_body_or_object"
-    });
+    logLine("DEBUG", "META", "ignored", { req: requestId, reason: "missing body/object" });
     return res.sendStatus(200);
   }
 
   try {
     if ((body as any).object === "page") {
-      // Facebook Messenger
       const entries = Array.isArray((body as any).entry) ? (body as any).entry : [];
 
       for (const entry of entries) {
         const pageId: string | undefined = entry?.id;
         const messagingEvents = Array.isArray(entry?.messaging) ? entry.messaging : [];
 
-        logJson("debug", "meta.webhook.page.entry", {
-          requestId,
-          pageId,
-          messagingEventCount: messagingEvents.length
-        });
-
         for (const event of messagingEvents) {
           const message = event?.message;
           const sender = event?.sender;
 
-          // Ignore non-text messages, echoes, delivery/read events etc.
           const text: string | undefined = message?.text;
           const userId: string | undefined = sender?.id;
           const mid: string | undefined = message?.mid;
 
           if (!pageId || !userId) continue;
+
           if (!message || !text) {
-            logJson("debug", "meta.webhook.page.event_ignored", {
-              requestId,
-              pageId,
-              userId,
-              mid,
-              reason: "no_text_message"
+            logLine("DEBUG", "META", "ignored (non-text)", {
+              req: requestId,
+              plat: "FB",
+              page: shortId(pageId),
+              user: shortId(userId),
+              mid: shortId(mid)
             });
             continue;
           }
 
-          logJson("info", "meta.message.received", {
-            requestId,
-            platform: "FACEBOOK",
-            pageId,
-            userId,
-            mid,
-            textSnippet: safeSnippet(text),
-            textLength: text.length
+          logLine("INFO", "META", "message received", {
+            req: requestId,
+            plat: "FB",
+            page: shortId(pageId),
+            user: shortId(userId),
+            mid: shortId(mid),
+            text: safeSnippet(text)
           });
 
           const channel = await prisma.botChannel.findFirst({
@@ -484,27 +340,22 @@ router.post("/", async (req: Request, res: Response) => {
           });
 
           if (!channel?.bot) {
-            logJson("warn", "meta.message.unlinked", {
-              requestId,
-              platform: "FACEBOOK",
-              pageId,
-              userId,
-              mid
+            logLine("WARN", "META", "unlinked pageId", {
+              req: requestId,
+              plat: "FB",
+              page: shortId(pageId),
+              user: shortId(userId),
+              mid: shortId(mid)
             });
             continue;
           }
 
           const bot = channel.bot;
           if (bot.status !== "ACTIVE") {
-            logJson("warn", "meta.message.bot_inactive", {
-              requestId,
-              platform: "FACEBOOK",
-              botId: bot.id,
-              botSlug: bot.slug,
-              status: bot.status,
-              pageId,
-              userId,
-              mid
+            logLine("WARN", "META", "bot inactive", {
+              req: requestId,
+              bot: bot.slug,
+              status: bot.status
             });
             continue;
           }
@@ -515,28 +366,21 @@ router.post("/", async (req: Request, res: Response) => {
             externalUserId: userId
           });
 
-          logJson("info", "meta.conversation.resolved", {
-            requestId,
-            platform: "FACEBOOK",
-            channelId: channel.id,
-            botId: bot.id,
-            botSlug: bot.slug,
-            conversationId: convo.id,
-            pageId,
-            userId,
-            mid
+          logLine("INFO", "META", "conversation resolved", {
+            req: requestId,
+            bot: bot.slug,
+            convo: convo.id,
+            channel: channel.id
           });
 
-          // --- Rate limiting ---
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
             const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
 
-            logJson("warn", "meta.rate_limited", {
-              requestId,
-              platform: "FACEBOOK",
-              conversationId: convo.id,
-              retryAfterSeconds: rateResult.retryAfterSeconds
+            logLine("WARN", "META", "rate limited", {
+              req: requestId,
+              convo: convo.id,
+              retryAfter: rateResult.retryAfterSeconds
             });
 
             try {
@@ -546,110 +390,78 @@ router.post("/", async (req: Request, res: Response) => {
                 content: text,
                 channelMessageId: mid
               });
-
               await logMessage({
                 conversationId: convo.id,
                 role: "ASSISTANT",
                 content: rateMessage
               });
-            } catch (logErr: unknown) {
-              logJson("error", "meta.db.log_failed", {
-                requestId,
-                platform: "FACEBOOK",
-                conversationId: convo.id,
-                error: logErr
-              });
+            } catch (e: unknown) {
+              logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
+              logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
             }
 
-            const sendResult = await sendFacebookReply(
-              requestId,
-              channel.id,
-              pageId,
-              userId,
-              rateMessage
-            );
+            const send = await sendGraphText(requestId, "FB", channel.id, pageId, userId, rateMessage);
 
-            logJson(sendResult.ok ? "info" : "error", "meta.reply.sent", {
-              requestId,
-              platform: "FACEBOOK",
-              conversationId: convo.id,
-              channelId: channel.id,
-              pageId,
-              userId,
-              mid,
-              replyType: "RATE_LIMIT",
-              replyLength: rateMessage.length,
-              sendResult
+            logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
+              req: requestId,
+              plat: "FB",
+              type: "RATE_LIMIT",
+              status: send.status,
+              metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+              attempt: send.attempt,
+              refreshed: send.refreshedToken
             });
 
             continue;
           }
 
-          // --- Normal path: call chat service with conversationId for memory ---
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, {
-            conversationId: convo.id
-          });
+          const reply = await generateBotReplyForSlug(bot.slug, text, { conversationId: convo.id });
           const chatMs = Date.now() - t0;
 
-          logJson("info", "meta.reply.generated", {
-            requestId,
-            platform: "FACEBOOK",
-            conversationId: convo.id,
-            botSlug: bot.slug,
-            chatLatencyMs: chatMs,
-            replySnippet: safeSnippet(reply),
-            replyLength: reply.length
+          logLine("INFO", "META", "reply generated", {
+            req: requestId,
+            convo: convo.id,
+            ms: chatMs,
+            reply: safeSnippet(reply)
           });
 
-          await logMessage({
-            conversationId: convo.id,
-            role: "USER",
-            content: text,
-            channelMessageId: mid
-          });
+          try {
+            await logMessage({
+              conversationId: convo.id,
+              role: "USER",
+              content: text,
+              channelMessageId: mid
+            });
+            await logMessage({
+              conversationId: convo.id,
+              role: "ASSISTANT",
+              content: reply
+            });
+          } catch (e: unknown) {
+            logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
+            logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
+          }
 
-          await logMessage({
-            conversationId: convo.id,
-            role: "ASSISTANT",
-            content: reply
-          });
+          const send = await sendGraphText(requestId, "FB", channel.id, pageId, userId, reply);
 
-          const sendResult = await sendFacebookReply(
-            requestId,
-            channel.id,
-            pageId,
-            userId,
-            reply
-          );
-
-          logJson(sendResult.ok ? "info" : "error", "meta.reply.sent", {
-            requestId,
-            platform: "FACEBOOK",
-            conversationId: convo.id,
-            channelId: channel.id,
-            pageId,
-            userId,
-            mid,
-            replyType: "NORMAL",
-            replyLength: reply.length,
-            sendResult
+          logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
+            req: requestId,
+            plat: "FB",
+            type: "NORMAL",
+            status: send.status,
+            metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+            attempt: send.attempt,
+            refreshed: send.refreshedToken
           });
         }
       }
     } else if ((body as any).object === "instagram") {
-      // Instagram DM
       const entries = Array.isArray((body as any).entry) ? (body as any).entry : [];
 
       for (const entry of entries) {
         const igBusinessId: string | undefined = entry?.id;
         const messagingEvents = Array.isArray(entry?.messaging) ? entry.messaging : [];
-
-        logJson("debug", "meta.webhook.instagram.entry", {
-          requestId,
-          igBusinessId,
-          messagingEventCount: messagingEvents.length
-        });
 
         for (const event of messagingEvents) {
           const message = event?.message;
@@ -660,25 +472,25 @@ router.post("/", async (req: Request, res: Response) => {
           const mid: string | undefined = message?.mid;
 
           if (!igBusinessId || !userId) continue;
+
           if (!message || !text) {
-            logJson("debug", "meta.webhook.instagram.event_ignored", {
-              requestId,
-              igBusinessId,
-              userId,
-              mid,
-              reason: "no_text_message"
+            logLine("DEBUG", "META", "ignored (non-text)", {
+              req: requestId,
+              plat: "IG",
+              ig: shortId(igBusinessId),
+              user: shortId(userId),
+              mid: shortId(mid)
             });
             continue;
           }
 
-          logJson("info", "meta.message.received", {
-            requestId,
-            platform: "INSTAGRAM",
-            igBusinessId,
-            userId,
-            mid,
-            textSnippet: safeSnippet(text),
-            textLength: text.length
+          logLine("INFO", "META", "message received", {
+            req: requestId,
+            plat: "IG",
+            ig: shortId(igBusinessId),
+            user: shortId(userId),
+            mid: shortId(mid),
+            text: safeSnippet(text)
           });
 
           const channel = await prisma.botChannel.findFirst({
@@ -687,27 +499,22 @@ router.post("/", async (req: Request, res: Response) => {
           });
 
           if (!channel?.bot) {
-            logJson("warn", "meta.message.unlinked", {
-              requestId,
-              platform: "INSTAGRAM",
-              igBusinessId,
-              userId,
-              mid
+            logLine("WARN", "META", "unlinked igBusinessId", {
+              req: requestId,
+              plat: "IG",
+              ig: shortId(igBusinessId),
+              user: shortId(userId),
+              mid: shortId(mid)
             });
             continue;
           }
 
           const bot = channel.bot;
           if (bot.status !== "ACTIVE") {
-            logJson("warn", "meta.message.bot_inactive", {
-              requestId,
-              platform: "INSTAGRAM",
-              botId: bot.id,
-              botSlug: bot.slug,
-              status: bot.status,
-              igBusinessId,
-              userId,
-              mid
+            logLine("WARN", "META", "bot inactive", {
+              req: requestId,
+              bot: bot.slug,
+              status: bot.status
             });
             continue;
           }
@@ -718,28 +525,21 @@ router.post("/", async (req: Request, res: Response) => {
             externalUserId: userId
           });
 
-          logJson("info", "meta.conversation.resolved", {
-            requestId,
-            platform: "INSTAGRAM",
-            channelId: channel.id,
-            botId: bot.id,
-            botSlug: bot.slug,
-            conversationId: convo.id,
-            igBusinessId,
-            userId,
-            mid
+          logLine("INFO", "META", "conversation resolved", {
+            req: requestId,
+            bot: bot.slug,
+            convo: convo.id,
+            channel: channel.id
           });
 
-          // --- Rate limiting ---
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
             const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
 
-            logJson("warn", "meta.rate_limited", {
-              requestId,
-              platform: "INSTAGRAM",
-              conversationId: convo.id,
-              retryAfterSeconds: rateResult.retryAfterSeconds
+            logLine("WARN", "META", "rate limited", {
+              req: requestId,
+              convo: convo.id,
+              retryAfter: rateResult.retryAfterSeconds
             });
 
             try {
@@ -749,115 +549,91 @@ router.post("/", async (req: Request, res: Response) => {
                 content: text,
                 channelMessageId: mid
               });
-
               await logMessage({
                 conversationId: convo.id,
                 role: "ASSISTANT",
                 content: rateMessage
               });
-            } catch (logErr: unknown) {
-              logJson("error", "meta.db.log_failed", {
-                requestId,
-                platform: "INSTAGRAM",
-                conversationId: convo.id,
-                error: logErr
-              });
+            } catch (e: unknown) {
+              logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
+              logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
             }
 
-            const sendResult = await sendInstagramReply(
+            const send = await sendGraphText(
               requestId,
+              "IG",
               channel.id,
               igBusinessId,
               userId,
               rateMessage
             );
 
-            logJson(sendResult.ok ? "info" : "error", "meta.reply.sent", {
-              requestId,
-              platform: "INSTAGRAM",
-              conversationId: convo.id,
-              channelId: channel.id,
-              igBusinessId,
-              userId,
-              mid,
-              replyType: "RATE_LIMIT",
-              replyLength: rateMessage.length,
-              sendResult
+            logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
+              req: requestId,
+              plat: "IG",
+              type: "RATE_LIMIT",
+              status: send.status,
+              metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+              attempt: send.attempt,
+              refreshed: send.refreshedToken
             });
 
             continue;
           }
 
-          // --- Normal path: call chat service with conversationId for memory ---
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, {
-            conversationId: convo.id
-          });
+          const reply = await generateBotReplyForSlug(bot.slug, text, { conversationId: convo.id });
           const chatMs = Date.now() - t0;
 
-          logJson("info", "meta.reply.generated", {
-            requestId,
-            platform: "INSTAGRAM",
-            conversationId: convo.id,
-            botSlug: bot.slug,
-            chatLatencyMs: chatMs,
-            replySnippet: safeSnippet(reply),
-            replyLength: reply.length
+          logLine("INFO", "META", "reply generated", {
+            req: requestId,
+            convo: convo.id,
+            ms: chatMs,
+            reply: safeSnippet(reply)
           });
 
-          await logMessage({
-            conversationId: convo.id,
-            role: "USER",
-            content: text,
-            channelMessageId: mid
-          });
+          try {
+            await logMessage({
+              conversationId: convo.id,
+              role: "USER",
+              content: text,
+              channelMessageId: mid
+            });
+            await logMessage({
+              conversationId: convo.id,
+              role: "ASSISTANT",
+              content: reply
+            });
+          } catch (e: unknown) {
+            logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
+            logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
+          }
 
-          await logMessage({
-            conversationId: convo.id,
-            role: "ASSISTANT",
-            content: reply
-          });
+          const send = await sendGraphText(requestId, "IG", channel.id, igBusinessId, userId, reply);
 
-          const sendResult = await sendInstagramReply(
-            requestId,
-            channel.id,
-            igBusinessId,
-            userId,
-            reply
-          );
-
-          logJson(sendResult.ok ? "info" : "error", "meta.reply.sent", {
-            requestId,
-            platform: "INSTAGRAM",
-            conversationId: convo.id,
-            channelId: channel.id,
-            igBusinessId,
-            userId,
-            mid,
-            replyType: "NORMAL",
-            replyLength: reply.length,
-            sendResult
+          logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
+            req: requestId,
+            plat: "IG",
+            type: "NORMAL",
+            status: send.status,
+            metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+            attempt: send.attempt,
+            refreshed: send.refreshedToken
           });
         }
       }
     } else {
-      logJson("info", "meta.webhook.ignored", {
-        requestId,
-        reason: "unsupported_object",
+      logLine("INFO", "META", "ignored (unsupported)", {
+        req: requestId,
         object: (body as any).object
       });
     }
   } catch (err: unknown) {
-    logJson("error", "meta.webhook.error", {
-      requestId,
-      error: err
-    });
+    logLine("ERROR", "META", "webhook error", { req: requestId });
+    logLine("DEBUG", "META", "webhook error details", { req: requestId, details: err });
   }
 
-  logJson("debug", "meta.webhook.done", {
-    requestId,
-    durationMs: Date.now() - receivedAt
-  });
+  logLine("INFO", "META", "⇠ done", { req: requestId, ms: Date.now() - startedAt });
 
   return res.sendStatus(200);
 });
