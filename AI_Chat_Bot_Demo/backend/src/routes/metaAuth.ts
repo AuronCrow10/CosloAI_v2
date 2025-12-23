@@ -9,6 +9,111 @@ import { debugToken } from "../services/metaTokenService";
 
 const router = Router();
 
+type GraphPage = {
+  id: string;
+  name: string;
+  access_token: string;
+  instagram_business_account?: { id: string };
+  connected_instagram_account?: { id: string };
+};
+
+/**
+ * Fetch pages the user can access, including business-owned/client pages.
+ * Falls back to /me/accounts only if business calls fail.
+ */
+async function fetchUserPagesWithBusinessFallback(
+  longLivedUserToken: string
+): Promise<GraphPage[]> {
+  const pages: GraphPage[] = [];
+  const fields =
+    "id,name,access_token,instagram_business_account,connected_instagram_account";
+
+  // Always fetch direct page connections
+  const accountsRes = await axios.get(
+    "https://graph.facebook.com/v22.0/me/accounts",
+    {
+      params: {
+        access_token: longLivedUserToken,
+        fields
+      }
+    }
+  );
+
+  pages.push(
+    ...(((accountsRes.data && accountsRes.data.data) as GraphPage[]) || [])
+  );
+
+  // Best-effort: also fetch business-owned and client pages
+  try {
+    const businessesRes = await axios.get(
+      "https://graph.facebook.com/v22.0/me/businesses",
+      {
+        params: {
+          access_token: longLivedUserToken,
+          fields: "id,name,permitted_tasks"
+        }
+      }
+    );
+
+    const businesses = ((businessesRes.data && businessesRes.data.data) ||
+      []) as Array<{
+      id: string;
+      name: string;
+      permitted_tasks?: string[];
+    }>;
+
+    for (const biz of businesses) {
+      const tasks = biz.permitted_tasks || [];
+      const canManage =
+        tasks.length === 0 ||
+        tasks.includes("MANAGE") ||
+        tasks.includes("MANAGE_PAGES") ||
+        tasks.includes("MANAGE_CAMPAIGNS") ||
+        tasks.includes("MANAGE_TASKS");
+
+      if (!canManage) continue;
+
+      for (const edge of ["owned_pages", "client_pages"] as const) {
+        try {
+          const edgeRes = await axios.get(
+            `https://graph.facebook.com/v22.0/${biz.id}/${edge}`,
+            {
+              params: {
+                access_token: longLivedUserToken,
+                fields
+              }
+            }
+          );
+
+          pages.push(
+            ...(((edgeRes.data && edgeRes.data.data) as GraphPage[]) || [])
+          );
+        } catch (err) {
+          console.warn(
+            `Meta business fallback failed for ${edge} of business ${biz.id}`,
+            err
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "Meta business fallback failed, continuing with /me/accounts only",
+      err
+    );
+  }
+
+  // Deduplicate by page id
+  const dedup = new Map<string, GraphPage>();
+  for (const p of pages) {
+    if (!p || !p.id) continue;
+    const existing = dedup.get(p.id);
+    dedup.set(p.id, { ...existing, ...p });
+  }
+
+  return Array.from(dedup.values());
+}
+
 // Utility: ensure Meta config exists
 function assertMetaConfigured() {
   if (!config.metaAppId || !config.metaAppSecret || !config.metaRedirectUri) {
@@ -72,18 +177,20 @@ router.get(
         { expiresIn: "10m" }
       );
 
+      // 👇 UPDATED: add business_management also for FACEBOOK
       const scopes =
         channelType === "FACEBOOK"
           ? [
               "pages_show_list",
               "pages_messaging",
               "pages_manage_metadata",
-              "pages_read_engagement"
+              "business_management"
             ]
           : [
               "pages_show_list",
               "instagram_basic",
               "instagram_manage_messages",
+              "business_management",
               "pages_manage_metadata"
             ];
 
@@ -121,7 +228,11 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
     return res.status(500).send("Meta app not configured");
   }
 
-  let decoded: { botId: string; userId: string; channelType: "FACEBOOK" | "INSTAGRAM" };
+  let decoded: {
+    botId: string;
+    userId: string;
+    channelType: "FACEBOOK" | "INSTAGRAM";
+  };
   try {
     decoded = jwt.verify(state, config.jwtAccessSecret) as any;
   } catch (err) {
@@ -175,23 +286,9 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
 
     const longLivedUserToken = longLivedRes.data.access_token as string;
 
-    // 3) Get pages this user manages
-    const accountsRes = await axios.get(
-      "https://graph.facebook.com/v22.0/me/accounts",
-      {
-        params: {
-          access_token: longLivedUserToken,
-          fields: "id,name,access_token,instagram_business_account"
-        }
-      }
-    );
-
-    const pages = accountsRes.data.data as Array<{
-      id: string;
-      name: string;
-      access_token: string;
-      instagram_business_account?: { id: string };
-    }>;
+    // 👇 UPDATED: use business-aware helper
+    // 3) Get pages this user can access (direct + business fallback)
+    const pages = await fetchUserPagesWithBusinessFallback(longLivedUserToken);
 
     if (!pages || pages.length === 0) {
       return res.status(400).send("No pages found for this account");
@@ -262,8 +359,11 @@ router.get(
       const pages = rawPages.map((p) => ({
         id: p.id as string,
         name: p.name as string,
+        // 👇 UPDATED: consider both business + connected IG
         instagramBusinessId:
-          p.instagram_business_account?.id || null
+          p.instagram_business_account?.id ||
+          p.connected_instagram_account?.id ||
+          null
       }));
 
       return res.json({
@@ -285,7 +385,7 @@ router.get(
 /**
  * STEP 3b
  * POST /api/meta/sessions/:sessionId/attach
- * - now also calls debugToken() and stores tokenExpiresAt in meta
+ * - calls debugToken() and stores tokenExpiresAt in meta
  */
 router.post(
   "/meta/sessions/:sessionId/attach",
@@ -328,13 +428,15 @@ router.post(
       if (!selectedPage) {
         return res
           .status(400)
-          .json({ error: "Selected page not found in session" });
+          .json({ error: "Selected page not found in session pages" });
       }
 
       const pageAccessToken = selectedPage.access_token as string;
       const pageName = selectedPage.name as string;
       const igBusinessId =
-        selectedPage.instagram_business_account?.id || null;
+        selectedPage.instagram_business_account?.id ||
+        selectedPage.connected_instagram_account?.id ||
+        null;
 
       const debugRes = await debugToken(pageAccessToken);
       const tokenExpiresAtIso = debugRes.expiresAt

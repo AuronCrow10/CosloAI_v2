@@ -11,7 +11,9 @@ export interface DebugTokenResult {
 /**
  * Call /debug_token on a Meta access token to get expiry and validity.
  */
-export async function debugToken(accessToken: string): Promise<DebugTokenResult> {
+export async function debugToken(
+  accessToken: string
+): Promise<DebugTokenResult> {
   if (!config.metaAppId || !config.metaAppSecret) {
     console.warn("Meta appId/appSecret not configured, cannot debug token");
     return { isValid: true, expiresAt: null };
@@ -51,6 +53,119 @@ export function isMetaTokenErrorNeedingRefresh(err: any): boolean {
   return code === 190 || type === "OAuthException";
 }
 
+type GraphPage = {
+  id: string;
+  name: string;
+  access_token: string;
+  instagram_business_account?: { id: string };
+  connected_instagram_account?: { id: string };
+};
+
+/**
+ * Internal helper to fetch all pages a user can access (direct + business).
+ */
+async function fetchAllUserPagesWithBusinessFallback(
+  longLivedUserToken: string
+): Promise<GraphPage[]> {
+  if (!config.metaGraphApiBaseUrl) {
+    console.warn(
+      "Meta graph API base URL not configured, cannot load user pages"
+    );
+    return [];
+  }
+
+  const pages: GraphPage[] = [];
+  const fields =
+    "id,name,access_token,instagram_business_account,connected_instagram_account";
+
+  // Direct connections via /me/accounts
+  const accountsRes = await axios.get(
+    `${config.metaGraphApiBaseUrl}/me/accounts`,
+    {
+      params: {
+        access_token: longLivedUserToken,
+        fields
+      },
+      timeout: 10000
+    }
+  );
+
+  pages.push(
+    ...(((accountsRes.data && accountsRes.data.data) as GraphPage[]) || [])
+  );
+
+  // Best-effort business-owned & client pages
+  try {
+    const businessesRes = await axios.get(
+      `${config.metaGraphApiBaseUrl}/me/businesses`,
+      {
+        params: {
+          access_token: longLivedUserToken,
+          fields: "id,name,permitted_tasks"
+        },
+        timeout: 10000
+      }
+    );
+
+    const businesses = ((businessesRes.data && businessesRes.data.data) ||
+      []) as Array<{
+      id: string;
+      name: string;
+      permitted_tasks?: string[];
+    }>;
+
+    for (const biz of businesses) {
+      const tasks = biz.permitted_tasks || [];
+      const canManage =
+        tasks.length === 0 ||
+        tasks.includes("MANAGE") ||
+        tasks.includes("MANAGE_PAGES") ||
+        tasks.includes("MANAGE_CAMPAIGNS") ||
+        tasks.includes("MANAGE_TASKS");
+
+      if (!canManage) continue;
+
+      for (const edge of ["owned_pages", "client_pages"] as const) {
+        try {
+          const edgeRes = await axios.get(
+            `${config.metaGraphApiBaseUrl}/${biz.id}/${edge}`,
+            {
+              params: {
+                access_token: longLivedUserToken,
+                fields
+              },
+              timeout: 10000
+            }
+          );
+
+          pages.push(
+            ...(((edgeRes.data && edgeRes.data.data) as GraphPage[]) || [])
+          );
+        } catch (err) {
+          console.warn(
+            `Meta business fallback failed for ${edge} of business ${biz.id}`,
+            err
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "Meta business fallback failed, continuing with /me/accounts only",
+      err
+    );
+  }
+
+  const dedup = new Map<string, GraphPage>();
+  for (const p of pages) {
+    if (!p || !p.id) continue;
+    const existing = dedup.get(p.id);
+    dedup.set(p.id, { ...existing, ...p });
+  }
+
+  return Array.from(dedup.values());
+}
+
 /**
  * Refresh the page access token for a given BotChannel using its stored
  * longLivedUserToken + pageId from meta.
@@ -73,7 +188,10 @@ export async function refreshPageAccessTokenForChannel(channelId: string) {
   }
 
   if (channel.type !== "FACEBOOK" && channel.type !== "INSTAGRAM") {
-    console.warn("BotChannel is not a Meta type", { channelId, type: channel.type });
+    console.warn("BotChannel is not a Meta type", {
+      channelId,
+      type: channel.type
+    });
     return null;
   }
 
@@ -89,27 +207,22 @@ export async function refreshPageAccessTokenForChannel(channelId: string) {
   }
 
   try {
-    const accountsRes = await axios.get(
-      `${config.metaGraphApiBaseUrl}/me/accounts`,
-      {
-        params: {
-          access_token: longLivedUserToken,
-          fields: "id,name,access_token,instagram_business_account"
-        },
-        timeout: 10000
-      }
+    // 👇 UPDATED: use business-aware helper for refresh too
+    const pages = await fetchAllUserPagesWithBusinessFallback(
+      longLivedUserToken
     );
 
-    const pages: Array<{
-      id: string;
-      name: string;
-      access_token: string;
-      instagram_business_account?: { id: string };
-    }> = accountsRes.data?.data || [];
+    if (!pages || pages.length === 0) {
+      console.warn("No pages returned while refreshing Meta token", {
+        channelId,
+        pageId
+      });
+      return null;
+    }
 
     const selectedPage = pages.find((p) => p.id === pageId);
     if (!selectedPage) {
-      console.warn("Page not found in /me/accounts during refresh", {
+      console.warn("Page not found among user pages during refresh", {
         channelId,
         pageId
       });
@@ -227,7 +340,9 @@ export function scheduleMetaTokenRefreshJob() {
   const intervalMs = 12 * 60 * 60 * 1000; // 12 hours
 
   console.log(
-    `Starting Meta token refresh job (every ${intervalMs / (60 * 60 * 1000)}h)`
+    `Starting Meta token refresh job (every ${
+      intervalMs / (60 * 60 * 1000)
+    }h)`
   );
 
   // Run once on startup
