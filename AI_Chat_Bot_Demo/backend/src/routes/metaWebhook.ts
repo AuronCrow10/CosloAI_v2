@@ -532,6 +532,10 @@ router.post("/", async (req: Request, res: Response) => {
             channel: channel.id
           });
 
+          const meta = (channel.meta as any) || {};
+          // For Instagram via Facebook Login, replies must be sent via the PAGE ID
+          const graphTargetId: string = meta.pageId || igBusinessId;
+
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
             const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
@@ -563,7 +567,7 @@ router.post("/", async (req: Request, res: Response) => {
               requestId,
               "IG",
               channel.id,
-              igBusinessId,
+              graphTargetId,
               userId,
               rateMessage
             );
@@ -609,7 +613,14 @@ router.post("/", async (req: Request, res: Response) => {
             logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
           }
 
-          const send = await sendGraphText(requestId, "IG", channel.id, igBusinessId, userId, reply);
+          const send = await sendGraphText(
+            requestId,
+            "IG",
+            channel.id,
+            graphTargetId,
+            userId,
+            reply
+          );
 
           logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
             req: requestId,

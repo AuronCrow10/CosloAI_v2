@@ -48,9 +48,15 @@ export async function debugToken(
 
 export function isMetaTokenErrorNeedingRefresh(err: any): boolean {
   const code = err?.response?.data?.error?.code;
-  const type = err?.response?.data?.error?.type;
-  // 190 is the classic OAuthException for invalid/expired token
-  return code === 190 || type === "OAuthException";
+  const subcode = err?.response?.data?.error?.error_subcode;
+
+  // Only treat classic invalid/expired-token errors as refreshable.
+  // 190 is the OAuthException token error; common subcodes:
+  //  - 463: token expired
+  //  - 467: token invalidated
+  if (code !== 190) return false;
+  if (subcode == null) return true;
+  return subcode === 463 || subcode === 467;
 }
 
 type GraphPage = {
@@ -207,7 +213,7 @@ export async function refreshPageAccessTokenForChannel(channelId: string) {
   }
 
   try {
-    // 👇 UPDATED: use business-aware helper for refresh too
+    // use business-aware helper for refresh too
     const pages = await fetchAllUserPagesWithBusinessFallback(
       longLivedUserToken
     );
