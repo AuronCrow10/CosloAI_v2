@@ -177,7 +177,7 @@ router.get(
         { expiresIn: "10m" }
       );
 
-      // 👇 UPDATED: add business_management also for FACEBOOK
+      // 👇 add business_management also for FACEBOOK
       const scopes =
         channelType === "FACEBOOK"
           ? [
@@ -286,7 +286,6 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
 
     const longLivedUserToken = longLivedRes.data.access_token as string;
 
-    // 👇 UPDATED: use business-aware helper
     // 3) Get pages this user can access (direct + business fallback)
     const pages = await fetchUserPagesWithBusinessFallback(longLivedUserToken);
 
@@ -359,7 +358,7 @@ router.get(
       const pages = rawPages.map((p) => ({
         id: p.id as string,
         name: p.name as string,
-        // 👇 UPDATED: consider both business + connected IG
+        // consider both business + connected IG
         instagramBusinessId:
           p.instagram_business_account?.id ||
           p.connected_instagram_account?.id ||
@@ -443,6 +442,40 @@ router.post(
         ? debugRes.expiresAt.toISOString()
         : null;
 
+      // NEW: load IG profile when attaching Instagram
+      let igUsername: string | null = null;
+      let igName: string | null = null;
+
+      if (session.channelType === "INSTAGRAM" && igBusinessId) {
+        try {
+          const igRes = await axios.get(
+            `https://graph.facebook.com/v22.0/${igBusinessId}`,
+            {
+              params: {
+                access_token: pageAccessToken,
+                fields: "username,name,profile_picture_url"
+              },
+              timeout: 10000
+            }
+          );
+
+          igUsername = igRes.data?.username ?? null;
+          igName = igRes.data?.name ?? null;
+
+          console.log("[Meta] Loaded IG profile", {
+            igBusinessId,
+            igUsername,
+            igName
+          });
+        } catch (err: any) {
+          console.warn(
+            "[Meta] Failed to load IG profile",
+            igBusinessId,
+            err.response?.data || err
+          );
+        }
+      }
+
       let botChannel;
       if (session.channelType === "FACEBOOK") {
         botChannel = await prisma.botChannel.upsert({
@@ -497,6 +530,8 @@ router.post(
               pageName,
               pageId: selectedPage.id,
               igBusinessId,
+              igUsername,
+              igName,
               longLivedUserToken: session.longLivedUserToken,
               tokenExpiresAt: tokenExpiresAtIso
             }
@@ -510,6 +545,8 @@ router.post(
               pageName,
               pageId: selectedPage.id,
               igBusinessId,
+              igUsername,
+              igName,
               longLivedUserToken: session.longLivedUserToken,
               tokenExpiresAt: tokenExpiresAtIso
             }
