@@ -44,7 +44,7 @@ INSERT INTO "FeaturePrice" (
   "updatedAt"
 )
 VALUES (
-    uuid_generate_v4(),
+  uuid_generate_v4(),
   'INSTAGRAM',
   'Instagram channel',
   2999,
@@ -136,7 +136,7 @@ VALUES (
   'Web channel / widget',
   1999,
   'eur',
-    'price_1SXgeHGSx2QSwLkUBjNFF4th',
+  'price_1SXgeHGSx2QSwLkUBjNFF4th',
   TRUE,
   now()
 )
@@ -182,7 +182,7 @@ INSERT INTO "FeaturePrice" (
   "id",
   "code",
   "label",
-    "monthlyAmountCents",
+  "monthlyAmountCents",
   "currency",
   "stripePriceId",
   "isActive",
@@ -195,6 +195,93 @@ VALUES (
   2999,
   'eur',
   'price_1SXgcyGSx2QSwLkUQoJlHROP',
+  TRUE,
+  now()
+)
+ON CONFLICT ("code") DO UPDATE
+SET "label"              = EXCLUDED."label",
+    "monthlyAmountCents" = EXCLUDED."monthlyAmountCents",
+    "currency"           = EXCLUDED."currency",
+    "stripePriceId"      = EXCLUDED."stripePriceId",
+    "isActive"           = EXCLUDED."isActive",
+    "updatedAt"          = now();
+
+-- LEAD_WHATSAPP_200
+INSERT INTO "FeaturePrice" (
+  "id",
+  "code",
+  "label",
+  "monthlyAmountCents",
+  "currency",
+  "stripePriceId",
+  "isActive",
+  "updatedAt"
+)
+VALUES (
+  uuid_generate_v4(),
+  'LEAD_WHATSAPP_200',
+  'Lead Ads → WhatsApp (200 messages)',
+  1000,
+  'eur',
+  'price_1SiZ6oGSx2QSwLkUXNZZYKC9',
+  TRUE,
+  now()
+)
+ON CONFLICT ("code") DO UPDATE
+SET "label"              = EXCLUDED."label",
+    "monthlyAmountCents" = EXCLUDED."monthlyAmountCents",
+    "currency"           = EXCLUDED."currency",
+    "stripePriceId"      = EXCLUDED."stripePriceId",
+    "isActive"           = EXCLUDED."isActive",
+    "updatedAt"          = now();
+
+-- LEAD_WHATSAPP_500
+INSERT INTO "FeaturePrice" (
+  "id",
+  "code",
+  "label",
+  "monthlyAmountCents",
+  "currency",
+  "stripePriceId",
+  "isActive",
+  "updatedAt"
+)
+VALUES (
+  uuid_generate_v4(),
+  'LEAD_WHATSAPP_500',
+  'Lead Ads → WhatsApp (500 messages)',
+  2000,
+  'eur',
+  'price_1SiZ7RGSx2QSwLkUSH51y2KS',
+  TRUE,
+  now()
+)
+ON CONFLICT ("code") DO UPDATE
+SET "label"              = EXCLUDED."label",
+    "monthlyAmountCents" = EXCLUDED."monthlyAmountCents",
+    "currency"           = EXCLUDED."currency",
+    "stripePriceId"      = EXCLUDED."stripePriceId",
+    "isActive"           = EXCLUDED."isActive",
+    "updatedAt"          = now();
+
+-- LEAD_WHATSAPP_1000
+INSERT INTO "FeaturePrice" (
+  "id",
+  "code",
+  "label",
+  "monthlyAmountCents",
+  "currency",
+  "stripePriceId",
+  "isActive",
+  "updatedAt"
+)
+VALUES (
+  uuid_generate_v4(),
+  'LEAD_WHATSAPP_1000',
+  'Lead Ads → WhatsApp (1000 messages)',
+  3000,
+  'eur',
+  'price_1SiZ7gGSx2QSwLkUpp9vpHKw',
   TRUE,
   now()
 )
