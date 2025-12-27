@@ -387,7 +387,7 @@ router.post(
           graphTargetId = meta.pageId || channel.externalId;
         } else {
           // For IG, replies go via PAGE ID when using FB login
-          graphTargetId = meta.pageId || meta.igBusinessId || channel.externalId;
+          graphTargetId = meta.pageId || channel.externalId;
         }
 
         if (!graphTargetId) {
