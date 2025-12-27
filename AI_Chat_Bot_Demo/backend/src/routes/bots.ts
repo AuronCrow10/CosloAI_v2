@@ -50,6 +50,13 @@ const botCreateSchema = z.object({
   // Max days in advance bookings are allowed
   bookingMaxAdvanceDays: z.number().int().min(0).optional(),
 
+  bookingMaxSimultaneousBookings: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional(),
+
   // Reminder window & min lead
   bookingReminderWindowHours: z.number().int().min(0).optional(),
   bookingReminderMinLeadHours: z.number().int().min(0).optional(),
@@ -61,16 +68,23 @@ const botCreateSchema = z.object({
   // Email templates (subject + body)
   bookingConfirmationSubjectTemplate: z.string().max(200).optional().nullable(),
   bookingReminderSubjectTemplate: z.string().max(200).optional().nullable(),
+  bookingCancellationSubjectTemplate: z.string().optional().nullable(), // NEW
 
   bookingConfirmationBodyTextTemplate: z.string().optional().nullable(),
   bookingReminderBodyTextTemplate: z.string().optional().nullable(),
+  bookingCancellationBodyTextTemplate: z.string().optional().nullable(),
 
   bookingConfirmationBodyHtmlTemplate: z.string().optional().nullable(),
   bookingReminderBodyHtmlTemplate: z.string().optional().nullable(),
+  bookingCancellationBodyHtmlTemplate: z.string().optional().nullable(),
 
   // Extra booking fields beyond the base ones (name, email, phone, service, datetime)
   // IMPORTANT: not nullable → matches Prisma String[].
-  bookingRequiredFields: z.array(z.string()).optional()
+  bookingRequiredFields: z.array(z.string()).optional(),
+
+  leadWhatsappMessages200: z.boolean().optional().default(false),
+  leadWhatsappMessages500: z.boolean().optional().default(false),
+  leadWhatsappMessages1000: z.boolean().optional().default(false)
 });
 
 const botUpdateSchema = botCreateSchema.partial().omit({ slug: true });
@@ -123,6 +137,24 @@ router.post("/bots", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Slug already in use" });
   }
 
+  let lead200 = data.leadWhatsappMessages200;
+  let lead500 = data.leadWhatsappMessages500;
+  let lead1000 = data.leadWhatsappMessages1000;
+
+  if (!data.channelWhatsapp) {
+    lead200 = false;
+    lead500 = false;
+    lead1000 = false;
+  }
+
+// Ensure at most one tier
+const selectedCount = [lead200, lead500, lead1000].filter(Boolean).length;
+if (selectedCount > 1) {
+  return res.status(400).json({
+    error: "Only one Lead Ads WhatsApp tier can be selected."
+  });
+}
+
   const bot = await prisma.bot.create({
     data: {
       userId: req.user!.id,
@@ -150,6 +182,8 @@ router.post("/bots", async (req: Request, res: Response) => {
 
       bookingMinLeadHours: data.bookingMinLeadHours ?? null,
       bookingMaxAdvanceDays: data.bookingMaxAdvanceDays ?? null,
+      bookingMaxSimultaneousBookings:
+        data.bookingMaxSimultaneousBookings ?? null,
       bookingReminderWindowHours: data.bookingReminderWindowHours ?? null,
       bookingReminderMinLeadHours: data.bookingReminderMinLeadHours ?? null,
 
@@ -178,7 +212,11 @@ router.post("/bots", async (req: Request, res: Response) => {
         data.bookingReminderBodyHtmlTemplate ?? null,
 
       // Stored as extra-required fields (base fields are always enforced in code)
-      bookingRequiredFields: data.bookingRequiredFields ?? []
+      bookingRequiredFields: data.bookingRequiredFields ?? [],
+
+      leadWhatsappMessages200: lead200,
+      leadWhatsappMessages500: lead500,
+      leadWhatsappMessages1000: lead1000,
     }
   });
 
@@ -199,6 +237,42 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     include: { subscription: true }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
+
+
+  let lead200 =
+  typeof data.leadWhatsappMessages200 === "boolean"
+    ? data.leadWhatsappMessages200
+    : bot.leadWhatsappMessages200;
+
+let lead500 =
+  typeof data.leadWhatsappMessages500 === "boolean"
+    ? data.leadWhatsappMessages500
+    : bot.leadWhatsappMessages500;
+
+let lead1000 =
+  typeof data.leadWhatsappMessages1000 === "boolean"
+    ? data.leadWhatsappMessages1000
+    : bot.leadWhatsappMessages1000;
+
+// If WhatsApp channel is off (next state), force tiers off
+const nextChannelWhatsapp =
+  typeof data.channelWhatsapp === "boolean"
+    ? data.channelWhatsapp
+    : bot.channelWhatsapp;
+
+if (!nextChannelWhatsapp) {
+  lead200 = false;
+  lead500 = false;
+  lead1000 = false;
+}
+
+// Ensure at most one tier
+const selectedCount = [lead200, lead500, lead1000].filter(Boolean).length;
+if (selectedCount > 1) {
+  return res.status(400).json({
+    error: "Only one Lead Ads WhatsApp tier can be selected."
+  });
+}
 
   // feature flags for pricing (unchanged)
   const nextFeatureFlags = {
@@ -227,7 +301,10 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     useCalendar:
       typeof data.useCalendar === "boolean"
         ? data.useCalendar
-        : bot.useCalendar
+        : bot.useCalendar,
+    leadWhatsappMessages200: lead200,
+    leadWhatsappMessages500: lead500,
+    leadWhatsappMessages1000: lead1000
   };
 
   const featuresChanged =
@@ -237,7 +314,10 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     nextFeatureFlags.channelWhatsapp !== bot.channelWhatsapp ||
     nextFeatureFlags.channelInstagram !== bot.channelInstagram ||
     nextFeatureFlags.channelMessenger !== bot.channelMessenger ||
-    nextFeatureFlags.useCalendar !== bot.useCalendar;
+    nextFeatureFlags.useCalendar !== bot.useCalendar ||
+    nextFeatureFlags.leadWhatsappMessages200 !== bot.leadWhatsappMessages200 ||
+    nextFeatureFlags.leadWhatsappMessages500 !== bot.leadWhatsappMessages500 ||
+    nextFeatureFlags.leadWhatsappMessages1000 !== bot.leadWhatsappMessages1000;
 
   if (bot.subscription && bot.status === "ACTIVE" && featuresChanged) {
     try {
@@ -252,6 +332,9 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
           channelMessenger: nextFeatureFlags.channelMessenger,
           channelInstagram: nextFeatureFlags.channelInstagram,
           useCalendar: nextFeatureFlags.useCalendar,
+          leadWhatsappMessages200: nextFeatureFlags.leadWhatsappMessages200,
+          leadWhatsappMessages500: nextFeatureFlags.leadWhatsappMessages500,
+          leadWhatsappMessages1000: nextFeatureFlags.leadWhatsappMessages1000,
           subscription: {
             id: bot.subscription.id,
             stripeSubscriptionId: bot.subscription.stripeSubscriptionId
@@ -274,7 +357,11 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
   // Build update data. We mostly spread `data`, which now has types that align
   // with Prisma, especially `bookingRequiredFields` (string[] | undefined).
   const updateData: any = {
-    ...data
+    ...data,
+    channelWhatsapp: nextChannelWhatsapp,
+    leadWhatsappMessages200: lead200,
+    leadWhatsappMessages500: lead500,
+    leadWhatsappMessages1000: lead1000
   };
 
   // If client explicitly *omits* bookingRequiredFields, Prisma won't touch it.

@@ -81,12 +81,12 @@ function getRequestId(req: Request) {
   return existing || crypto.randomUUID();
 }
 
-function normalizeAxiosError(err: unknown) {
+export function normalizeAxiosError(err: unknown) {
   if (!axios.isAxiosError(err)) return { status: undefined, data: err };
   return { status: err.response?.status, data: err.response?.data ?? err.message };
 }
 
-function isWhatsAppAuthError(err: unknown): boolean {
+export function isWhatsAppAuthError(err: unknown): boolean {
   const ax = axios.isAxiosError(err) ? err : undefined;
   const status = ax?.response?.status;
   const code = (ax?.response?.data as any)?.error?.code;
@@ -98,7 +98,7 @@ function extractWaMessageId(data: unknown): string | undefined {
   return d?.messages?.[0]?.id || d?.message_id || d?.id;
 }
 
-async function markWhatsAppNeedsReconnect(requestId: string, channelId: string, context: string) {
+export async function markWhatsAppNeedsReconnect(requestId: string, channelId: string, context: string) {
   try {
     const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
     const currentMeta = (channel?.meta as any) || {};

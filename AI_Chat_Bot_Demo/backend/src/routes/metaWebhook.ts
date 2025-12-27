@@ -15,6 +15,7 @@ import {
   checkConversationRateLimit,
   buildRateLimitMessage
 } from "../services/rateLimitService";
+import { handleMetaLeadgen } from "../services/metaLeadService";
 
 const router = Router();
 
@@ -455,6 +456,37 @@ router.post("/", async (req: Request, res: Response) => {
             refreshed: send.refreshedToken
           });
         }
+        // 2) NEW: leadgen changes
+  const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+  for (const change of changes) {
+    if (change?.field !== "leadgen") {
+      continue;
+    }
+
+    const value = change?.value;
+    const leadgenId: string | undefined = value?.leadgen_id;
+    const formId: string | undefined = value?.form_id;
+    const createdTime: string | undefined = value?.created_time;
+
+    if (!pageId || !leadgenId) {
+      logLine("WARN", "META", "leadgen missing ids", {
+        req: requestId,
+        page: shortId(pageId),
+        lead: shortId(leadgenId)
+      });
+      continue;
+    }
+
+    logLine("INFO", "META", "leadgen received", {
+      req: requestId,
+      page: shortId(pageId),
+      lead: shortId(leadgenId),
+      form: shortId(formId),
+      created: createdTime
+    });
+
+    await handleMetaLeadgen(requestId, pageId, leadgenId, formId);
+  }
       }
     } else if ((body as any).object === "instagram") {
       const entries = Array.isArray((body as any).entry) ? (body as any).entry : [];

@@ -15,8 +15,14 @@ type GraphPage = {
   access_token: string;
   instagram_business_account?: { id: string };
   connected_instagram_account?: { id: string };
+  source?: "me" | "business_owned" | "business_client";
+  businessName?: string | null;
 };
 
+/**
+ * Fetch pages the user can access, including business-owned/client pages.
+ * Falls back to /me/accounts only if business calls fail.
+ */
 /**
  * Fetch pages the user can access, including business-owned/client pages.
  * Falls back to /me/accounts only if business calls fail.
@@ -28,7 +34,7 @@ async function fetchUserPagesWithBusinessFallback(
   const fields =
     "id,name,access_token,instagram_business_account,connected_instagram_account";
 
-  // Always fetch direct page connections
+  // Always fetch direct page connections (personal pages)
   const accountsRes = await axios.get(
     "https://graph.facebook.com/v22.0/me/accounts",
     {
@@ -39,8 +45,15 @@ async function fetchUserPagesWithBusinessFallback(
     }
   );
 
+  const directPages =
+    ((accountsRes.data && accountsRes.data.data) as GraphPage[]) || [];
+
   pages.push(
-    ...(((accountsRes.data && accountsRes.data.data) as GraphPage[]) || [])
+    ...directPages.map((p) => ({
+      ...p,
+      source: "me" as const,
+      businessName: null
+    }))
   );
 
   // Best-effort: also fetch business-owned and client pages
@@ -85,8 +98,18 @@ async function fetchUserPagesWithBusinessFallback(
             }
           );
 
+          const edgePages =
+            ((edgeRes.data && edgeRes.data.data) as GraphPage[]) || [];
+
           pages.push(
-            ...(((edgeRes.data && edgeRes.data.data) as GraphPage[]) || [])
+            ...edgePages.map((p) => ({
+              ...p,
+              source:
+                edge === "owned_pages"
+                  ? ("business_owned" as const)
+                  : ("business_client" as const),
+              businessName: biz.name ?? null
+            }))
           );
         } catch (err) {
           console.warn(
@@ -103,16 +126,17 @@ async function fetchUserPagesWithBusinessFallback(
     );
   }
 
-  // Deduplicate by page id
+  // Deduplicate by page id (merge metadata)
   const dedup = new Map<string, GraphPage>();
   for (const p of pages) {
     if (!p || !p.id) continue;
     const existing = dedup.get(p.id);
-    dedup.set(p.id, { ...existing, ...p });
+    dedup.set(p.id, { ...(existing || {}), ...p });
   }
 
   return Array.from(dedup.values());
 }
+
 
 // Utility: ensure Meta config exists
 function assertMetaConfigured() {
@@ -362,7 +386,11 @@ router.get(
         instagramBusinessId:
           p.instagram_business_account?.id ||
           p.connected_instagram_account?.id ||
-          null
+          null,
+        isBusinessManaged:
+          p.source === "business_owned" || p.source === "business_client",
+        businessName:
+          typeof p.businessName === "string" ? p.businessName : null
       }));
 
       return res.json({
@@ -563,7 +591,7 @@ router.post(
             {
               params: {
                 subscribed_fields:
-                  "messages,messaging_postbacks,message_reactions",
+                  "messages,messaging_postbacks,message_reactions, leadgen",
                 access_token: pageAccessToken
               },
               timeout: 10000

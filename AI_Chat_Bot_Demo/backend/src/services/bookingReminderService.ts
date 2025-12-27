@@ -8,7 +8,7 @@ const JOB_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
 let isRunning = false;
 
 export function scheduleBookingReminderJob(): void {
-  console.log("[BookingReminder] Scheduling booking reminder job...");
+  console.log("[BookingReminder] Scheduling booking reminder job.");
 
   // Run once on startup
   runJobSafely();
@@ -53,6 +53,7 @@ async function runBookingReminderJob(): Promise<void> {
   // Include the related Bot so we can access booking + email config.
   const bookings = await prisma.booking.findMany({
     where: {
+      status: "ACTIVE", // NEW: only active bookings get reminders
       start: {
         gte: nowUtc.toJSDate(),
         lt: in48HoursUtc.toJSDate()
@@ -89,6 +90,11 @@ async function runBookingReminderJob(): Promise<void> {
 }
 
 async function maybeSendReminderForBooking(booking: any): Promise<void> {
+  // Extra guard: skip cancelled rows even if they slipped past for some reason
+  if (booking.status && booking.status !== "ACTIVE") {
+    return;
+  }
+
   if (!booking.email) {
     console.warn("[BookingReminder] Booking missing email, skipping.", {
       bookingId: booking.id
@@ -187,9 +193,11 @@ async function maybeSendReminderForBooking(booking: any): Promise<void> {
 
   const defaultHtml =
     `<p>Hi {{name}},</p>` +
-    `<p>This is a reminder from <strong>{{brandName}}</strong> for your ` +
-    `<strong>{{service}}</strong> booking on <strong>{{date}}</strong> at ` +
-    `<strong>{{time}}</strong> ({{timezone}}).</p>` +
+    `<p>This is a reminder from <strong>{{brandName}}</strong> for your <strong>{{service}}</strong> booking.</p>` +
+    `<p>` +
+    `<strong>Date:</strong> {{date}}<br>` +
+    `<strong>Time:</strong> {{time}} ({{timezone}})` +
+    `</p>` +
     `<p>If you need to reschedule, please contact us.</p>` +
     `<p>See you soon!</p>`;
 
@@ -224,14 +232,6 @@ async function maybeSendReminderForBooking(booking: any): Promise<void> {
   const text = renderTemplate(textTemplate, contextText);
   const html = renderTemplate(htmlTemplate, contextHtml);
 
-  console.log("[BookingReminder] Sending reminder email", {
-    bookingId: booking.id,
-    to: booking.email,
-    brandName,
-    reminderWindowHours,
-    minLeadHours
-  });
-
   const sendResult = await sendBotMail({
     botId: booking.botId,
     kind: "booking_reminder",
@@ -247,8 +247,7 @@ async function maybeSendReminderForBooking(booking: any): Promise<void> {
       reason: sendResult.reason
     });
     // We intentionally DO NOT mark reminderEmailSentAt on failure,
-    // so we may retry in a future cycle. This is a tradeoff between
-    // reliability and noise/log volume.
+    // so we may retry in a future cycle.
     return;
   }
 

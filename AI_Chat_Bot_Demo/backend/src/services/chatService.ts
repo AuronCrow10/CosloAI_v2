@@ -10,7 +10,12 @@ import {
 } from "../openai/client";
 import {
   handleBookAppointment,
-  BookAppointmentArgs
+  handleUpdateAppointment,
+  handleCancelAppointment,
+  BookAppointmentArgs,
+  UpdateAppointmentArgs,
+  CancelAppointmentArgs,
+  BookingResult
 } from "./bookingService";
 import { getConversationHistoryAsChatMessages } from "./conversationService";
 import {
@@ -141,6 +146,73 @@ function buildBookingTool(bookingCfg: BotBookingConfig): ChatTool {
   };
 }
 
+function buildUpdateBookingTool(bookingCfg: BotBookingConfig): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "update_appointment",
+      description:
+        "Reschedule an existing appointment to a new date/time and/or service.",
+      parameters: {
+        type: "object",
+        properties: {
+          email: {
+            type: "string",
+            description:
+              "User's email used for the original booking. Used to find the booking."
+          },
+          originalDatetime: {
+            type: "string",
+            description:
+              "Date/time of the existing booking in ISO 8601 (e.g. 2025-11-23T15:00:00). Treated as local time in the business time zone."
+          },
+          newDatetime: {
+            type: "string",
+            description:
+              "Requested new appointment date/time in ISO 8601, local to the business time zone."
+          },
+          service: {
+            type: "string",
+            description:
+              "New service name if the user wants to change the service."
+          }
+        },
+        required: ["email", "originalDatetime", "newDatetime"]
+      }
+    }
+  };
+}
+
+function buildCancelBookingTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "cancel_appointment",
+      description: "Cancel an existing appointment for the user.",
+      parameters: {
+        type: "object",
+        properties: {
+          email: {
+            type: "string",
+            description:
+              "User's email used for the original booking. Used to find the booking."
+          },
+          originalDatetime: {
+            type: "string",
+            description:
+              "Date/time of the existing booking in ISO 8601 (e.g. 2025-11-23T15:00:00). Treated as local time in the business time zone."
+          },
+          reason: {
+            type: "string",
+            description: "Optional cancellation reason provided by the user."
+          }
+        },
+        required: ["email", "originalDatetime"]
+      }
+    }
+  };
+}
+
 // Generic booking instructions injected as extra system message
 function getBookingInstructions(bookingCfg: BotBookingConfig): string {
   const requiredList = bookingCfg.requiredFields.join(", ");
@@ -149,45 +221,44 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
       ? bookingCfg.customFields.join(", ")
       : "none";
 
-  const timingParts: string[] = [];
-  if (typeof bookingCfg.minLeadHours === "number" && bookingCfg.minLeadHours > 0) {
-    timingParts.push(
-      `- The appointment must be at least ${bookingCfg.minLeadHours} hour(s) in the future.`
-    );
-  }
-  if (typeof bookingCfg.maxAdvanceDays === "number" && bookingCfg.maxAdvanceDays > 0) {
-    timingParts.push(
-      `- Do not offer or accept dates more than ${bookingCfg.maxAdvanceDays} day(s) from now.`
-    );
-  }
-
-  const timingText =
-    timingParts.length > 0
-      ? "\nBooking time constraints:\n" + timingParts.join("\n")
-      : "";
+  const nowIso = new Date().toISOString();
 
   return (
-    "You can create appointments by calling the tool `book_appointment`.\n" +
-    `The backend requires the following booking fields in the tool call: ${requiredList}.\n` +
-    `Custom extra fields configured for this bot: ${customList}.\n` +
-    "Use conversation to collect all required fields clearly before calling the tool.\n" +
-    "If information is missing or ambiguous (especially date/time), ask the user follow-up questions.\n" +
-    "Treat the `datetime` as local time in the business's time zone.\n" +
-    "If the requested time is in the past or clearly unreasonable, ask the user to choose another time.\n" +
-    "If you ask follow-up questions, do NOT call the tool yet; only call the tool when the user provides all required information in a single clear message.\n" +
-    timingText +
-    "\n\n" +
-    "After the tool is called and the booking result is returned, you will receive JSON including:\n" +
-    "- `success` (boolean)\n" +
-    "- `start`, `end` (strings)\n" +
-    "- `addToCalendarUrl` (string, a Google Calendar link)\n" +
-    "- `confirmationEmailSent` (boolean | undefined)\n" +
-    "- `confirmationEmailError` (string | undefined)\n" +
-    "\n" +
-    "When composing your reply:\n" +
-    "- If `success` is false, apologize, show the error message to the user in natural language, and help them choose another time.\n" +
-    "- If `success` is true and `confirmationEmailSent` is true, say that the booking is confirmed and that a confirmation email has been sent. You do NOT need to paste the Google Calendar link, unless helpful.\n" +
-    "- If `success` is true but `confirmationEmailSent` is false or missing, assume the email was NOT sent and instead provide a full booking confirmation in chat, including the date and time. Also share the `addToCalendarUrl` so the user can add it to their calendar themselves.\n"
+    `Current server date/time (ISO 8601) is: ${nowIso}.\n` +
+    "When you reason about words like 'now', 'today', or 'in X days', you MUST treat this timestamp as the only source of truth.\n\n" +
+
+    // 🔴 KEY RULES ABOUT DATES / VALIDATION
+    "IMPORTANT RULES FOR BOOKINGS:\n" +
+    "- Do NOT decide on your own that a requested date/time is in the past or invalid.\n" +
+    "- Do NOT enforce minimum lead time or maximum advance days yourself.\n" +
+    "- Do NOT tell the user their requested time is not allowed unless the booking tool response says so.\n" +
+    "- Whenever the user has provided all required booking fields, you MUST call the booking tool with those exact values (especially the datetime) and let the backend validate.\n" +
+    "- Only after you receive the tool result may you explain whether the booking was accepted or rejected.\n\n" +
+
+    "Required fields for the booking tool: " +
+    requiredList +
+    ".\n" +
+    "Custom extra fields configured for this bot: " +
+    customList +
+    ".\n" +
+    "Use conversation to collect any missing required fields. If information is missing or ambiguous (especially date/time), ask follow-up questions instead of calling the tool.\n\n" +
+
+    "When the user suggests a specific date and time:\n" +
+    "- Assume it is acceptable and call the booking tool once you know all other required fields.\n" +
+    "- Do NOT say things like 'that date is in the past' or 'I can only offer from X onward' unless that comes from the backend error message.\n\n" +
+
+    "ABOUT TOOL RESPONSES:\n" +
+    "After you call the booking tool, you will receive JSON with:\n" +
+    "- success (boolean)\n" +
+    "- action (created | updated | cancelled)\n" +
+    "- start, end (strings)\n" +
+    "- addToCalendarUrl (string)\n" +
+    "- confirmationEmailSent (boolean | undefined)\n" +
+    "- confirmationEmailError (string | undefined)\n\n" +
+    "When replying to the user:\n" +
+    "- If success is false, apologize briefly, explain the error in natural language, and help them pick another time.\n" +
+    "- If success is true and confirmationEmailSent is true, say the booking is confirmed/updated and that a confirmation email was sent (you don't need to paste the calendar link unless useful).\n" +
+    "- If success is true but confirmationEmailSent is false or missing, assume the email was not sent; give a clear confirmation message in chat and share the addToCalendarUrl so they can add it themselves.\n"
   );
 }
 
@@ -385,12 +456,24 @@ export async function generateBotReplyForSlug(
 
   messages.push(contextSystemMessage);
 
+  const tools: ChatTool[] = [];
   let bookingTool: ChatTool | null = null;
+
   if (bookingEnabled && botBookingCfg) {
     bookingTool = buildBookingTool(botBookingCfg);
+    tools.push(bookingTool);
+    tools.push(buildUpdateBookingTool(botBookingCfg));
+    tools.push(buildCancelBookingTool());
+
     messages.push({
       role: "system",
-      content: getBookingInstructions(botBookingCfg)
+      content:
+        getBookingInstructions(botBookingCfg) +
+        "\n\n" +
+        "You can also reschedule or cancel existing bookings using the tools " +
+        "`update_appointment` and `cancel_appointment`. " +
+        "Ask the user for their email and the original booking date/time to identify the correct booking. " +
+        "Only call these tools when the user has clearly requested a change or cancellation and has provided enough information."
     });
   }
 
@@ -427,7 +510,7 @@ export async function generateBotReplyForSlug(
     model: "gpt-4o-mini",
     messages,
     maxTokens: 200,
-    tools: [bookingTool],
+    tools,
     toolChoice: "auto",
     usageContext: {
       ...usageBase,
@@ -448,32 +531,64 @@ export async function generateBotReplyForSlug(
     return content;
   }
 
-  // Find the book_appointment tool call
-  const bookingCall = toolCalls.find(
-    (tc) => tc.function?.name === "book_appointment"
-  );
+  // Find a booking-related tool call
+  const bookingCall = toolCalls.find((tc) => {
+    const name = tc.function?.name;
+    return (
+      name === "book_appointment" ||
+      name === "update_appointment" ||
+      name === "cancel_appointment"
+    );
+  });
+
   if (!bookingCall) {
     const content =
       firstMessage.content || "Sorry, I couldn't process your booking request.";
     return content;
   }
 
-  // Parse tool arguments
-  let args: BookAppointmentArgs;
+  const functionName = bookingCall.function?.name || "unknown";
+
+  // Parse tool arguments and execute
+  let bookingResult: BookingResult;
   try {
     const rawArgs = bookingCall.function.arguments || "{}";
-    args = JSON.parse(rawArgs);
+    const parsed = JSON.parse(rawArgs);
 
-    console.log("🔧 [Booking Tool] book_appointment called", {
+    console.log("🔧 [Booking Tool] call", {
       slug,
-      args
+      tool: functionName,
+      args: parsed
     });
+
+    if (functionName === "book_appointment") {
+      bookingResult = await handleBookAppointment(
+        slug,
+        parsed as BookAppointmentArgs
+      );
+    } else if (functionName === "update_appointment") {
+      bookingResult = await handleUpdateAppointment(
+        slug,
+        parsed as UpdateAppointmentArgs
+      );
+    } else if (functionName === "cancel_appointment") {
+      bookingResult = await handleCancelAppointment(
+        slug,
+        parsed as CancelAppointmentArgs
+      );
+    } else {
+      bookingResult = {
+        success: false,
+        errorMessage:
+          "Unknown booking operation. Please try again or contact support."
+      };
+    }
   } catch (err) {
-    console.error("Failed to parse book_appointment arguments:", err);
-    const bookingResult = {
+    console.error("Failed to parse booking tool arguments:", err);
+    const fallbackResult: BookingResult = {
       success: false,
       errorMessage:
-        "Invalid booking data. Please provide your name, email, phone, service and desired date/time clearly."
+        "Invalid booking data. Please provide your name, email, phone, service and desired date/time (or the booking you want to change) clearly."
     };
 
     const toolMessages: ChatMessage[] = [
@@ -482,7 +597,7 @@ export async function generateBotReplyForSlug(
       {
         role: "tool",
         tool_call_id: bookingCall.id,
-        content: JSON.stringify(bookingResult)
+        content: JSON.stringify(fallbackResult)
       }
     ];
 
@@ -502,9 +617,6 @@ export async function generateBotReplyForSlug(
       "Sorry, I couldn't process your booking."
     );
   }
-
-  // Actually perform booking
-  const bookingResult = await handleBookAppointment(slug, args);
 
   // 8) Second call: feed tool result back to model, no tools this time
   const toolMessages: ChatMessage[] = [
@@ -531,7 +643,11 @@ export async function generateBotReplyForSlug(
   const finalContent =
     secondChoice.message.content ||
     (bookingResult.success
-      ? "Your booking has been processed."
+      ? bookingResult.action === "updated"
+        ? "Your booking has been updated."
+        : bookingResult.action === "cancelled"
+        ? "Your booking has been cancelled."
+        : "Your booking has been processed."
       : bookingResult.errorMessage ||
         "Sorry, I couldn't process your booking.");
 

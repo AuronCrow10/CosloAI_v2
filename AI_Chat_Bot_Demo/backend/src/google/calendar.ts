@@ -1,3 +1,5 @@
+// google/calendar.ts
+
 import { google } from "googleapis";
 import { config } from "../config";
 
@@ -9,7 +11,9 @@ function getCalendarClient() {
   if (calendarClient) return calendarClient;
 
   if (!config.googleClientEmail || !config.googlePrivateKey) {
-    throw new Error("Google Calendar is not configured (missing service account envs)");
+    throw new Error(
+      "Google Calendar is not configured (missing service account envs)"
+    );
   }
 
   const privateKey = config.googlePrivateKey.replace(/\\n/g, "\n");
@@ -29,11 +33,13 @@ export interface CreateBookingParams {
   summary: string;
   description?: string;
   start: string; // ISO
-  end: string;   // ISO
+  end: string; // ISO
   timeZone: string;
 }
 
-export async function createCalendarEvent(params: CreateBookingParams): Promise<{
+export async function createCalendarEvent(
+  params: CreateBookingParams
+): Promise<{
   id: string;
   htmlLink?: string;
   start: string;
@@ -70,7 +76,7 @@ export async function createCalendarEvent(params: CreateBookingParams): Promise<
   };
 }
 
-// Optional simple conflict checker (v1 can skip if you want)
+// Optional simple conflict checker
 export async function checkConflicts(params: {
   calendarId: string;
   timeMin: string;
@@ -88,4 +94,67 @@ export async function checkConflicts(params: {
 
   const events = res.data.items || [];
   return events.length > 0;
+}
+
+export interface UpdateCalendarEventParams {
+  calendarId: string;
+  eventId: string;
+  summary?: string;
+  description?: string;
+  start?: string; // ISO
+  end?: string; // ISO
+  timeZone?: string;
+}
+
+/**
+ * Update an existing Google Calendar event.
+ */
+export async function updateCalendarEvent(
+  params: UpdateCalendarEventParams
+): Promise<{ id: string; start: string; end: string }> {
+  const calendar = getCalendarClient();
+
+  const response = await calendar.events.patch({
+    calendarId: params.calendarId,
+    eventId: params.eventId,
+    requestBody: {
+      summary: params.summary,
+      description: params.description,
+      start:
+        params.start && params.timeZone
+          ? { dateTime: params.start, timeZone: params.timeZone }
+          : undefined,
+      end:
+        params.end && params.timeZone
+          ? { dateTime: params.end, timeZone: params.timeZone }
+          : undefined
+    }
+  });
+
+  const event = response.data;
+  if (!event || !event.id || !event.start || !event.end) {
+    throw new Error(
+      "Invalid response from Google Calendar when updating event"
+    );
+  }
+
+  return {
+    id: event.id,
+    start: (event.start.dateTime || event.start.date)!,
+    end: (event.end.dateTime || event.end.date)!
+  };
+}
+
+/**
+ * Delete a Google Calendar event.
+ */
+export async function deleteCalendarEvent(params: {
+  calendarId: string;
+  eventId: string;
+}): Promise<void> {
+  const calendar = getCalendarClient();
+  await calendar.events.delete({
+    calendarId: params.calendarId,
+    eventId: params.eventId
+  });
 }

@@ -16,7 +16,10 @@ export type FeatureCode =
   | "WHATSAPP"
   | "MESSENGER"
   | "INSTAGRAM"
-  | "CALENDAR";
+  | "CALENDAR"
+  | "LEAD_WHATSAPP_200"
+  | "LEAD_WHATSAPP_500"
+  | "LEAD_WHATSAPP_1000";
 
 type BotFeatureFlags = {
   useDomainCrawler: boolean;
@@ -26,6 +29,9 @@ type BotFeatureFlags = {
   channelMessenger: boolean;
   channelInstagram: boolean;
   useCalendar: boolean;
+  leadWhatsappMessages200: boolean;
+  leadWhatsappMessages500: boolean;
+  leadWhatsappMessages1000: boolean;
 };
 
 const FEATURE_CODE_BY_BOT_FIELD: Record<keyof BotFeatureFlags, FeatureCode> = {
@@ -35,7 +41,10 @@ const FEATURE_CODE_BY_BOT_FIELD: Record<keyof BotFeatureFlags, FeatureCode> = {
   channelWhatsapp: "WHATSAPP",
   channelMessenger: "MESSENGER",
   channelInstagram: "INSTAGRAM",
-  useCalendar: "CALENDAR"
+  useCalendar: "CALENDAR",
+  leadWhatsappMessages200: "LEAD_WHATSAPP_200",
+  leadWhatsappMessages500: "LEAD_WHATSAPP_500",
+  leadWhatsappMessages1000: "LEAD_WHATSAPP_1000"
 };
 
 export interface PricingFeatureLineItem {
@@ -166,6 +175,9 @@ export function computeBotPrice(bot: {
   channelMessenger: boolean;
   channelInstagram: boolean;
   useCalendar: boolean;
+  leadWhatsappMessages200?: boolean | null;
+  leadWhatsappMessages500?: boolean | null;
+  leadWhatsappMessages1000?: boolean | null;
 }) {
   // Simple model: one flat plan
   if (!config.stripePriceIdBasic) {
@@ -205,6 +217,9 @@ type BotWithSubscription = {
   channelMessenger: boolean;
   channelInstagram: boolean;
   useCalendar: boolean;
+  leadWhatsappMessages200?: boolean | null;
+  leadWhatsappMessages500?: boolean | null;
+  leadWhatsappMessages1000?: boolean | null;
   subscription: {
     id: string;
     stripeSubscriptionId: string;
@@ -229,15 +244,20 @@ export async function updateBotSubscriptionForFeatureChange(
   if (!bot.subscription) return; // no subscription to update
 
   // Compute desired feature prices
-  const pricing = await computeBotPricingForBot({
+const pricing = await computeBotPricingForBot(
+  botToFeatureFlags({
     useDomainCrawler: bot.useDomainCrawler,
     usePdfCrawler: bot.usePdfCrawler,
     channelWeb: bot.channelWeb,
     channelWhatsapp: bot.channelWhatsapp,
     channelMessenger: bot.channelMessenger,
     channelInstagram: bot.channelInstagram,
-    useCalendar: bot.useCalendar
-  });
+    useCalendar: bot.useCalendar,
+    leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+    leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+    leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+  })
+);
 
   const stripeSubId = bot.subscription.stripeSubscriptionId;
 
@@ -383,15 +403,20 @@ export async function updateBotSubscriptionForUsagePlanChange({
   }
 
   // Compute current features pricing to keep snapshot consistent
-  const featurePricing = await computeBotPricingForBot({
+const featurePricing = await computeBotPricingForBot(
+  botToFeatureFlags({
     useDomainCrawler: bot.useDomainCrawler,
     usePdfCrawler: bot.usePdfCrawler,
     channelWeb: bot.channelWeb,
     channelWhatsapp: bot.channelWhatsapp,
     channelMessenger: bot.channelMessenger,
     channelInstagram: bot.channelInstagram,
-    useCalendar: bot.useCalendar
-  });
+    useCalendar: bot.useCalendar,
+    leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+    leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+    leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+  })
+);
 
   // Currency consistency between features and plan
   if (featurePricing.currency !== newPlan.currency) {
@@ -473,4 +498,32 @@ export async function updateBotSubscriptionForUsagePlanChange({
       planSnapshotJson: compactPlanSnapshot
     }
   });
+}
+
+
+
+export function botToFeatureFlags(bot: {
+  useDomainCrawler: boolean;
+  usePdfCrawler: boolean;
+  channelWeb: boolean;
+  channelWhatsapp: boolean;
+  channelMessenger: boolean;
+  channelInstagram: boolean;
+  useCalendar: boolean;
+  leadWhatsappMessages200?: boolean | null;
+  leadWhatsappMessages500?: boolean | null;
+  leadWhatsappMessages1000?: boolean | null;
+}): BotFeatureFlags {
+  return {
+    useDomainCrawler: bot.useDomainCrawler,
+    usePdfCrawler: bot.usePdfCrawler,
+    channelWeb: bot.channelWeb,
+    channelWhatsapp: bot.channelWhatsapp,
+    channelMessenger: bot.channelMessenger,
+    channelInstagram: bot.channelInstagram,
+    useCalendar: bot.useCalendar,
+    leadWhatsappMessages200: !!bot.leadWhatsappMessages200,
+    leadWhatsappMessages500: !!bot.leadWhatsappMessages500,
+    leadWhatsappMessages1000: !!bot.leadWhatsappMessages1000
+  };
 }

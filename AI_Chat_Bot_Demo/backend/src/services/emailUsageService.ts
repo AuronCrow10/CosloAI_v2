@@ -5,6 +5,7 @@ import { prisma } from "../prisma/prisma";
 export type EmailUsageKind =
   | "booking_confirmation"
   | "booking_reminder"
+  | "booking_cancellation"
   | string;
 
 export async function recordEmailUsage(params: {

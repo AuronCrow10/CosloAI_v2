@@ -4,7 +4,8 @@ import { prisma } from "../prisma/prisma";
 import {
   stripe,
   computeBotPricingForBot,
-  updateBotSubscriptionForUsagePlanChange
+  updateBotSubscriptionForUsagePlanChange,
+  botToFeatureFlags
 } from "../services/billingService";
 import { getUsageForBot } from "../services/usageAggregationService";
 import { getEmailUsageForBot } from "../services/emailUsageService";
@@ -135,15 +136,20 @@ router.get("/billing/overview", async (req, res) => {
         "eur";
 
       if (featuresAmountCents == null) {
-        const pricing = await computeBotPricingForBot({
-          useDomainCrawler: bot.useDomainCrawler,
-          usePdfCrawler: bot.usePdfCrawler,
-          channelWeb: bot.channelWeb,
-          channelWhatsapp: bot.channelWhatsapp,
-          channelMessenger: bot.channelMessenger,
-          channelInstagram: bot.channelInstagram,
-          useCalendar: bot.useCalendar
-        });
+        const pricing = await computeBotPricingForBot(
+          botToFeatureFlags({
+            useDomainCrawler: bot.useDomainCrawler,
+            usePdfCrawler: bot.usePdfCrawler,
+            channelWeb: bot.channelWeb,
+            channelWhatsapp: bot.channelWhatsapp,
+            channelMessenger: bot.channelMessenger,
+            channelInstagram: bot.channelInstagram,
+            useCalendar: bot.useCalendar,
+            leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+            leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+            leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+  })
+);
         featuresAmountCents = pricing.totalAmountCents;
         currency = pricing.currency;
       }
@@ -307,6 +313,9 @@ router.post("/bots/:id/pricing-preview", requireAuth, async (req, res) => {
       channelMessenger: boolean;
       channelInstagram: boolean;
       useCalendar: boolean;
+      leadWhatsappMessages200: boolean;
+      leadWhatsappMessages500: boolean;
+      leadWhatsappMessages1000: boolean;
     }>;
 
     const flags = {
@@ -333,10 +342,22 @@ router.post("/bots/:id/pricing-preview", requireAuth, async (req, res) => {
           ? body.channelInstagram
           : bot.channelInstagram,
       useCalendar:
-        typeof body.useCalendar === "boolean" ? body.useCalendar : bot.useCalendar
+        typeof body.useCalendar === "boolean" ? body.useCalendar : bot.useCalendar,
+        leadWhatsappMessages200:
+    typeof body.leadWhatsappMessages200 === "boolean"
+      ? body.leadWhatsappMessages200
+      : (bot as any).leadWhatsappMessages200,
+    leadWhatsappMessages500:
+    typeof body.leadWhatsappMessages500 === "boolean"
+      ? body.leadWhatsappMessages500
+      : (bot as any).leadWhatsappMessages500,
+    leadWhatsappMessages1000:
+    typeof body.leadWhatsappMessages1000 === "boolean"
+      ? body.leadWhatsappMessages1000
+      : (bot as any).leadWhatsappMessages1000
     };
 
-    const pricing = await computeBotPricingForBot(flags);
+    const pricing = await computeBotPricingForBot(botToFeatureFlags(flags));
 
     return res.json({
       lineItems: pricing.lineItemsForUi,
@@ -417,15 +438,20 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
       });
     }
 
-    const featurePricing = await computeBotPricingForBot({
-      useDomainCrawler: bot.useDomainCrawler,
-      usePdfCrawler: bot.usePdfCrawler,
-      channelWeb: bot.channelWeb,
-      channelWhatsapp: bot.channelWhatsapp,
-      channelMessenger: bot.channelMessenger,
-      channelInstagram: bot.channelInstagram,
-      useCalendar: bot.useCalendar
-    });
+    const featurePricing = await computeBotPricingForBot(
+  botToFeatureFlags({
+    useDomainCrawler: bot.useDomainCrawler,
+    usePdfCrawler: bot.usePdfCrawler,
+    channelWeb: bot.channelWeb,
+    channelWhatsapp: bot.channelWhatsapp,
+    channelMessenger: bot.channelMessenger,
+    channelInstagram: bot.channelInstagram,
+    useCalendar: bot.useCalendar,
+    leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+    leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+    leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+  })
+);
 
     if (featurePricing.currency !== usagePlan.currency) {
       return res.status(500).json({

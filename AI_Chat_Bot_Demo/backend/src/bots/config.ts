@@ -17,6 +17,7 @@ export type BookingConfig =
       // Advanced booking rules (optional, normalized downstream)
       minLeadHours?: number | null;
       maxAdvanceDays?: number | null;
+      maxSimultaneousBookings?: number | null;
 
       // Reminder timing (optional, normalized downstream)
       reminderWindowHours?: number | null;
@@ -29,10 +30,13 @@ export type BookingConfig =
       // Email templates (optional)
       bookingConfirmationSubjectTemplate?: string | null;
       bookingReminderSubjectTemplate?: string | null;
+      bookingCancellationSubjectTemplate?: string | null;
       bookingConfirmationBodyTextTemplate?: string | null;
       bookingReminderBodyTextTemplate?: string | null;
+      bookingCancellationBodyTextTemplate?: string | null;
       bookingConfirmationBodyHtmlTemplate?: string | null;
       bookingReminderBodyHtmlTemplate?: string | null;
+      bookingCancellationBodyHtmlTemplate?: string | null;
 
       // Booking fields for this bot
       requiredFields?: string[];
@@ -208,6 +212,8 @@ function buildBookingFromDb(dbBot: DbBot): BookingConfig | undefined {
     // Advanced rules (may be null in DB, normalized downstream)
     minLeadHours: (dbBot as any).bookingMinLeadHours ?? null,
     maxAdvanceDays: (dbBot as any).bookingMaxAdvanceDays ?? null,
+    maxSimultaneousBookings:
+      (dbBot as any).bookingMaxSimultaneousBookings ?? null,
     reminderWindowHours: (dbBot as any).bookingReminderWindowHours ?? null,
     reminderMinLeadHours:
       (dbBot as any).bookingReminderMinLeadHours ?? null,
@@ -222,16 +228,22 @@ function buildBookingFromDb(dbBot: DbBot): BookingConfig | undefined {
       (dbBot as any).bookingConfirmationSubjectTemplate ?? null,
     bookingReminderSubjectTemplate:
       (dbBot as any).bookingReminderSubjectTemplate ?? null,
+    bookingCancellationSubjectTemplate: // NEW
+      (dbBot as any).bookingCancellationSubjectTemplate ?? null,
 
     bookingConfirmationBodyTextTemplate:
       (dbBot as any).bookingConfirmationBodyTextTemplate ?? null,
     bookingReminderBodyTextTemplate:
       (dbBot as any).bookingReminderBodyTextTemplate ?? null,
+    bookingCancellationBodyTextTemplate: // NEW
+      (dbBot as any).bookingCancellationBodyTextTemplate ?? null,
 
     bookingConfirmationBodyHtmlTemplate:
       (dbBot as any).bookingConfirmationBodyHtmlTemplate ?? null,
     bookingReminderBodyHtmlTemplate:
       (dbBot as any).bookingReminderBodyHtmlTemplate ?? null,
+    bookingCancellationBodyHtmlTemplate: // NEW
+      (dbBot as any).bookingCancellationBodyHtmlTemplate ?? null,
 
     requiredFields: required,
     customFields: custom

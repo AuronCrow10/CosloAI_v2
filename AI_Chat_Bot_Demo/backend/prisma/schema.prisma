@@ -130,6 +130,8 @@ model Bot {
   // Null = no upper limit.
   bookingMaxAdvanceDays Int?
 
+  bookingMaxSimultaneousBookings Int?
+
   // Reminder window before the start time (in hours).
   // Within this window, reminders are eligible to be sent.
   bookingReminderWindowHours  Int?
@@ -143,10 +145,15 @@ model Bot {
   // Email templates (optional – fall back to sensible defaults if null)
   bookingConfirmationSubjectTemplate  String?
   bookingReminderSubjectTemplate      String?
+  bookingCancellationSubjectTemplate    String?
+
   bookingConfirmationBodyTextTemplate String?
   bookingReminderBodyTextTemplate     String?
+  bookingCancellationBodyTextTemplate   String?
+
   bookingConfirmationBodyHtmlTemplate String?
   bookingReminderBodyHtmlTemplate     String?
+  bookingCancellationBodyHtmlTemplate   String?
 
   // Which fields the bot should collect for bookings.
   // NOTE: the backend always requires at least: name, email, service, datetime.
@@ -155,11 +162,19 @@ model Bot {
   // NEW: Email usage records (for per-plan email limits)
   emailUsages EmailUsage[]
 
+
+  leadWhatsappMessages200  Boolean @default(false)
+  leadWhatsappMessages500  Boolean @default(false)
+  leadWhatsappMessages1000 Boolean @default(false)
+
     // Knowledge crawl tracking (latest job)
   knowledgeLastCrawlJobId     String?
   knowledgeLastCrawlDomain    String?
   knowledgeLastCrawlStartedAt DateTime?
   knowledgeLastCrawlFinishedAt DateTime?
+
+  metaLeadAutomations MetaLeadAutomation[]
+  metaLeads           MetaLead[]
 
 }
 
@@ -463,6 +478,12 @@ enum ReferralPayoutStatus {
   PAID
 }
 
+
+enum BookingStatus {
+  ACTIVE
+  CANCELLED
+}
+
 model ReferralPartner {
   id     String @id @default(uuid())
   userId String @unique
@@ -631,6 +652,8 @@ model Booking {
   calendarId      String
   calendarEventId String?
 
+  status BookingStatus @default(ACTIVE) // <-- add this line
+
   // null until we successfully send a reminder email
   reminderEmailSentAt DateTime?
 
@@ -649,6 +672,56 @@ model EmailUsage {
   kind      String // e.g. "booking_confirmation", "booking_reminder"
   to        String
   createdAt DateTime @default(now())
+
+  @@index([botId, createdAt])
+}
+
+
+model MetaLeadAutomation {
+  id                       String   @id @default(uuid())
+  botId                    String
+  bot                      Bot      @relation(fields: [botId], references: [id])
+
+  pageId                   String            // FB page id
+  formId                   String            // Lead form id
+  enabled                  Boolean  @default(true)
+
+  // How to read the lead:
+  phoneFieldName           String   @default("phone_number") // name in field_data
+  consentFieldName         String?                           // e.g. "whatsapp_opt_in"
+  requiresWhatsappOptIn    Boolean  @default(true)
+
+  // What to send:
+  whatsappTemplateName     String            // must exist in WABA
+  whatsappTemplateLanguage String            // e.g. "en_US"
+
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@unique([botId, pageId, formId], name: "bot_page_form")
+}
+
+model MetaLead {
+  id            String   @id @default(uuid())
+  botId         String
+  bot           Bot      @relation(fields: [botId], references: [id])
+
+  pageId        String
+  leadgenId     String   @unique
+  formId        String?
+  adId          String?
+  campaignId    String?
+
+  phone         String?
+  whatsappOptIn Boolean  @default(false)
+
+  rawPayload    Json
+
+  whatsappStatus String   @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
+  whatsappError  String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@index([botId, createdAt])
 }
