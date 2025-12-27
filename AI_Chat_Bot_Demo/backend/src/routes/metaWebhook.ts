@@ -596,6 +596,19 @@ router.post("/", async (req: Request, res: Response) => {
 
           if (!igBusinessId || !userId) continue;
 
+          if (userId === igBusinessId) {
+          // These are echoes of messages we (the page/bot) sent; we already log
+          // assistant messages ourselves and don't want a separate "self" convo.
+            logLine("DEBUG", "META", "ignored (IG business message)", {
+              req: requestId,
+              plat: "IG",
+              ig: shortId(igBusinessId),
+              user: shortId(userId),
+              mid: shortId(mid)
+            });
+            continue;
+          }
+
           if (!message || !text) {
             logLine("DEBUG", "META", "ignored (non-text)", {
               req: requestId,
