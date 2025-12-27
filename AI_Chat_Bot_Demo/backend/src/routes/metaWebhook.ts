@@ -75,7 +75,12 @@ function fmtCtx(ctx: Record<string, unknown>) {
   return entries.map(([k, v]) => `${k}=${formatVal(v)}`).join(" ");
 }
 
-function logLine(level: Level, src: "META" | "WA", msg: string, ctx: Record<string, unknown> = {}) {
+function logLine(
+  level: Level,
+  src: "META" | "WA",
+  msg: string,
+  ctx: Record<string, unknown> = {}
+) {
   if (LEVEL_WEIGHT[level] < LEVEL_WEIGHT[LOG_LEVEL]) return;
 
   const line =
@@ -96,17 +101,15 @@ function getRequestId(req: Request) {
 
 function normalizeAxiosError(err: unknown) {
   if (!axios.isAxiosError(err)) return { status: undefined, data: err };
-  return { status: err.response?.status, data: err.response?.data ?? err.message };
+  return {
+    status: err.response?.status,
+    data: err.response?.data ?? err.message
+  };
 }
 
 function extractMetaMessageId(data: unknown): string | undefined {
   const d: any = data;
-  return (
-    d?.message_id ||
-    d?.messageId ||
-    d?.messages?.[0]?.id ||
-    d?.id
-  );
+  return d?.message_id || d?.messageId || d?.messages?.[0]?.id || d?.id;
 }
 
 type SendReplyResult =
@@ -129,18 +132,29 @@ type SendReplyResult =
         | "TOKEN_REFRESH_FAILED";
     };
 
+/**
+ * Shared FB/IG send wrapper using channel's access token + refresh logic.
+ */
 export async function sendGraphText(
   requestId: string,
   platform: "FB" | "IG",
   channelId: string,
-  graphTargetId: string, // pageId or igBusinessId
+  graphTargetId: string, // pageId or igBusinessId (or pageId for IG via FB Login)
   userId: string,
   reply: string
 ): Promise<SendReplyResult> {
   const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
   if (!channel) {
-    logLine("ERROR", "META", "reply failed (no channel)", { req: requestId, channel: channelId });
-    return { ok: false, attempt: 1, refreshedToken: false, reason: "CHANNEL_NOT_FOUND" };
+    logLine("ERROR", "META", "reply failed (no channel)", {
+      req: requestId,
+      channel: channelId
+    });
+    return {
+      ok: false,
+      attempt: 1,
+      refreshedToken: false,
+      reason: "CHANNEL_NOT_FOUND"
+    };
   }
 
   let accessToken = channel.accessToken || config.metaPageAccessToken;
@@ -151,7 +165,12 @@ export async function sendGraphText(
       hasToken: Boolean(accessToken),
       hasBaseUrl: Boolean(config.metaGraphApiBaseUrl)
     });
-    return { ok: false, attempt: 1, refreshedToken: false, reason: "CONFIG_MISSING" };
+    return {
+      ok: false,
+      attempt: 1,
+      refreshedToken: false,
+      reason: "CONFIG_MISSING"
+    };
   }
 
   const url = `${config.metaGraphApiBaseUrl}/${graphTargetId}/messages`;
@@ -164,7 +183,10 @@ export async function sendGraphText(
   // Attempt 1
   try {
     const resp = await axios.post(url, body, {
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
       timeout: 10000
     });
 
@@ -202,11 +224,17 @@ export async function sendGraphText(
     }
 
     // Refresh + attempt 2
-    logLine("INFO", "META", "refresh token", { req: requestId, channel: channelId });
+    logLine("INFO", "META", "refresh token", {
+      req: requestId,
+      channel: channelId
+    });
 
     const refreshed = await refreshPageAccessTokenForChannel(channelId);
     if (!refreshed?.accessToken) {
-      logLine("ERROR", "META", "refresh token failed", { req: requestId, channel: channelId });
+      logLine("ERROR", "META", "refresh token failed", {
+        req: requestId,
+        channel: channelId
+      });
       return {
         ok: false,
         attempt: 2,
@@ -220,11 +248,17 @@ export async function sendGraphText(
 
     try {
       const resp2 = await axios.post(url, body, {
-        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
         timeout: 10000
       });
 
-      logLine("INFO", "META", "refresh token ok", { req: requestId, channel: channelId });
+      logLine("INFO", "META", "refresh token ok", {
+        req: requestId,
+        channel: channelId
+      });
 
       return {
         ok: true,
@@ -283,8 +317,11 @@ router.post("/", async (req: Request, res: Response) => {
   const startedAt = Date.now();
 
   const body: unknown = req.body;
-  const objectType = typeof (body as any)?.object === "string" ? (body as any).object : "unknown";
-  const entryCount = Array.isArray((body as any)?.entry) ? (body as any).entry.length : 0;
+  const objectType =
+    typeof (body as any)?.object === "string" ? (body as any).object : "unknown";
+  const entryCount = Array.isArray((body as any)?.entry)
+    ? (body as any).entry.length
+    : 0;
 
   logLine("INFO", "META", "⇢ webhook received", {
     req: requestId,
@@ -293,18 +330,29 @@ router.post("/", async (req: Request, res: Response) => {
   });
 
   if (!body || typeof body !== "object" || !(body as any).object) {
-    logLine("DEBUG", "META", "ignored", { req: requestId, reason: "missing body/object" });
+    logLine("DEBUG", "META", "ignored", {
+      req: requestId,
+      reason: "missing body/object"
+    });
     return res.sendStatus(200);
   }
 
   try {
+    // -----------------------------
+    // 1) Facebook PAGE messages + leadgen
+    // -----------------------------
     if ((body as any).object === "page") {
-      const entries = Array.isArray((body as any).entry) ? (body as any).entry : [];
+      const entries = Array.isArray((body as any).entry)
+        ? (body as any).entry
+        : [];
 
       for (const entry of entries) {
         const pageId: string | undefined = entry?.id;
-        const messagingEvents = Array.isArray(entry?.messaging) ? entry.messaging : [];
+        const messagingEvents = Array.isArray(entry?.messaging)
+          ? entry.messaging
+          : [];
 
+        // 1.1) Messaging events
         for (const event of messagingEvents) {
           const message = event?.message;
           const sender = event?.sender;
@@ -376,7 +424,9 @@ router.post("/", async (req: Request, res: Response) => {
 
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
-            const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
+            const rateMessage = buildRateLimitMessage(
+              rateResult.retryAfterSeconds
+            );
 
             logLine("WARN", "META", "rate limited", {
               req: requestId,
@@ -397,18 +447,33 @@ router.post("/", async (req: Request, res: Response) => {
                 content: rateMessage
               });
             } catch (e: unknown) {
-              logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
-              logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
+              logLine("ERROR", "META", "db log failed", {
+                req: requestId,
+                convo: convo.id
+              });
+              logLine("DEBUG", "META", "db log failed details", {
+                req: requestId,
+                details: e
+              });
             }
 
-            const send = await sendGraphText(requestId, "FB", channel.id, pageId, userId, rateMessage);
+            const send = await sendGraphText(
+              requestId,
+              "FB",
+              channel.id,
+              pageId,
+              userId,
+              rateMessage
+            );
 
             logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
               req: requestId,
               plat: "FB",
               type: "RATE_LIMIT",
               status: send.status,
-              metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+              metaMsgId: shortId(
+                send.ok ? send.metaMessageId : undefined
+              ),
               attempt: send.attempt,
               refreshed: send.refreshedToken
             });
@@ -417,7 +482,9 @@ router.post("/", async (req: Request, res: Response) => {
           }
 
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, { conversationId: convo.id });
+          const reply = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id
+          });
           const chatMs = Date.now() - t0;
 
           logLine("INFO", "META", "reply generated", {
@@ -440,60 +507,84 @@ router.post("/", async (req: Request, res: Response) => {
               content: reply
             });
           } catch (e: unknown) {
-            logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
-            logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
+            logLine("ERROR", "META", "db log failed", {
+              req: requestId,
+              convo: convo.id
+            });
+            logLine("DEBUG", "META", "db log failed details", {
+              req: requestId,
+              details: e
+            });
           }
 
-          const send = await sendGraphText(requestId, "FB", channel.id, pageId, userId, reply);
+          const send = await sendGraphText(
+            requestId,
+            "FB",
+            channel.id,
+            pageId,
+            userId,
+            reply
+          );
 
           logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
             req: requestId,
             plat: "FB",
             type: "NORMAL",
             status: send.status,
-            metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+            metaMsgId: shortId(
+              send.ok ? send.metaMessageId : undefined
+            ),
             attempt: send.attempt,
             refreshed: send.refreshedToken
           });
         }
-        // 2) NEW: leadgen changes
-  const changes = Array.isArray(entry?.changes) ? entry.changes : [];
-  for (const change of changes) {
-    if (change?.field !== "leadgen") {
-      continue;
-    }
 
-    const value = change?.value;
-    const leadgenId: string | undefined = value?.leadgen_id;
-    const formId: string | undefined = value?.form_id;
-    const createdTime: string | undefined = value?.created_time;
+        // 1.2) Leadgen changes (same entry)
+        const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+        for (const change of changes) {
+          if (change?.field !== "leadgen") {
+            continue;
+          }
 
-    if (!pageId || !leadgenId) {
-      logLine("WARN", "META", "leadgen missing ids", {
-        req: requestId,
-        page: shortId(pageId),
-        lead: shortId(leadgenId)
-      });
-      continue;
-    }
+          const value = change?.value;
+          const leadgenId: string | undefined = value?.leadgen_id;
+          const formId: string | undefined = value?.form_id;
+          const createdTime: string | undefined = value?.created_time;
 
-    logLine("INFO", "META", "leadgen received", {
-      req: requestId,
-      page: shortId(pageId),
-      lead: shortId(leadgenId),
-      form: shortId(formId),
-      created: createdTime
-    });
+          if (!pageId || !leadgenId) {
+            logLine("WARN", "META", "leadgen missing ids", {
+              req: requestId,
+              page: shortId(pageId),
+              lead: shortId(leadgenId)
+            });
+            continue;
+          }
 
-    await handleMetaLeadgen(requestId, pageId, leadgenId, formId);
-  }
+          logLine("INFO", "META", "leadgen received", {
+            req: requestId,
+            page: shortId(pageId),
+            lead: shortId(leadgenId),
+            form: shortId(formId),
+            created: createdTime
+          });
+
+          await handleMetaLeadgen(requestId, pageId, leadgenId, formId);
+        }
       }
+
+      // -----------------------------
+      // 2) Instagram messages
+      // -----------------------------
     } else if ((body as any).object === "instagram") {
-      const entries = Array.isArray((body as any).entry) ? (body as any).entry : [];
+      const entries = Array.isArray((body as any).entry)
+        ? (body as any).entry
+        : [];
 
       for (const entry of entries) {
         const igBusinessId: string | undefined = entry?.id;
-        const messagingEvents = Array.isArray(entry?.messaging) ? entry.messaging : [];
+        const messagingEvents = Array.isArray(entry?.messaging)
+          ? entry.messaging
+          : [];
 
         for (const event of messagingEvents) {
           const message = event?.message;
@@ -570,7 +661,9 @@ router.post("/", async (req: Request, res: Response) => {
 
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
-            const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
+            const rateMessage = buildRateLimitMessage(
+              rateResult.retryAfterSeconds
+            );
 
             logLine("WARN", "META", "rate limited", {
               req: requestId,
@@ -591,8 +684,14 @@ router.post("/", async (req: Request, res: Response) => {
                 content: rateMessage
               });
             } catch (e: unknown) {
-              logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
-              logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
+              logLine("ERROR", "META", "db log failed", {
+                req: requestId,
+                convo: convo.id
+              });
+              logLine("DEBUG", "META", "db log failed details", {
+                req: requestId,
+                details: e
+              });
             }
 
             const send = await sendGraphText(
@@ -609,7 +708,9 @@ router.post("/", async (req: Request, res: Response) => {
               plat: "IG",
               type: "RATE_LIMIT",
               status: send.status,
-              metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+              metaMsgId: shortId(
+                send.ok ? send.metaMessageId : undefined
+              ),
               attempt: send.attempt,
               refreshed: send.refreshedToken
             });
@@ -618,7 +719,9 @@ router.post("/", async (req: Request, res: Response) => {
           }
 
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, { conversationId: convo.id });
+          const reply = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id
+          });
           const chatMs = Date.now() - t0;
 
           logLine("INFO", "META", "reply generated", {
@@ -641,8 +744,14 @@ router.post("/", async (req: Request, res: Response) => {
               content: reply
             });
           } catch (e: unknown) {
-            logLine("ERROR", "META", "db log failed", { req: requestId, convo: convo.id });
-            logLine("DEBUG", "META", "db log failed details", { req: requestId, details: e });
+            logLine("ERROR", "META", "db log failed", {
+              req: requestId,
+              convo: convo.id
+            });
+            logLine("DEBUG", "META", "db log failed details", {
+              req: requestId,
+              details: e
+            });
           }
 
           const send = await sendGraphText(
@@ -659,24 +768,49 @@ router.post("/", async (req: Request, res: Response) => {
             plat: "IG",
             type: "NORMAL",
             status: send.status,
-            metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+            metaMsgId: shortId(
+              send.ok ? send.metaMessageId : undefined
+            ),
             attempt: send.attempt,
             refreshed: send.refreshedToken
           });
         }
       }
     } else {
+      // Unsupported object
       logLine("INFO", "META", "ignored (unsupported)", {
         req: requestId,
         object: (body as any).object
       });
     }
   } catch (err: unknown) {
-    logLine("ERROR", "META", "webhook error", { req: requestId });
-    logLine("DEBUG", "META", "webhook error details", { req: requestId, details: err });
+    // 🔴 NEW: full details at ERROR level so you see them with LOG_LEVEL=INFO
+    const normalized = normalizeAxiosError(err);
+    const base: any = {
+      req: requestId,
+      status: normalized.status
+    };
+
+    if (normalized.data !== undefined) {
+      base.errorData = normalized.data;
+    }
+
+    if (err instanceof Error) {
+      base.errorMessage = err.message;
+      base.errorStack = err.stack;
+      // name can also be useful
+      base.errorName = err.name;
+    } else {
+      base.rawError = err;
+    }
+
+    logLine("ERROR", "META", "webhook error", base);
   }
 
-  logLine("INFO", "META", "⇠ done", { req: requestId, ms: Date.now() - startedAt });
+  logLine("INFO", "META", "⇠ done", {
+    req: requestId,
+    ms: Date.now() - startedAt
+  });
 
   return res.sendStatus(200);
 });
