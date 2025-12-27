@@ -129,7 +129,7 @@ type SendReplyResult =
         | "TOKEN_REFRESH_FAILED";
     };
 
-async function sendGraphText(
+export async function sendGraphText(
   requestId: string,
   platform: "FB" | "IG",
   channelId: string,
