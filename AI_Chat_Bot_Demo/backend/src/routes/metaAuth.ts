@@ -192,16 +192,32 @@ router.get(
       }
       */
 
-      // Encode state as signed JWT (prevents tampering)
-      const stateToken = jwt.sign(
-        {
-          botId,
-          userId: user.id,
-          channelType
-        },
-        config.jwtAccessSecret,
-        { expiresIn: "10m" }
-      );
+      // Utility to sanitize returnPath (only allow relative paths)
+function sanitizeReturnPath(raw: unknown, botId: string): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  if (!raw.startsWith("/")) return undefined;
+
+  // Optional: basic guard that it actually includes the botId we expect
+  if (!raw.includes(botId)) return undefined;
+
+  return raw;
+}
+
+// inside route handler:
+const rawReturnPath = req.query.returnPath;
+const safeReturnPath = sanitizeReturnPath(rawReturnPath, botId);
+
+// Encode state as signed JWT (prevents tampering)
+const stateToken = jwt.sign(
+  {
+    botId,
+    userId: user.id,
+    channelType,
+    returnPath: safeReturnPath ?? undefined
+  },
+  config.jwtAccessSecret,
+  { expiresIn: "10m" }
+);
 
       // 👇 add business_management also for FACEBOOK
       const scopes =
@@ -255,10 +271,11 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
   }
 
   let decoded: {
-    botId: string;
-    userId: string;
-    channelType: "FACEBOOK" | "INSTAGRAM";
-  };
+  botId: string;
+  userId: string;
+  channelType: "FACEBOOK" | "INSTAGRAM";
+  returnPath?: string;
+};
   try {
     decoded = jwt.verify(state, config.jwtAccessSecret) as any;
   } catch (err) {
@@ -266,7 +283,7 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
     return res.status(400).send("Invalid state");
   }
 
-  const { botId, userId, channelType } = decoded;
+  const { botId, userId, channelType, returnPath } = decoded;
 
   try {
     // Double-check bot + owner still valid
@@ -331,15 +348,19 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
     });
 
     const frontendOrigin =
-      process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+    process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
-    const redirectUrl = new URL(
-      `/app/bots/${botId}/channels`,
-      frontendOrigin
-    );
-    redirectUrl.searchParams.set("metaSessionId", session.id);
+// Fallback if no returnPath was provided or it got sanitized away
+  const defaultPath = `/app/bots/${botId}/channels`;
+  const finalPath =
+  typeof returnPath === "string" && returnPath.startsWith("/")
+    ? returnPath
+    : defaultPath;
 
-    return res.redirect(redirectUrl.toString());
+const redirectUrl = new URL(finalPath, frontendOrigin);
+redirectUrl.searchParams.set("metaSessionId", session.id);
+
+return res.redirect(redirectUrl.toString());
   } catch (err) {
     console.error("Meta OAuth callback error", err);
     return res.status(500).send("Failed to connect Meta account");
