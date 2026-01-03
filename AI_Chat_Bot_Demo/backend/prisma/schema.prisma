@@ -50,6 +50,9 @@ model User {
 
   // If this user was referred by someone else, their attributions live here.
   referralAttributionsAsLead ReferralAttribution[] @relation("ReferredUserAttributions")
+
+  // NEW: Mobile devices
+  mobileDevices MobileDevice[]
 }
 
 model MfaBackupCode {
@@ -159,6 +162,9 @@ model Bot {
   // NOTE: the backend always requires at least: name, email, service, datetime.
   bookingRequiredFields String[] @default(["name", "email", "phone", "service", "datetime"])
 
+  bookingWeeklySchedule             Json?
+
+
   // NEW: Email usage records (for per-plan email limits)
   emailUsages EmailUsage[]
 
@@ -209,6 +215,11 @@ enum ChannelType {
   INSTAGRAM
 }
 
+enum ConversationMode {
+  AI
+  HUMAN
+}
+
 model Subscription {
   id                   String             @id @default(uuid())
   botId                String             @unique
@@ -254,6 +265,8 @@ model Conversation {
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
+  mode           ConversationMode @default(AI)
+
   memorySummary          String?
   memorySummaryModel     String?
   memorySummaryUpdatedAt DateTime?
@@ -285,6 +298,7 @@ enum MessageRole {
   USER
   ASSISTANT
   SYSTEM
+  HUMAN
 }
 
 // NEW: stored evaluation(s) for a conversation
@@ -725,3 +739,18 @@ model MetaLead {
 
   @@index([botId, createdAt])
 }
+
+
+
+model MobileDevice {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  expoPushToken String   @unique
+  platform      String
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([expoPushToken])
+}
+

@@ -7,6 +7,10 @@ import {
   fetchKnowledgeUsageForClient,
   KnowledgeUsageSummary
 } from "../services/knowledgeUsageService";
+import {
+  EMAIL_TOKEN_COST,
+  WHATSAPP_MESSAGE_TOKEN_COST
+} from "../services/planUsageService";
 
 const router = Router();
 
@@ -48,7 +52,7 @@ function computeCrawlerTokens(
  * Returns:
  * - KPIs
  * - Conversations last 10 days per bot
- * - Tokens last 10 days per bot (AI + Knowledge)
+ * - Tokens last 10 days per bot (AI + Knowledge + Email + WA lead templates)
  * - Top bots by conversations in last 30 days
  */
 router.get(
@@ -64,8 +68,8 @@ router.get(
 
     // Important:
     // We need:
-    // - tokens "this month" => monthStart.now
-    // - tokens "last 10 days" => tenDaysAgo.now
+    // - tokens "this month" => monthStart..now
+    // - tokens "last 10 days" => tenDaysAgo..now
     // So fetch OpenAI usage from the earlier of those two dates.
     const windowStart = tenDaysAgo < monthStart ? tenDaysAgo : monthStart;
 
@@ -115,28 +119,37 @@ router.get(
 
     const botIds = bots.map((b) => b.id);
 
-    // 1.5) Load plan limits + monthly email usage
-    const [subscriptions, totalEmailsThisMonth] = await Promise.all([
-      prisma.subscription.findMany({
-        where: { botId: { in: botIds } },
-        select: {
-          botId: true,
-          status: true,
-          usagePlan: {
-            select: {
-              monthlyTokens: true,
-              monthlyEmails: true
+    // 1.5) Load plan limits + monthly email usage + monthly WA lead templates
+    const [subscriptions, totalEmailsThisMonth, totalLeadTemplatesThisMonth] =
+      await Promise.all([
+        prisma.subscription.findMany({
+          where: { botId: { in: botIds } },
+          select: {
+            botId: true,
+            status: true,
+            usagePlan: {
+              select: {
+                monthlyTokens: true,
+                monthlyEmails: true
+              }
             }
           }
-        }
-      }),
-      prisma.emailUsage.count({
-        where: {
-          botId: { in: botIds },
-          createdAt: { gte: monthStart, lt: now }
-        }
-      })
-    ]);
+        }),
+        prisma.emailUsage.count({
+          where: {
+            botId: { in: botIds },
+            createdAt: { gte: monthStart, lt: now }
+          }
+        }),
+        // Only WhatsApp lead templates that were actually SENT
+        prisma.metaLead.count({
+          where: {
+            botId: { in: botIds },
+            whatsappStatus: "SENT",
+            createdAt: { gte: monthStart, lt: now }
+          }
+        })
+      ]);
 
     // Map botId -> { name, status }
     const botMap = new Map<string, { name: string; status: string }>();
@@ -152,7 +165,7 @@ router.get(
     const activeBots = bots.filter((b) => b.status === "ACTIVE").length;
     const totalConversationsLast30Days = conversationsLast30.length;
 
-    // AI tokens this month (filter to monthStart.now)
+    // AI tokens this month (filter to monthStart..now)
     const aiTokensThisMonth = openAiUsageSinceWindowStart
       .filter((u) => u.createdAt >= monthStart)
       .reduce((sum, u) => sum + u.totalTokens, 0);
@@ -183,12 +196,21 @@ router.get(
       )
     ).reduce((sum, v) => sum + v, 0);
 
-    const totalTokensThisMonth = aiTokensThisMonth + knowledgeTokensThisMonth;
+    // 👉 Base tokens (AI + Knowledge)
+    const baseTokensThisMonth = aiTokensThisMonth + knowledgeTokensThisMonth;
+
+    // 👉 Virtual tokens for emails & WA lead templates
+    const emailTokensThisMonth = totalEmailsThisMonth * EMAIL_TOKEN_COST;
+    const whatsappLeadTokensThisMonth =
+      totalLeadTemplatesThisMonth * WHATSAPP_MESSAGE_TOKEN_COST;
+
+    // 👉 New plan "total tokens" for this month: AI + Knowledge + Email + WA lead templates
+    const totalTokensThisMonth =
+      baseTokensThisMonth +
+      emailTokensThisMonth +
+      whatsappLeadTokensThisMonth;
 
     // ----- Plan totals (sum across bots) -----
-    // Plans are per-bot (Subscription -> UsagePlan). For the dashboard KPIs we aggregate usage across all bots,
-    // so we also aggregate the limits the same way.
-    // If ANY plan is unlimited (null), the aggregated limit becomes null (unlimited).
     const allowedStatuses = new Set(["ACTIVE", "TRIALING", "PAST_DUE"]);
 
     let monthlyTokensLimit: number | null = 0;
@@ -262,13 +284,22 @@ router.get(
       };
     });
 
-    // ----- Tokens last 10 days per bot -----
+ // ----- Tokens last 10 days per bot -----
     // 1) AI tokens
     const openAiUsageLast10 = openAiUsageSinceWindowStart.filter(
       (u) => u.createdAt >= tenDaysAgo
     );
 
     const tokensDailyMap = new Map<string, number>(); // `${day}|${botId}` -> tokens
+
+    // NEW: global per-day split maps
+    const baseTokensDaily = new Map<string, number>();      // OpenAI + Knowledge
+    const emailTokensDaily = new Map<string, number>();     // email virtual tokens
+    const whatsappTokensDaily = new Map<string, number>();  // WA template virtual tokens
+
+    const bump = (map: Map<string, number>, day: string, amount: number) => {
+      map.set(day, (map.get(day) || 0) + amount);
+    };
 
     openAiUsageLast10.forEach((u) => {
       const botId = u.botId;
@@ -277,10 +308,12 @@ router.get(
       const dayKey = toDayString(startOfDay(u.createdAt));
       const key = `${dayKey}|${botId}`;
       tokensDailyMap.set(key, (tokensDailyMap.get(key) || 0) + u.totalTokens);
+
+      // base tokens (OpenAI + Knowledge)
+      bump(baseTokensDaily, dayKey, u.totalTokens);
     });
 
     // 2) Knowledge tokens (ingest+search), fetched per day
-    // NOTE: This keeps your API response unchanged; it just makes the numbers correct.
     await Promise.all(
       knowledgeBots.flatMap((b) => {
         const clientId = b.knowledgeClientId as string;
@@ -288,7 +321,6 @@ router.get(
         return dateStarts.map(async (dayStart) => {
           const dayEnd = addDays(dayStart, 1);
           const dayKey = toDayString(dayStart);
-          const key = `${dayKey}|${b.id}`;
 
           try {
             const summary = await fetchKnowledgeUsageForClient({
@@ -299,10 +331,14 @@ router.get(
 
             const crawlerTokens = computeCrawlerTokens(summary).totalTokens;
             if (crawlerTokens > 0) {
+              const key = `${dayKey}|${b.id}`;
               tokensDailyMap.set(
                 key,
                 (tokensDailyMap.get(key) || 0) + crawlerTokens
               );
+
+              // base tokens (OpenAI + Knowledge)
+              bump(baseTokensDaily, dayKey, crawlerTokens);
             }
           } catch (err) {
             console.error(
@@ -316,6 +352,57 @@ router.get(
       })
     );
 
+    // 3) Email + WA lead template tokens last 10 days
+    const dayWindowEnd = addDays(today, 1);
+
+    const [emailUsageLast10, waLeadsLast10] = await Promise.all([
+      prisma.emailUsage.findMany({
+        where: {
+          botId: { in: botIds },
+          createdAt: { gte: tenDaysAgo, lt: dayWindowEnd }
+        },
+        select: {
+          botId: true,
+          createdAt: true
+        }
+      }),
+      prisma.metaLead.findMany({
+        where: {
+          botId: { in: botIds },
+          whatsappStatus: "SENT",
+          createdAt: { gte: tenDaysAgo, lt: dayWindowEnd }
+        },
+        select: {
+          botId: true,
+          createdAt: true
+        }
+      })
+    ]);
+
+    emailUsageLast10.forEach((e) => {
+      const botId = e.botId;
+      const dayKey = toDayString(startOfDay(e.createdAt));
+      const key = `${dayKey}|${botId}`;
+      tokensDailyMap.set(
+        key,
+        (tokensDailyMap.get(key) || 0) + EMAIL_TOKEN_COST
+      );
+
+      bump(emailTokensDaily, dayKey, EMAIL_TOKEN_COST);
+    });
+
+    waLeadsLast10.forEach((lead) => {
+      const botId = lead.botId;
+      const dayKey = toDayString(startOfDay(lead.createdAt));
+      const key = `${dayKey}|${botId}`;
+      tokensDailyMap.set(
+        key,
+        (tokensDailyMap.get(key) || 0) + WHATSAPP_MESSAGE_TOKEN_COST
+      );
+
+      bump(whatsappTokensDaily, dayKey, WHATSAPP_MESSAGE_TOKEN_COST);
+    });
+
     const tokensSeries = bots.map((bot) => {
       const values = dates.map((day) => {
         const key = `${day}|${bot.id}`;
@@ -328,6 +415,17 @@ router.get(
         values
       };
     });
+
+    // Build breakdown arrays aligned with `dates`
+    const openAiTokensSplit = dates.map(
+      (day) => baseTokensDaily.get(day) || 0
+    );
+    const emailTokensSplit = dates.map(
+      (day) => emailTokensDaily.get(day) || 0
+    );
+    const whatsappTokensSplit = dates.map(
+      (day) => whatsappTokensDaily.get(day) || 0
+    );
 
     // ----- Top bots by conversations (last 30 days) -----
     const conversationsByBot = new Map<
@@ -376,7 +474,7 @@ router.get(
         totalBots,
         activeBots,
         totalConversationsLast30Days,
-        totalTokensThisMonth,
+        totalTokensThisMonth, // now includes AI + Knowledge + Email + WA lead templates
         monthlyTokensLimit,
         tokensUsagePercent,
         totalEmailsThisMonth,
@@ -390,6 +488,12 @@ router.get(
       tokensLast10Days: {
         dates,
         series: tokensSeries
+      },
+      tokenBreakdownLast10Days: {
+        dates,
+        openAiTokens: openAiTokensSplit,
+        emailTokens: emailTokensSplit,
+        whatsappTokens: whatsappTokensSplit
       },
       topBotsByConversationsLast30Days
     });

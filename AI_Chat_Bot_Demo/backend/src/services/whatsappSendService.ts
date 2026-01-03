@@ -3,15 +3,29 @@ import axios from "axios";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
 import { normalizeAxiosError, isWhatsAppAuthError, markWhatsAppNeedsReconnect } from "../routes/whatsappWebhook"; // or extract these helpers out of whatsappWebhook.ts
+import {
+  ensureBotHasTokens,
+  WHATSAPP_MESSAGE_TOKEN_COST
+} from "./planUsageService";
 
 export async function sendLeadWhatsAppTemplate(
   requestId: string,
   botId: string,
-  toPhone: string, // must be in E.164 (+39...) before you call this
+  toPhone: string,
   templateName: string,
   languageCode: string,
   components?: any[]
 ) {
+  // Token quota check for lead WA messages
+  const quota = await ensureBotHasTokens(botId, WHATSAPP_MESSAGE_TOKEN_COST);
+  if (!quota.ok) {
+    const err: any = new Error("WhatsApp lead message quota exceeded");
+    err.code = "TOKEN_QUOTA_EXCEEDED";
+    err.usedThisPeriod = quota.snapshot?.usedTokensTotal;
+    err.limit = quota.snapshot?.monthlyTokenLimit;
+    throw err;
+  }
+
   const channel = await prisma.botChannel.findFirst({
     where: { botId, type: "WHATSAPP" }
   });
@@ -24,7 +38,7 @@ export async function sendLeadWhatsAppTemplate(
     throw new Error("whatsappApiBaseUrl not configured");
   }
 
-  const phoneNumberId = channel.externalId; // set in whatsappEmbedded attach :contentReference[oaicite:9]{index=9}
+  const phoneNumberId = channel.externalId;
   const url = `${config.whatsappApiBaseUrl}/${phoneNumberId}/messages`;
 
   const accessToken = channel.accessToken || config.whatsappAccessToken;
@@ -55,9 +69,8 @@ export async function sendLeadWhatsAppTemplate(
       timeout: 10000
     });
 
-    // you can log with same logger style as whatsappWebhook.ts
     return resp.data;
-  } catch (err: any) {
+  } catch (err) {
     const n = normalizeAxiosError(err);
     // log error, then mark needsReconnect if auth issue
     if (isWhatsAppAuthError(err)) {

@@ -82,12 +82,47 @@ const botCreateSchema = z.object({
   // IMPORTANT: not nullable → matches Prisma String[].
   bookingRequiredFields: z.array(z.string()).optional(),
 
+  bookingWeeklySchedule: z
+    .record(
+      z.enum([
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday"
+      ]),
+      z.array(
+        z.object({
+          // "HH:MM" 24h format, e.g. "09:00"
+          start: z
+            .string()
+            .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format"),
+          end: z
+            .string()
+            .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format")
+        })
+      )
+    )
+    .optional()
+    .nullable(),
+
   leadWhatsappMessages200: z.boolean().optional().default(false),
   leadWhatsappMessages500: z.boolean().optional().default(false),
   leadWhatsappMessages1000: z.boolean().optional().default(false)
 });
 
 const botUpdateSchema = botCreateSchema.partial().omit({ slug: true });
+
+
+const metaLeadAutomationSchema = z.object({
+  phoneFieldName: z.string().min(1),
+  consentFieldName: z.string().optional().nullable(),
+  requiresWhatsappOptIn: z.boolean(),
+  templateName: z.string().min(1),
+  templateLanguage: z.string().min(1)
+});
 
 // public info for a bot by slug (for widget/demo)
 router.get("/bots/live/:slug", async (req, res) => {
@@ -213,6 +248,8 @@ if (selectedCount > 1) {
 
       // Stored as extra-required fields (base fields are always enforced in code)
       bookingRequiredFields: data.bookingRequiredFields ?? [],
+
+      bookingWeeklySchedule: data.bookingWeeklySchedule ?? undefined,
 
       leadWhatsappMessages200: lead200,
       leadWhatsappMessages500: lead500,
@@ -449,6 +486,156 @@ router.delete("/bots/:id", async (req: Request, res: Response) => {
   });
 
   return res.status(204).send();
+});
+
+
+// ---- Meta leads (Lead Ads → WhatsApp automation) ----
+
+// Get current automation settings for a bot
+router.get("/bots/:id/meta-leads/automation", async (req: Request, res: Response) => {
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id }
+  });
+
+  if (!bot) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  const automation = await prisma.metaLeadAutomation.findFirst({
+    where: {
+      botId: bot.id,
+      enabled: true
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  if (!automation) {
+    // Frontend expects `null` when nothing is configured
+    return res.json(null);
+  }
+
+  return res.json({
+    phoneFieldName: automation.phoneFieldName || "phone_number",
+    consentFieldName: automation.consentFieldName ?? "",
+    requiresWhatsappOptIn: automation.requiresWhatsappOptIn,
+    templateName: automation.whatsappTemplateName,
+    templateLanguage: automation.whatsappTemplateLanguage
+  });
+});
+
+// Create/update automation settings for a bot
+router.put("/bots/:id/meta-leads/automation", async (req: Request, res: Response) => {
+  const parsed = metaLeadAutomationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const {
+    phoneFieldName,
+    consentFieldName,
+    requiresWhatsappOptIn,
+    templateName,
+    templateLanguage
+  } = parsed.data;
+
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id }
+  });
+
+  if (!bot) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  // Require at least one connected Facebook page, otherwise we don't know which pageId to bind to.
+  const fbChannel = await prisma.botChannel.findFirst({
+    where: { botId: bot.id, type: "FACEBOOK" }
+  });
+
+  if (!fbChannel) {
+    return res.status(400).json({
+      error: "FACEBOOK_PAGE_NOT_CONNECTED",
+      message: "Connect a Facebook page before configuring Lead Ads automation."
+    });
+  }
+
+  const pageId = fbChannel.externalId;
+  const formId = "*"; // single global config per page for now
+
+  // Use the composite unique key @@unique([botId, pageId, formId], name: "bot_page_form")
+  const automation = await prisma.metaLeadAutomation.upsert({
+    where: {
+      bot_page_form: {
+        botId: bot.id,
+        pageId,
+        formId
+      }
+    },
+    update: {
+      enabled: true,
+      phoneFieldName,
+      consentFieldName: consentFieldName && consentFieldName.trim() ? consentFieldName : null,
+      requiresWhatsappOptIn,
+      whatsappTemplateName: templateName,
+      whatsappTemplateLanguage: templateLanguage
+    },
+    create: {
+      botId: bot.id,
+      pageId,
+      formId,
+      enabled: true,
+      phoneFieldName,
+      consentFieldName: consentFieldName && consentFieldName.trim() ? consentFieldName : null,
+      requiresWhatsappOptIn,
+      whatsappTemplateName: templateName,
+      whatsappTemplateLanguage: templateLanguage
+    }
+  });
+
+  return res.json({
+    phoneFieldName: automation.phoneFieldName || "phone_number",
+    consentFieldName: automation.consentFieldName ?? "",
+    requiresWhatsappOptIn: automation.requiresWhatsappOptIn,
+    templateName: automation.whatsappTemplateName,
+    templateLanguage: automation.whatsappTemplateLanguage
+  });
+});
+
+// List recent Meta leads for a bot
+router.get("/bots/:id/meta-leads", async (req: Request, res: Response) => {
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id }
+  });
+
+  if (!bot) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  let limit = 50;
+  const rawLimit = req.query.limit;
+  if (typeof rawLimit === "string") {
+    const parsed = parseInt(rawLimit, 10);
+    if (!Number.isNaN(parsed) && parsed > 0 && parsed <= 200) {
+      limit = parsed;
+    }
+  }
+
+  const leads = await prisma.metaLead.findMany({
+    where: { botId: bot.id },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: {
+      id: true,
+      createdAt: true,
+      pageId: true,
+      leadgenId: true,
+      formId: true,
+      phone: true,
+      whatsappStatus: true,
+      whatsappError: true
+    }
+  });
+
+  return res.json({ items: leads });
 });
 
 export default router;

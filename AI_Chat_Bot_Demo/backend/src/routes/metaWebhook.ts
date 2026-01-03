@@ -9,13 +9,37 @@ import {
   refreshPageAccessTokenForChannel,
   isMetaTokenErrorNeedingRefresh
 } from "../services/metaTokenService";
-import { findOrCreateConversation, logMessage } from "../services/conversationService";
+import { findOrCreateConversation, logMessage, HUMAN_HANDOFF_MESSAGE, shouldSwitchToHumanMode } from "../services/conversationService";
 import { generateBotReplyForSlug } from "../services/chatService";
 import {
   checkConversationRateLimit,
   buildRateLimitMessage
 } from "../services/rateLimitService";
 import { handleMetaLeadgen } from "../services/metaLeadService";
+
+import { ConversationMode } from "@prisma/client";
+
+import type { Server as SocketIOServer } from "socket.io";
+import { sendHumanConversationPush } from "../services/pushNotificationService";
+
+
+function emitConversationMessages(
+  io: SocketIOServer | undefined,
+  ownerUserId: string | null,
+  convoId: string,
+  botId: string,
+  ...messages: any[]
+) {
+  if (!io || !ownerUserId) return;
+  for (const m of messages) {
+    if (!m) continue;
+    io.to(`user:${ownerUserId}`).emit("conversation:messageCreated", {
+      conversationId: convoId,
+      botId,
+      message: m
+    });
+  }
+}
 
 const router = Router();
 
@@ -422,6 +446,135 @@ router.post("/", async (req: Request, res: Response) => {
             channel: channel.id
           });
 
+          const wantsHuman = shouldSwitchToHumanMode(text);
+
+if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
+  const updated = await prisma.conversation.update({
+    where: { id: convo.id },
+    data: { mode: ConversationMode.HUMAN }
+  });
+
+  const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: mid
+    });
+    const assistantMsg = await logMessage({
+      conversationId: convo.id,
+      role: "ASSISTANT",
+      content: HUMAN_HANDOFF_MESSAGE
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "META", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
+
+  const send = await sendGraphText(
+    requestId,
+    "FB",
+    channel.id,
+    pageId,
+    userId,
+    HUMAN_HANDOFF_MESSAGE
+  );
+
+  logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
+    req: requestId,
+    plat: "FB",
+    type: "HUMAN_HANDOFF",
+    status: send.status,
+    metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+    attempt: send.attempt,
+    refreshed: send.refreshedToken
+  });
+
+  // 🔴 NEW: notify mobile clients via Socket.IO
+  try {
+    const io = req.app.get("io") as SocketIOServer | undefined;
+
+    if (io && bot.userId) {
+      const now = new Date();
+      io.to(`user:${bot.userId}`).emit("conversation:modeChanged", {
+        conversationId: convo.id,
+        botId: convo.botId,
+        mode: updated.mode,
+        channel: convo.channel,
+        lastMessageAt: now,
+        lastUserMessageAt: now
+      });
+    }
+  } catch (err) {
+    logLine("ERROR", "META", "socket emit failed (FB handoff)", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "socket emit failed details", {
+      req: requestId,
+      details: err
+    });
+  }
+
+            try {
+              await sendHumanConversationPush(bot.userId, {
+                conversationId: convo.id,
+                botId: bot.id,
+                botName: bot.name,
+                channel: "FACEBOOK"
+              });
+            } catch (pushErr) {
+              logLine("ERROR", "META", "push send failed", {
+                req: requestId,
+                plat: "FB",
+                convo: convo.id,
+                error: (pushErr as Error).message
+              });
+            }
+
+  continue;
+}
+
+          if (convo.mode === ConversationMode.HUMAN) {
+  const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: mid
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "META", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
+
+  logLine("INFO", "META", "human handoff active, skipping bot reply", {
+    req: requestId,
+    convo: convo.id
+  });
+
+  continue;
+}
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
             const rateMessage = buildRateLimitMessage(
@@ -434,28 +587,32 @@ router.post("/", async (req: Request, res: Response) => {
               retryAfter: rateResult.retryAfterSeconds
             });
 
-            try {
-              await logMessage({
-                conversationId: convo.id,
-                role: "USER",
-                content: text,
-                channelMessageId: mid
-              });
-              await logMessage({
-                conversationId: convo.id,
-                role: "ASSISTANT",
-                content: rateMessage
-              });
-            } catch (e: unknown) {
-              logLine("ERROR", "META", "db log failed", {
-                req: requestId,
-                convo: convo.id
-              });
-              logLine("DEBUG", "META", "db log failed details", {
-                req: requestId,
-                details: e
-              });
-            }
+            const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: mid
+    });
+    const assistantMsg = await logMessage({
+      conversationId: convo.id,
+      role: "ASSISTANT",
+      content: rateMessage
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "META", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
 
             const send = await sendGraphText(
               requestId,
@@ -494,28 +651,32 @@ router.post("/", async (req: Request, res: Response) => {
             reply: safeSnippet(reply)
           });
 
-          try {
-            await logMessage({
-              conversationId: convo.id,
-              role: "USER",
-              content: text,
-              channelMessageId: mid
-            });
-            await logMessage({
-              conversationId: convo.id,
-              role: "ASSISTANT",
-              content: reply
-            });
-          } catch (e: unknown) {
-            logLine("ERROR", "META", "db log failed", {
-              req: requestId,
-              convo: convo.id
-            });
-            logLine("DEBUG", "META", "db log failed details", {
-              req: requestId,
-              details: e
-            });
-          }
+          const io = req.app.get("io") as SocketIOServer | undefined;
+
+try {
+  const userMsg = await logMessage({
+    conversationId: convo.id,
+    role: "USER",
+    content: text,
+    channelMessageId: mid
+  });
+  const assistantMsg = await logMessage({
+    conversationId: convo.id,
+    role: "ASSISTANT",
+    content: reply
+  });
+
+  emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+} catch (e: unknown) {
+  logLine("ERROR", "META", "db log failed", {
+    req: requestId,
+    convo: convo.id
+  });
+  logLine("DEBUG", "META", "db log failed details", {
+    req: requestId,
+    details: e
+  });
+}
 
           const send = await sendGraphText(
             requestId,
@@ -672,6 +833,137 @@ router.post("/", async (req: Request, res: Response) => {
           // For Instagram via Facebook Login, replies must be sent via the PAGE ID
           const graphTargetId: string = meta.pageId || igBusinessId;
 
+const wantsHuman = shouldSwitchToHumanMode(text);
+
+if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
+  const updated = await prisma.conversation.update({
+    where: { id: convo.id },
+    data: { mode: ConversationMode.HUMAN }
+  });
+
+  const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: mid
+    });
+    const assistantMsg = await logMessage({
+      conversationId: convo.id,
+      role: "ASSISTANT",
+      content: HUMAN_HANDOFF_MESSAGE
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "META", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
+
+  const send = await sendGraphText(
+    requestId,
+    "IG",
+    channel.id,
+    graphTargetId,
+    userId,
+    HUMAN_HANDOFF_MESSAGE
+  );
+
+  logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
+    req: requestId,
+    plat: "IG",
+    type: "HUMAN_HANDOFF",
+    status: send.status,
+    metaMsgId: shortId(send.ok ? send.metaMessageId : undefined),
+    attempt: send.attempt,
+    refreshed: send.refreshedToken
+  });
+
+  // 🔴 NEW: Socket.IO emit
+  try {
+    const io = req.app.get("io") as SocketIOServer | undefined;
+
+    if (io && bot.userId) {
+      const now = new Date();
+      io.to(`user:${bot.userId}`).emit("conversation:modeChanged", {
+        conversationId: convo.id,
+        botId: convo.botId,
+        mode: updated.mode,
+        channel: convo.channel,
+        lastMessageAt: now,
+        lastUserMessageAt: now
+      });
+    }
+  } catch (err) {
+    logLine("ERROR", "META", "socket emit failed (IG handoff)", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "socket emit failed details", {
+      req: requestId,
+      details: err
+    });
+  }
+
+            try {
+              await sendHumanConversationPush(bot.userId, {
+                conversationId: convo.id,
+                botId: bot.id,
+                botName: bot.name,
+                channel: "INSTAGRAM"
+              });
+            } catch (pushErr) {
+              logLine("ERROR", "META", "push send failed", {
+                req: requestId,
+                plat: "IG",
+                convo: convo.id,
+                error: (pushErr as Error).message
+              });
+            }
+
+  continue;
+}
+
+
+          if (convo.mode === ConversationMode.HUMAN) {
+  const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: mid
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "META", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
+
+  logLine("INFO", "META", "human handoff active, skipping bot reply", {
+    req: requestId,
+    convo: convo.id
+  });
+
+  continue;
+}
+
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
             const rateMessage = buildRateLimitMessage(
@@ -684,29 +976,32 @@ router.post("/", async (req: Request, res: Response) => {
               retryAfter: rateResult.retryAfterSeconds
             });
 
-            try {
-              await logMessage({
-                conversationId: convo.id,
-                role: "USER",
-                content: text,
-                channelMessageId: mid
-              });
-              await logMessage({
-                conversationId: convo.id,
-                role: "ASSISTANT",
-                content: rateMessage
-              });
-            } catch (e: unknown) {
-              logLine("ERROR", "META", "db log failed", {
-                req: requestId,
-                convo: convo.id
-              });
-              logLine("DEBUG", "META", "db log failed details", {
-                req: requestId,
-                details: e
-              });
-            }
+            const io = req.app.get("io") as SocketIOServer | undefined;
 
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: mid
+    });
+    const assistantMsg = await logMessage({
+      conversationId: convo.id,
+      role: "ASSISTANT",
+      content: rateMessage
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "META", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "META", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
             const send = await sendGraphText(
               requestId,
               "IG",
@@ -744,28 +1039,32 @@ router.post("/", async (req: Request, res: Response) => {
             reply: safeSnippet(reply)
           });
 
-          try {
-            await logMessage({
-              conversationId: convo.id,
-              role: "USER",
-              content: text,
-              channelMessageId: mid
-            });
-            await logMessage({
-              conversationId: convo.id,
-              role: "ASSISTANT",
-              content: reply
-            });
-          } catch (e: unknown) {
-            logLine("ERROR", "META", "db log failed", {
-              req: requestId,
-              convo: convo.id
-            });
-            logLine("DEBUG", "META", "db log failed details", {
-              req: requestId,
-              details: e
-            });
-          }
+          const io = req.app.get("io") as SocketIOServer | undefined;
+
+try {
+  const userMsg = await logMessage({
+    conversationId: convo.id,
+    role: "USER",
+    content: text,
+    channelMessageId: mid
+  });
+  const assistantMsg = await logMessage({
+    conversationId: convo.id,
+    role: "ASSISTANT",
+    content: reply
+  });
+
+  emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+} catch (e: unknown) {
+  logLine("ERROR", "META", "db log failed", {
+    req: requestId,
+    convo: convo.id
+  });
+  logLine("DEBUG", "META", "db log failed details", {
+    req: requestId,
+    details: e
+  });
+}
 
           const send = await sendGraphText(
             requestId,

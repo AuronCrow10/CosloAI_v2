@@ -87,6 +87,99 @@ type NormalizedBookingConfig = {
   customFields: string[];
 };
 
+type WeekdayKey =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+type BookingTimeWindow = {
+  start: string; // "HH:MM"
+  end: string; // "HH:MM"
+};
+
+type BookingWeeklySchedule = Partial<Record<WeekdayKey, BookingTimeWindow[]>>;
+
+const WEEKDAY_KEYS: WeekdayKey[] = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday"
+];
+
+function parseTimeToMinutes(hhmm: string): number | null {
+  const parts = hhmm.split(":");
+  if (parts.length !== 2) return null;
+
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    return null;
+  }
+
+  return hours * 60 + minutes;
+}
+
+function getWeekdayKey(dt: DateTime): WeekdayKey {
+  // Luxon: Monday = 1, Sunday = 7
+  return WEEKDAY_KEYS[dt.weekday - 1];
+}
+
+function isWithinWeeklySchedule(
+  dt: DateTime,
+  durationMinutes: number,
+  schedule: BookingWeeklySchedule | null
+): boolean {
+  // No schedule configured → allow any time
+  if (!schedule) return true;
+
+  const dayKey = getWeekdayKey(dt);
+  const windows = schedule[dayKey];
+  if (!windows || windows.length === 0) return false;
+
+  const startMinutes = dt.hour * 60 + dt.minute;
+  const endMinutes = startMinutes + durationMinutes;
+
+  // A booking is valid if fully contained in at least one window for that day
+  return windows.some((w) => {
+    const from = parseTimeToMinutes(w.start);
+    const to = parseTimeToMinutes(w.end);
+    if (from == null || to == null || from >= to) return false;
+    return startMinutes >= from && endMinutes <= to;
+  });
+}
+
+async function loadBotWeeklySchedule(
+  botId: string | null
+): Promise<BookingWeeklySchedule | null> {
+  if (!botId) return null;
+
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId },
+    select: { bookingWeeklySchedule: true }
+  });
+
+  if (!bot || !bot.bookingWeeklySchedule) {
+    return null;
+  }
+
+  return bot.bookingWeeklySchedule as BookingWeeklySchedule;
+}
+
 function normalizeBookingConfig(
   raw: BookingConfig | undefined
 ): NormalizedBookingConfig | null {
@@ -253,6 +346,8 @@ export async function handleBookAppointment(
     return result;
   }
 
+  const weeklySchedule = await loadBotWeeklySchedule(botConfig.botId ?? null);
+
   const start = DateTime.fromISO(args.datetime, { zone: timeZone });
   if (!start.isValid) {
     const result: BookingResult = {
@@ -322,6 +417,26 @@ export async function handleBookAppointment(
       });
       return result;
     }
+  }
+
+  // Enforce weekly opening hours (if configured on the bot)
+  if (!isWithinWeeklySchedule(start, defaultDurationMinutes, weeklySchedule)) {
+    const result: BookingResult = {
+      success: false,
+      errorMessage:
+        "That time is outside of the business's opening hours. Please choose another time within the available schedule."
+    };
+
+    console.warn("📅 [Booking] Rejected - outside opening hours", {
+      requestId,
+      slug,
+      start: start.toISO(),
+      durationMinutes: defaultDurationMinutes,
+      timeZone,
+      weeklyScheduleConfigured: !!weeklySchedule
+    });
+
+    return result;
   }
 
   const end = start.plus({ minutes: defaultDurationMinutes });
@@ -640,6 +755,8 @@ export async function handleUpdateAppointment(
     };
   }
 
+   const weeklySchedule = await loadBotWeeklySchedule(botConfig.botId ?? null);
+
   const newStart = DateTime.fromISO(args.newDatetime, { zone: timeZone });
   if (!newStart.isValid) {
     return {
@@ -680,6 +797,15 @@ export async function handleUpdateAppointment(
         errorMessage: `Bookings cannot be moved more than ${maxAdvanceDays} day(s) in advance.`
       };
     }
+  }
+
+  if (!isWithinWeeklySchedule(newStart, defaultDurationMinutes, weeklySchedule)) {
+    return {
+      success: false,
+      action: "updated",
+      errorMessage:
+        "The new time is outside of the business's opening hours. Please choose another time within the available schedule."
+    };
   }
 
   const newEnd = newStart.plus({ minutes: defaultDurationMinutes });

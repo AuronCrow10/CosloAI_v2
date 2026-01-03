@@ -184,11 +184,13 @@ router.get(
       }
 
       // Optionally enforce only ACTIVE bots can connect channels
+      /*
       if (bot.status !== "ACTIVE") {
         return res
           .status(400)
           .json({ error: "Bot must be active before connecting channels" });
       }
+      */
 
       // Encode state as signed JWT (prevents tampering)
       const stateToken = jwt.sign(
@@ -591,7 +593,7 @@ router.post(
             {
               params: {
                 subscribed_fields:
-                  "messages,messaging_postbacks,message_reactions, leadgen",
+                  "messages,messaging_postbacks,message_reactions",
                 access_token: pageAccessToken
               },
               timeout: 10000

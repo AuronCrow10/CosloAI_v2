@@ -121,47 +121,29 @@ router.get("/billing/overview", async (req, res) => {
 
       const snap: any = sub.planSnapshotJson ?? null;
 
-      let featuresAmountCents: number | null =
-        typeof snap?.fp === "number" ? snap.fp : null;
-      let planAmountCents: number | null =
-        typeof snap?.pt === "number"
-          ? snap.pt
-          : usagePlan?.monthlyAmountCents ?? null;
-      let totalAmountCents: number | null =
-        typeof snap?.t === "number" ? snap.t : null;
-      let currency: string =
-        (snap?.c as string | undefined) ||
-        sub.currency ||
-        usagePlan?.currency ||
-        "eur";
+// ✅ Features are included in the plan now — always 0 in billing/overview.
+const featuresAmountCents = 0;
 
-      if (featuresAmountCents == null) {
-        const pricing = await computeBotPricingForBot(
-          botToFeatureFlags({
-            useDomainCrawler: bot.useDomainCrawler,
-            usePdfCrawler: bot.usePdfCrawler,
-            channelWeb: bot.channelWeb,
-            channelWhatsapp: bot.channelWhatsapp,
-            channelMessenger: bot.channelMessenger,
-            channelInstagram: bot.channelInstagram,
-            useCalendar: bot.useCalendar,
-            leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
-            leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
-            leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
-  })
-);
-        featuresAmountCents = pricing.totalAmountCents;
-        currency = pricing.currency;
-      }
+// Plan amount: prefer snapshot pt, else DB usagePlan
+let planAmountCents: number | null =
+  typeof snap?.pt === "number"
+    ? snap.pt
+    : usagePlan?.monthlyAmountCents ?? null;
 
-      if (planAmountCents == null && usagePlan) {
-        planAmountCents = usagePlan.monthlyAmountCents;
-      }
+// Currency: snapshot > subscription > usagePlan > default
+const currency: string =
+  (snap?.c as string | undefined) ||
+  sub.currency ||
+  usagePlan?.currency ||
+  "eur";
 
-      if (totalAmountCents == null) {
-        totalAmountCents =
-          (featuresAmountCents || 0) + (planAmountCents || 0);
-      }
+// ✅ Total must be PLAN ONLY.
+// Even if old snapshots had t/fp that included feature add-ons, we ignore them.
+if (planAmountCents == null && usagePlan) {
+  planAmountCents = usagePlan.monthlyAmountCents;
+}
+
+const totalAmountCents = planAmountCents ?? 0;
 
       const totalMonthlyAmountCents = totalAmountCents || 0;
       const totalMonthlyAmountFormatted = formatAmountForUi(
@@ -178,8 +160,8 @@ router.get("/billing/overview", async (req, res) => {
         currency,
         totalMonthlyAmountCents,
         totalMonthlyAmountFormatted,
-        featuresAmountCents: featuresAmountCents || 0,
-        planAmountCents: planAmountCents || 0,
+        featuresAmountCents,
+        planAmountCents: planAmountCents ?? 0,
         usagePlanId: usagePlan?.id ?? null,
         usagePlanName: usagePlan?.name ?? null,
         usagePlanCode: usagePlan?.code ?? null,
@@ -409,17 +391,13 @@ router.get("/usage-plans", async (_req, res) => {
  */
 router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
   try {
-    if (!stripe) {
-      return res.status(500).json({ error: "Stripe is not configured" });
-    }
+    if (!stripe) return res.status(500).json({ error: "Stripe is not configured" });
 
     const botId = req.params.id;
     const userId = (req as any).user.id as string;
     const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
 
-    if (!usagePlanId) {
-      return res.status(400).json({ error: "usagePlanId is required" });
-    }
+    if (!usagePlanId) return res.status(400).json({ error: "usagePlanId is required" });
 
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
@@ -433,35 +411,28 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
     });
     if (!usagePlan) return res.status(404).json({ error: "Usage plan not found" });
     if (!usagePlan.stripePriceId) {
-      return res.status(500).json({
-        error: `Usage plan ${usagePlan.code} has no Stripe price configured`
-      });
+      return res.status(500).json({ error: `Usage plan ${usagePlan.code} has no Stripe price configured` });
     }
 
+    // Keep featureCodes for metadata/snapshot compatibility, but it costs 0 now.
     const featurePricing = await computeBotPricingForBot(
-  botToFeatureFlags({
-    useDomainCrawler: bot.useDomainCrawler,
-    usePdfCrawler: bot.usePdfCrawler,
-    channelWeb: bot.channelWeb,
-    channelWhatsapp: bot.channelWhatsapp,
-    channelMessenger: bot.channelMessenger,
-    channelInstagram: bot.channelInstagram,
-    useCalendar: bot.useCalendar,
-    leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
-    leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
-    leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
-  })
-);
+      botToFeatureFlags({
+        useDomainCrawler: bot.useDomainCrawler,
+        usePdfCrawler: bot.usePdfCrawler,
+        channelWeb: bot.channelWeb,
+        channelWhatsapp: bot.channelWhatsapp,
+        channelMessenger: bot.channelMessenger,
+        channelInstagram: bot.channelInstagram,
+        useCalendar: bot.useCalendar,
+        leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+        leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+        leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+      })
+    );
 
-    if (featurePricing.currency !== usagePlan.currency) {
-      return res.status(500).json({
-        error: `Currency mismatch between features (${featurePricing.currency}) and plan (${usagePlan.currency})`
-      });
-    }
-
-    const totalAmountCents =
-      featurePricing.totalAmountCents + usagePlan.monthlyAmountCents;
-    const currency = featurePricing.currency;
+    // ✅ total is PLAN ONLY now
+    const totalAmountCents = usagePlan.monthlyAmountCents;
+    const currency = usagePlan.currency;
 
     // Referral attribution (cookie-first, optional body override)
     const rawReferral =
@@ -503,26 +474,23 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
     const frontendOrigin =
       process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
+    const lineItemsForStripe = [{ price: usagePlan.stripePriceId, quantity: 1 }];
+
     const compactPlanSnapshot = {
       f: featurePricing.featureCodes,
-      fp: featurePricing.totalAmountCents,
+      fp: 0,
       p: usagePlan.code,
       pt: usagePlan.monthlyAmountCents,
       t: totalAmountCents,
       c: currency
     };
 
-    const lineItemsForStripe = [
-      ...featurePricing.lineItemsForStripe,
-      { price: usagePlan.stripePriceId, quantity: 1 }
-    ];
-
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: stripeCustomerId,
       line_items: lineItemsForStripe,
-      success_url: `${frontendOrigin}/app/bots/${bot.id}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${frontendOrigin}/app/bots/${bot.id}?checkout=cancelled`,
+      success_url: `${frontendOrigin}/onboarding/bots/${bot.id}/knowledge?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendOrigin}/onboarding/bots/${bot.id}/plan?checkout=cancelled`,
 
       automatic_tax: { enabled: true },
       billing_address_collection: "required",
@@ -533,7 +501,7 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
         botId,
         userId: bot.userId,
         featureCodes: featurePricing.featureCodes.join(","),
-        featureAmountCents: String(featurePricing.totalAmountCents),
+        featureAmountCents: "0",
         planCode: usagePlan.code,
         planId: usagePlan.id,
         planAmountCents: String(usagePlan.monthlyAmountCents),

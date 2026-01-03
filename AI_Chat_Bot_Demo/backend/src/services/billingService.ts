@@ -99,66 +99,15 @@ export async function computeBotPricingForBot(
 ): Promise<BotPricingResult> {
   const featureCodes = getEnabledFeatureCodes(bot);
 
-  if (featureCodes.length === 0) {
-    throw new Error("Cannot compute price: no billable features enabled for bot.");
-  }
-
-  const featurePrices = await prisma.featurePrice.findMany({
-    where: {
-      code: { in: featureCodes },
-      isActive: true
-    }
-  });
-
-  if (featurePrices.length !== featureCodes.length) {
-    const foundCodes = new Set(featurePrices.map((fp) => fp.code));
-    const missing = featureCodes.filter((code) => !foundCodes.has(code));
-    throw new Error(
-      `Missing FeaturePrice configuration for codes: ${missing.join(", ")}`
-    );
-  }
-
-  // Ensure consistent currency
-  const currency = featurePrices[0].currency;
-  const mismatched = featurePrices.find((fp) => fp.currency !== currency);
-  if (mismatched) {
-    throw new Error(
-      "Inconsistent FeaturePrice currency configuration for enabled bot features."
-    );
-  }
-
-  const lineItemsForUi: PricingFeatureLineItem[] = featurePrices.map((fp) => ({
-    code: fp.code as FeatureCode,
-    label: fp.label,
-    monthlyAmountCents: fp.monthlyAmountCents,
-    monthlyAmountFormatted: formatAmount(fp.monthlyAmountCents, fp.currency),
-    currency: fp.currency,
-    stripePriceId: fp.stripePriceId
-  }));
-
-  const totalAmountCents = featurePrices.reduce(
-    (sum, fp) => sum + fp.monthlyAmountCents,
-    0
-  );
-  const totalAmountFormatted = formatAmount(totalAmountCents, currency);
-
-  const lineItemsForStripe = featurePrices.map((fp) => {
-    if (!fp.stripePriceId) {
-      throw new Error(
-        `FeaturePrice ${fp.code} is active but has no stripePriceId configured.`
-      );
-    }
-    return {
-      price: fp.stripePriceId,
-      quantity: 1
-    };
-  });
+  // Feature pricing is removed. Features are included in plans.
+  // We keep the return shape so the rest of the codebase doesn't break.
+  const currency = "eur"; // only used for formatting "0.00"; plan currency is handled elsewhere now.
 
   return {
-    lineItemsForStripe,
-    lineItemsForUi,
-    totalAmountCents,
-    totalAmountFormatted,
+    lineItemsForStripe: [],
+    lineItemsForUi: [],
+    totalAmountCents: 0,
+    totalAmountFormatted: formatAmount(0, currency),
     currency,
     featureCodes
   };
@@ -241,119 +190,58 @@ export async function updateBotSubscriptionForFeatureChange(
   prorationBehavior: Stripe.SubscriptionUpdateParams.ProrationBehavior = "create_prorations"
 ) {
   if (!stripe) return;
-  if (!bot.subscription) return; // no subscription to update
-
-  // Compute desired feature prices
-const pricing = await computeBotPricingForBot(
-  botToFeatureFlags({
-    useDomainCrawler: bot.useDomainCrawler,
-    usePdfCrawler: bot.usePdfCrawler,
-    channelWeb: bot.channelWeb,
-    channelWhatsapp: bot.channelWhatsapp,
-    channelMessenger: bot.channelMessenger,
-    channelInstagram: bot.channelInstagram,
-    useCalendar: bot.useCalendar,
-    leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
-    leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
-    leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
-  })
-);
+  if (!bot.subscription) return;
 
   const stripeSubId = bot.subscription.stripeSubscriptionId;
 
-  // Load Stripe subscription items
   const stripeSub = await stripe.subscriptions.retrieve(stripeSubId, {
     expand: ["items.data.price"]
   });
 
   const existingItems = stripeSub.items.data;
 
-  // Load plan info (if any) from our DB to know the plan priceId
   const dbSub = await prisma.subscription.findUnique({
     where: { id: bot.subscription.id },
     include: { usagePlan: true }
   });
 
-  const planPriceId: string | null =
-    dbSub?.usagePlan?.stripePriceId ?? null;
+  const planPriceId: string | null = dbSub?.usagePlan?.stripePriceId ?? null;
 
-  const featurePriceIds = pricing.lineItemsForStripe.map((li) => li.price);
-  const featurePriceIdSet = new Set(featurePriceIds);
+  // If we can't identify the plan item, do nothing (safer than deleting unknown items).
+  if (!planPriceId) return;
 
-  const items: Stripe.SubscriptionUpdateParams.Item[] = [];
-
-  // 1) Keep / remove existing *feature* items, but preserve the plan item
-  for (const item of existingItems) {
-    const priceId = item.price.id;
-
-    // Plan item: keep as-is (we don't manage it here)
-    if (planPriceId && priceId === planPriceId) {
-      items.push({
-        id: item.id,
-        quantity: item.quantity ?? 1 // keep current qty (usually 1)
-      });
-      continue;
-    }
-
-    // Feature item: keep if still desired, else delete
-    if (featurePriceIdSet.has(priceId)) {
-      items.push({
-        id: item.id,
-        price: priceId,
-        quantity: 1
-      });
-    } else {
-      items.push({
-        id: item.id,
-        deleted: true
-      });
-    }
+  const hasNonPlanItems = existingItems.some((i) => i.price.id !== planPriceId);
+  if (!hasNonPlanItems) {
+    // Already plan-only; no Stripe update needed.
+    return;
   }
 
-  // 2) Add new feature price items not present yet
-  const existingFeaturePriceSet = new Set(
-    existingItems
-      .map((i) => i.price.id)
-      .filter((pid) => !planPriceId || pid !== planPriceId)
-  );
-
-  for (const priceId of featurePriceIds) {
-    if (!existingFeaturePriceSet.has(priceId)) {
-      items.push({
-        price: priceId,
-        quantity: 1
-      });
+  const items: Stripe.SubscriptionUpdateParams.Item[] = existingItems.map((item) => {
+    if (item.price.id === planPriceId) {
+      return { id: item.id, quantity: item.quantity ?? 1 };
     }
-  }
-
-  // 3) Update subscription on Stripe with proration
-  const updatedStripeSub = await stripe.subscriptions.update(stripeSubId, {
-    items,
-    proration_behavior: prorationBehavior,
-    metadata: {
-      botId: bot.id,
-      userId: String(bot.userId)
-    }
+    return { id: item.id, deleted: true };
   });
 
-  const primaryItem = updatedStripeSub.items.data[0];
-  const currency = primaryItem?.price?.currency ?? pricing.currency;
+  await stripe.subscriptions.update(stripeSubId, {
+    items,
+    proration_behavior: prorationBehavior,
+    metadata: { botId: bot.id, userId: String(bot.userId) }
+  });
 
-  const compactPlanSnapshot = {
-    f: pricing.featureCodes,
-    fp: pricing.totalAmountCents,
-    // plan info is stored separately on Subscription via usagePlanId
-    c: currency
-  };
-
+  // snapshot: features are included => fp is always 0
   await prisma.subscription.update({
     where: { id: bot.subscription.id },
     data: {
-      currency,
-      planSnapshotJson: compactPlanSnapshot
+      planSnapshotJson: {
+        f: [],  // optional: keep feature codes if you want; fp is what matters
+        fp: 0,
+        c: dbSub!.currency || dbSub!.usagePlan?.currency || "eur"
+      }
     }
   });
 }
+
 
 
 export async function updateBotSubscriptionForUsagePlanChange({
@@ -402,68 +290,42 @@ export async function updateBotSubscriptionForUsagePlanChange({
     throw new Error(`Usage plan ${newPlan.code} has no Stripe price configured`);
   }
 
-  // Compute current features pricing to keep snapshot consistent
-const featurePricing = await computeBotPricingForBot(
-  botToFeatureFlags({
-    useDomainCrawler: bot.useDomainCrawler,
-    usePdfCrawler: bot.usePdfCrawler,
-    channelWeb: bot.channelWeb,
-    channelWhatsapp: bot.channelWhatsapp,
-    channelMessenger: bot.channelMessenger,
-    channelInstagram: bot.channelInstagram,
-    useCalendar: bot.useCalendar,
-    leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
-    leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
-    leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
-  })
-);
+  // (Optional) keep feature codes in snapshot for UI/debug, but NO PRICING
+  const featureCodes = getEnabledFeatureCodes(
+    botToFeatureFlags({
+      useDomainCrawler: bot.useDomainCrawler,
+      usePdfCrawler: bot.usePdfCrawler,
+      channelWeb: bot.channelWeb,
+      channelWhatsapp: bot.channelWhatsapp,
+      channelMessenger: bot.channelMessenger,
+      channelInstagram: bot.channelInstagram,
+      useCalendar: bot.useCalendar,
+      leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+      leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+      leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+    })
+  );
 
-  // Currency consistency between features and plan
-  if (featurePricing.currency !== newPlan.currency) {
-    throw new Error(
-      `Currency mismatch between features (${featurePricing.currency}) and plan (${newPlan.currency})`
-    );
-  }
-
-  // Load Stripe subscription to manipulate items
+  // Load Stripe subscription items
   const stripeSub = await stripe.subscriptions.retrieve(stripeSubId, {
     expand: ["items.data.price"]
   });
 
   const existingItems = stripeSub.items.data;
 
-  const oldPlanPriceId: string | null =
-    dbSub.usagePlan?.stripePriceId ?? null;
+  // ✅ Plan-only billing:
+  // delete EVERYTHING currently on the subscription (plan + any feature add-ons),
+  // then add the new plan price as the only item.
+  const items: Stripe.SubscriptionUpdateParams.Item[] = existingItems.map((item) => ({
+    id: item.id,
+    deleted: true
+  }));
 
-  const items: Stripe.SubscriptionUpdateParams.Item[] = [];
-
-  for (const item of existingItems) {
-    const priceId = item.price.id;
-
-    // Old plan item: delete it
-    if (oldPlanPriceId && priceId === oldPlanPriceId) {
-      items.push({
-        id: item.id,
-        deleted: true
-      });
-      continue;
-    }
-
-    // Feature item (or any non-plan item): keep as-is
-    items.push({
-      id: item.id,
-      price: priceId,
-      quantity: item.quantity ?? 1
-    });
-  }
-
-  // Add new plan item
   items.push({
     price: newPlan.stripePriceId,
     quantity: 1
   });
 
-  // Update subscription on Stripe with proration
   const updatedStripeSub = await stripe.subscriptions.update(stripeSubId, {
     items,
     proration_behavior: prorationBehavior,
@@ -475,21 +337,20 @@ const featurePricing = await computeBotPricingForBot(
   });
 
   const primaryItem = updatedStripeSub.items.data[0];
-  const currency = primaryItem?.price?.currency ?? featurePricing.currency;
+  const currency = primaryItem?.price?.currency ?? newPlan.currency;
 
-  const totalAmountCents =
-    featurePricing.totalAmountCents + newPlan.monthlyAmountCents;
+  // ✅ total is PLAN ONLY
+  const totalAmountCents = newPlan.monthlyAmountCents;
 
   const compactPlanSnapshot = {
-    f: featurePricing.featureCodes,           // feature codes
-    fp: featurePricing.totalAmountCents,      // features amount
-    p: newPlan.code,                          // plan code
-    pt: newPlan.monthlyAmountCents,           // plan amount
-    t: totalAmountCents,                      // total
-    c: currency                               // currency
+    f: featureCodes,                 // optional: keep codes
+    fp: 0,                           // ✅ feature price removed
+    p: newPlan.code,
+    pt: newPlan.monthlyAmountCents,
+    t: totalAmountCents,
+    c: currency
   };
 
-  // Persist new plan + snapshot on our side
   await prisma.subscription.update({
     where: { id: dbSub.id },
     data: {

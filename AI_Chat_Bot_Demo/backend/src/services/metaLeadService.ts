@@ -98,7 +98,6 @@ if (!bot.channelWhatsapp || !limit) {
     where: {
       botId: bot.id,
       pageId,
-      formId: formId ?? undefined,
       enabled: true
     }
   });

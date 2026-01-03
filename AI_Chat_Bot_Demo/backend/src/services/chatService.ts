@@ -22,6 +22,7 @@ import {
   getConversationMemorySummary,
   maybeUpdateConversationMemorySummary
 } from "./conversationAnalyticsService";
+import { ensureBotHasTokens } from "./planUsageService";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
@@ -327,6 +328,17 @@ export async function generateBotReplyForSlug(
     );
   }
 
+  // 🔐 NEW: token quota gate before doing any expensive work
+  if (botConfig.botId) {
+    const quota = await ensureBotHasTokens(botConfig.botId, 0);
+    if (!quota.ok) {
+      throw new ChatServiceError(
+        "This assistant has reached its monthly usage limit. Please try again next month or contact the account owner.",
+        429
+      );
+    }
+  }
+
   const message = (rawMessage || "").trim();
   if (!message) {
     throw new ChatServiceError("Message cannot be empty", 400);
@@ -338,7 +350,6 @@ export async function generateBotReplyForSlug(
     );
   }
 
-  // Base usage context (per user/bot) for all OpenAI calls in this request
   const usageBase = {
     userId: botConfig.ownerUserId ?? null,
     botId: botConfig.botId ?? null

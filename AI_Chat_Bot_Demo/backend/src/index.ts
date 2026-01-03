@@ -5,6 +5,10 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
 
+import http from "http";
+import { Server as SocketIOServer } from "socket.io";
+import { verifyAccessToken } from "./services/authService";
+
 import { config } from "./config";
 import authRouter from "./routes/auth";
 import botsRouter from "./routes/bots";
@@ -35,8 +39,54 @@ import adminIntegrationsRouter from "./routes/adminIntegrations";
 import adminPlansRouter from "./routes/adminPlans";
 // NEW: booking reminder scheduler
 import { scheduleBookingReminderJob } from "./services/bookingReminderService";
+import mobileDevicesRouter from "./routes/mobileDevices";
 
 const app = express();
+
+const server = http.createServer(app);
+
+const io = new SocketIOServer(server, {
+  path: "/socket.io",
+  cors: {
+    origin: true,          // reflect Origin header; good for dev
+    credentials: true
+  }
+});
+
+// Authenticate sockets using the same JWT as your HTTP API
+io.use((socket, next) => {
+  const rawToken = socket.handshake.auth?.token as string | undefined;
+  if (!rawToken) {
+    return next(new Error("Unauthorized"));
+  }
+
+  try {
+    const payload = verifyAccessToken(rawToken);
+    (socket as any).userId = payload.sub;
+    return next();
+  } catch {
+    return next(new Error("Unauthorized"));
+  }
+});
+
+io.on("connection", (socket) => {
+  const userId = (socket as any).userId as string | undefined;
+
+  if (userId) {
+    // All sockets for this user join the same room
+    socket.join(`user:${userId}`);
+  }
+
+  console.log("Socket connected", socket.id, "user", userId);
+
+  socket.on("disconnect", () => {
+    console.log("Socket disconnected", socket.id);
+  });
+});
+
+// Make io available to all routes via req.app.get("io")
+app.set("io", io);
+
 
 // IMPORTANT behind proxies (Render/Fly/Nginx/Cloudflare)
 app.set("trust proxy", 1);
@@ -129,6 +179,10 @@ app.use("/api", chatRouter);
 app.use("/webhook/whatsapp", whatsappWebhookRouter);
 app.use("/webhook/meta", metaWebhookRouter);
 
+// Mobile App
+
+app.use("/api", mobileDevicesRouter);
+
 // If you serve static frontend from this service:
 const publicDir = path.join(__dirname, "..", "public");
 app.use(express.static(publicDir));
@@ -155,7 +209,7 @@ app.use(
   }
 );
 
-app.listen(config.port, () => {
+server.listen(config.port, () => {
   console.log(`SaaS bot backend listening on port ${config.port}`);
 });
 

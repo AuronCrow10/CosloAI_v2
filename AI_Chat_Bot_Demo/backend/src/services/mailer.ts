@@ -8,6 +8,10 @@ import {
   getEmailUsageForBot,
   recordEmailUsage
 } from "./emailUsageService";
+import {
+  ensureBotHasTokens,
+  EMAIL_TOKEN_COST
+} from "./planUsageService";
 
 let transporter: nodemailer.Transporter | null = null;
 let smtpConfigChecked = false;
@@ -93,19 +97,24 @@ export async function sendMail(options: SendMailOptions): Promise<void> {
 
 // --- Bot-aware sending with quotas ---
 
-export type SendBotMailResult = {
-  sent: boolean;
-  reason?: "smtp_not_configured" | "quota_exceeded" | "error";
-  error?: unknown;
-  usedThisPeriod?: number;
-  limit?: number | null;
-};
+export type SendBotMailResult =
+  | {
+      sent: true;
+      usedThisPeriod?: number;
+      limit?: number | null;
+    }
+  | {
+      sent: false;
+      reason:
+        | "quota_exceeded"
+        | "smtp_not_configured"
+        | "bot_not_found"
+        | "error";
+      usedThisPeriod?: number;
+      limit?: number | null;
+      error?: unknown;
+    };
 
-/**
- * Bot-aware send function:
- *  - If botId is null/undefined → no quota, just send (still requires SMTP).
- *  - If botId exists → enforces UsagePlan.monthlyEmails per calendar month.
- */
 export async function sendBotMail(params: {
   botId: string | null | undefined;
   kind: EmailUsageKind;
@@ -114,18 +123,16 @@ export async function sendBotMail(params: {
   text?: string;
   html?: string;
 }): Promise<SendBotMailResult> {
-  const transport = getTransporter();
-  if (!transport) {
-    console.warn(
-      "[Mailer] sendBotMail called but SMTP is not configured. Skipping.",
-      { to: params.to, subject: params.subject }
-    );
-    return { sent: false, reason: "smtp_not_configured" };
-  }
+  try {
+    const transport = getTransporter();
+    if (!transport) {
+      console.warn(
+        "[Mailer] Skipping email send because SMTP is not configured."
+      );
+      return { sent: false, reason: "smtp_not_configured" };
+    }
 
-  // Bots without a DB record (e.g. static demo bots)
-  // → send email without quotas, but still log a warning for clarity.
-  if (!params.botId) {
+    if (!params.botId) {
     try {
       await sendMail({
         to: params.to,
@@ -140,7 +147,6 @@ export async function sendBotMail(params: {
     }
   }
 
-  try {
     const bot = await prisma.bot.findUnique({
       where: { id: params.botId },
       include: {
@@ -153,33 +159,16 @@ export async function sendBotMail(params: {
     });
 
     if (!bot) {
-      console.error(
-        "[Mailer] sendBotMail: Bot not found for botId",
-        params.botId
-      );
-      // Fallback: send without quota so we don't silently lose important emails
-      try {
-        await sendMail({
-          to: params.to,
-          subject: params.subject,
-          text: params.text,
-          html: params.html
-        });
-        return { sent: true, limit: null };
-      } catch (err) {
-        console.error(
-          "[Mailer] sendBotMail fallback (no bot) failed",
-          err
-        );
-        return { sent: false, reason: "error", error: err };
-      }
+      console.warn("[Mailer] Bot not found for sendBotMail", {
+        botId: params.botId
+      });
+      return { sent: false, reason: "bot_not_found" };
     }
 
-    const usagePlan = bot.subscription?.usagePlan ?? null;
-    const monthlyEmails = usagePlan?.monthlyEmails ?? null;
+    const monthlyTokens = bot.subscription?.usagePlan?.monthlyTokens ?? null;
 
-    // No plan or no email limit configured => treat as unlimited
-    if (!monthlyEmails || monthlyEmails <= 0) {
+    // If no monthly token limit → no quota check
+    if (!monthlyTokens || monthlyTokens <= 0) {
       await sendMail({
         to: params.to,
         subject: params.subject,
@@ -196,28 +185,24 @@ export async function sendBotMail(params: {
       return { sent: true, limit: null };
     }
 
-    // Calendar-month window (same as billing overview)
-    const now = new Date();
-    const from = new Date(now.getFullYear(), now.getMonth(), 1);
-    const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    // Token-based quota check (emails "cost" EMAIL_TOKEN_COST tokens)
+    const quota = await ensureBotHasTokens(params.botId, EMAIL_TOKEN_COST);
 
-    const emailUsage = await getEmailUsageForBot({
-      botId: params.botId,
-      from,
-      to
-    });
+    if (!quota.ok) {
+      const used = quota.snapshot?.usedTokensTotal ?? 0;
+      const limit = quota.snapshot?.monthlyTokenLimit ?? monthlyTokens;
 
-    if (emailUsage.count >= monthlyEmails) {
-      console.warn("[Mailer] Email quota exceeded for bot", {
+      console.warn("[Mailer] Token quota exceeded for bot (email)", {
         botId: params.botId,
-        used: emailUsage.count,
-        limit: monthlyEmails
+        used,
+        limit
       });
+
       return {
         sent: false,
         reason: "quota_exceeded",
-        usedThisPeriod: emailUsage.count,
-        limit: monthlyEmails
+        usedThisPeriod: used,
+        limit
       };
     }
 
@@ -234,10 +219,13 @@ export async function sendBotMail(params: {
       to: params.to
     });
 
+    const usedAfter =
+      (quota.snapshot?.usedTokensTotal ?? 0) + EMAIL_TOKEN_COST;
+
     return {
       sent: true,
-      usedThisPeriod: emailUsage.count + 1,
-      limit: monthlyEmails
+      usedThisPeriod: usedAfter,
+      limit: quota.snapshot?.monthlyTokenLimit ?? monthlyTokens
     };
   } catch (err) {
     console.error("[Mailer] sendBotMail failed", err);

@@ -1,7 +1,7 @@
 // services/conversationService.ts
 
 import { prisma } from "../prisma/prisma";
-import { ChannelType, MessageRole } from "@prisma/client";
+import { ChannelType, MessageRole, ConversationMode } from "@prisma/client";
 import { ChatMessage } from "../openai/client";
 
 type FindOrCreateConversationArgs = {
@@ -12,7 +12,7 @@ type FindOrCreateConversationArgs = {
 
 type LogMessageArgs = {
   conversationId: string;
-  role: MessageRole | "USER" | "ASSISTANT" | "SYSTEM";
+  role: MessageRole | "USER" | "ASSISTANT" | "SYSTEM" | "HUMAN";
   content: string;
   channelMessageId?: string;
 };
@@ -56,6 +56,7 @@ function normalizeRole(role: LogMessageArgs["role"]): MessageRole {
   if (role === "USER") return MessageRole.USER;
   if (role === "ASSISTANT") return MessageRole.ASSISTANT;
   if (role === "SYSTEM") return MessageRole.SYSTEM;
+  if (role === "HUMAN") return MessageRole.HUMAN;
   // default fallback
   return MessageRole.USER;
 }
@@ -121,7 +122,7 @@ export async function getConversationHistoryAsChatMessages(
     let role: ChatMessage["role"];
     if (m.role === MessageRole.USER) {
       role = "user";
-    } else if (m.role === MessageRole.ASSISTANT) {
+    } else if (m.role === MessageRole.ASSISTANT || m.role === MessageRole.HUMAN) {
       role = "assistant";
     } else {
       // SYSTEM messages from DB are usually not needed as history turns.
@@ -141,4 +142,48 @@ export async function getConversationHistoryAsChatMessages(
 
   // We collected from newest → oldest; reverse to oldest → newest.
   return selected.reverse();
+}
+
+
+export const HUMAN_HANDOFF_MESSAGE =
+  "A human will be here for you shortly.";
+
+const HUMAN_KEYWORDS = [
+  // English
+  "human",
+  "real human",
+  "real person",
+  "live agent",
+  "talk to a human",
+  "talk with a human",
+  "talk to an agent",
+  "talk to a real human",
+  "human please",
+  "operator",
+
+  // Italian
+  "operatore",
+  "parlare con un operatore",
+  "voglio parlare con un operatore",
+  "parlare con operatore",
+  "voglio un operatore",
+  "assistente umano",
+  "operatore umano",
+  "persona reale",
+  "parlare con una persona"
+];
+
+function normalizeText(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+export function shouldSwitchToHumanMode(raw: string): boolean {
+  const text = normalizeText(raw);
+  if (!text) return false;
+
+  // any keyword appearing anywhere is enough
+  return HUMAN_KEYWORDS.some((kw) => text.includes(kw));
 }

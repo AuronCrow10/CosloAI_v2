@@ -5,9 +5,34 @@ import crypto from "crypto";
 import util from "node:util";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
-import { findOrCreateConversation, logMessage } from "../services/conversationService";
+import { findOrCreateConversation, logMessage, HUMAN_HANDOFF_MESSAGE, shouldSwitchToHumanMode } from "../services/conversationService";
 import { generateBotReplyForSlug } from "../services/chatService";
 import { checkConversationRateLimit, buildRateLimitMessage } from "../services/rateLimitService";
+
+import { ConversationMode } from "@prisma/client";
+
+import type { Server as SocketIOServer } from "socket.io";
+import { sendHumanConversationPush } from "../services/pushNotificationService";
+
+
+function emitConversationMessages(
+  io: SocketIOServer | undefined,
+  ownerUserId: string | null,
+  convoId: string,
+  botId: string,
+  ...messages: any[]
+) {
+  if (!io || !ownerUserId) return;
+  for (const m of messages) {
+    if (!m) continue;
+    io.to(`user:${ownerUserId}`).emit("conversation:messageCreated", {
+      conversationId: convoId,
+      botId,
+      message: m
+    });
+  }
+}
+
 
 const router = Router();
 
@@ -219,6 +244,228 @@ router.post("/", async (req: Request, res: Response) => {
             channel: channel.id
           });
 
+          const wantsHuman = shouldSwitchToHumanMode(text);
+
+if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
+  const updated = await prisma.conversation.update({
+    where: { id: convo.id },
+    data: { mode: ConversationMode.HUMAN }
+  });
+
+   const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: messageId
+    });
+    const assistantMsg = await logMessage({
+      conversationId: convo.id,
+      role: "ASSISTANT",
+      content: HUMAN_HANDOFF_MESSAGE
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "WA", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "WA", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
+
+  if (!config.whatsappApiBaseUrl) {
+    logLine("ERROR", "WA", "missing whatsappApiBaseUrl", { req: requestId });
+    // still notify agents that a HUMAN handoff happened
+    try {
+      const io = req.app.get("io") as SocketIOServer | undefined;
+      if (io && bot.userId) {
+        const now = new Date();
+        io.to(`user:${bot.userId}`).emit("conversation:modeChanged", {
+          conversationId: convo.id,
+          botId: convo.botId,
+          mode: updated.mode,
+          channel: convo.channel,
+          lastMessageAt: now,
+          lastUserMessageAt: now
+        });
+      }
+    } catch (err) {
+      logLine("ERROR", "WA", "socket emit failed (WA handoff, no API)", {
+        req: requestId,
+        convo: convo.id
+      });
+      logLine("DEBUG", "WA", "socket emit failed details", {
+        req: requestId,
+        details: err
+      });
+    }
+    continue;
+  }
+
+  const url = `${config.whatsappApiBaseUrl}/${phoneNumberId}/messages`;
+  const accessToken = channel.accessToken || config.whatsappAccessToken;
+
+  if (!accessToken) {
+    logLine("ERROR", "WA", "missing access token", {
+      req: requestId,
+      channel: channel.id
+    });
+
+    // still emit to the app
+    try {
+      const io = req.app.get("io") as SocketIOServer | undefined;
+      if (io && bot.userId) {
+        const now = new Date();
+        io.to(`user:${bot.userId}`).emit("conversation:modeChanged", {
+          conversationId: convo.id,
+          botId: convo.botId,
+          mode: updated.mode,
+          channel: convo.channel,
+          lastMessageAt: now,
+          lastUserMessageAt: now
+        });
+      }
+    } catch (err) {
+      logLine("ERROR", "WA", "socket emit failed (WA handoff, no token)", {
+        req: requestId,
+        convo: convo.id
+      });
+      logLine("DEBUG", "WA", "socket emit failed details", {
+        req: requestId,
+        details: err
+      });
+    }
+
+    continue;
+  }
+
+  try {
+    const resp = await axios.post(
+      url,
+      {
+        messaging_product: "whatsapp",
+        to: userWaId,
+        text: { body: HUMAN_HANDOFF_MESSAGE }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 10000
+      }
+    );
+
+    logLine("INFO", "WA", "reply sent", {
+      req: requestId,
+      type: "HUMAN_HANDOFF",
+      status: resp.status,
+      waMsgId: shortId(extractWaMessageId(resp.data))
+    });
+  } catch (err: unknown) {
+    const n = normalizeAxiosError(err);
+
+    logLine("ERROR", "WA", "reply send failed", {
+      req: requestId,
+      type: "HUMAN_HANDOFF",
+      status: n.status
+    });
+    logLine("DEBUG", "WA", "reply send failed details", {
+      req: requestId,
+      details: n.data
+    });
+
+    if (isWhatsAppAuthError(err)) {
+      await markWhatsAppNeedsReconnect(
+        requestId,
+        channel.id,
+        "handoff_send_auth_error"
+      );
+    }
+  }
+
+  // 🔴 NEW: Socket.IO emit (normal path)
+  try {
+    const io = req.app.get("io") as SocketIOServer | undefined;
+
+    if (io && bot.userId) {
+      const now = new Date();
+      io.to(`user:${bot.userId}`).emit("conversation:modeChanged", {
+        conversationId: convo.id,
+        botId: convo.botId,
+        mode: updated.mode,
+        channel: convo.channel,
+        lastMessageAt: now,
+        lastUserMessageAt: now
+      });
+    }
+  } catch (err) {
+    logLine("ERROR", "WA", "socket emit failed (WA handoff)", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "WA", "socket emit failed details", {
+      req: requestId,
+      details: err
+    });
+  }
+
+            try {
+              await sendHumanConversationPush(bot.userId, {
+                conversationId: convo.id,
+                botId: bot.id,
+                botName: bot.name,
+                channel: "WHATSAPP"
+                });
+            } catch (pushErr) {
+              logLine("ERROR", "WA", "push send failed", {
+                req: requestId,
+                convo: convo.id,
+                error: (pushErr as Error).message
+              });
+            }
+
+  continue;
+}
+
+          if (convo.mode === ConversationMode.HUMAN) {
+  const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: messageId
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "WA", "db log failed", {
+      req: requestId,
+      convo: convo.id
+    });
+    logLine("DEBUG", "WA", "db log failed details", {
+      req: requestId,
+      details: e
+    });
+  }
+
+  logLine("INFO", "WA", "human handoff active, skipping bot reply", {
+    req: requestId,
+    convo: convo.id
+  });
+
+  continue;
+}
+          
+
           const rateResult = await checkConversationRateLimit(convo.id);
           if (rateResult.isLimited) {
             const rateMessage = buildRateLimitMessage(rateResult.retryAfterSeconds);
@@ -229,22 +476,26 @@ router.post("/", async (req: Request, res: Response) => {
               retryAfter: rateResult.retryAfterSeconds
             });
 
-            try {
-              await logMessage({
-                conversationId: convo.id,
-                role: "USER",
-                content: text,
-                channelMessageId: messageId
-              });
-              await logMessage({
-                conversationId: convo.id,
-                role: "ASSISTANT",
-                content: rateMessage
-              });
-            } catch (e: unknown) {
-              logLine("ERROR", "WA", "db log failed", { req: requestId, convo: convo.id });
-              logLine("DEBUG", "WA", "db log failed details", { req: requestId, details: e });
-            }
+            const io = req.app.get("io") as SocketIOServer | undefined;
+
+  try {
+    const userMsg = await logMessage({
+      conversationId: convo.id,
+      role: "USER",
+      content: text,
+      channelMessageId: messageId
+    });
+    const assistantMsg = await logMessage({
+      conversationId: convo.id,
+      role: "ASSISTANT",
+      content: rateMessage
+    });
+
+    emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+  } catch (e: unknown) {
+    logLine("ERROR", "WA", "db log failed", { req: requestId, convo: convo.id });
+    logLine("DEBUG", "WA", "db log failed details", { req: requestId, details: e });
+  }
 
             if (!config.whatsappApiBaseUrl) {
               logLine("ERROR", "WA", "missing whatsappApiBaseUrl", { req: requestId });
@@ -301,22 +552,26 @@ router.post("/", async (req: Request, res: Response) => {
             reply: safeSnippet(reply)
           });
 
-          try {
-            await logMessage({
-              conversationId: convo.id,
-              role: "USER",
-              content: text,
-              channelMessageId: messageId
-            });
-            await logMessage({
-              conversationId: convo.id,
-              role: "ASSISTANT",
-              content: reply
-            });
-          } catch (e: unknown) {
-            logLine("ERROR", "WA", "db log failed", { req: requestId, convo: convo.id });
-            logLine("DEBUG", "WA", "db log failed details", { req: requestId, details: e });
-          }
+          const io = req.app.get("io") as SocketIOServer | undefined;
+
+try {
+  const userMsg = await logMessage({
+    conversationId: convo.id,
+    role: "USER",
+    content: text,
+    channelMessageId: messageId
+  });
+  const assistantMsg = await logMessage({
+    conversationId: convo.id,
+    role: "ASSISTANT",
+    content: reply
+  });
+
+  emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
+} catch (e: unknown) {
+  logLine("ERROR", "WA", "db log failed", { req: requestId, convo: convo.id });
+  logLine("DEBUG", "WA", "db log failed details", { req: requestId, details: e });
+}
 
           if (!config.whatsappApiBaseUrl) {
             logLine("ERROR", "WA", "missing whatsappApiBaseUrl", { req: requestId });

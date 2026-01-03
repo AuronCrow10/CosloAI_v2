@@ -3,6 +3,11 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import { getUsageForBot } from "../services/usageAggregationService";
+import { getEmailUsageForBot } from "../services/emailUsageService";
+import {
+  EMAIL_TOKEN_COST,
+  WHATSAPP_MESSAGE_TOKEN_COST
+} from "../services/planUsageService";
 
 const router = Router();
 
@@ -59,11 +64,6 @@ function computeDateRange(
 }
 
 // GET /api/usage/bots
-// Optional query:
-// - userId: filter bots belonging to a specific owner
-// - limit: max number of bots (default 100)
-// - from / to: date filters
-// - period=month: current month (if from/to omitted)
 router.get("/usage/bots", async (req: Request, res: Response) => {
   try {
     const range = computeDateRange(req, res);
@@ -92,12 +92,52 @@ router.get("/usage/bots", async (req: Request, res: Response) => {
       take: limit
     });
 
+    // For each bot:
+    // - base usage (chat + crawler + analytics)
+    // - email usage (count -> tokens)
+    // - WA lead templates (count -> tokens)
     const usages = await Promise.all(
-      bots.map((bot) => getUsageForBot({ bot, from, to }))
+      bots.map(async (bot) => {
+        const base = await getUsageForBot({ bot, from, to });
+
+        const [emailUsage, leadTemplatesCount] = await Promise.all([
+          getEmailUsageForBot({ botId: bot.id, from, to }),
+          prisma.metaLead.count({
+            where: (() => {
+              const w: any = {
+                botId: bot.id,
+                whatsappStatus: "SENT"
+              };
+              if (from || to) {
+                w.createdAt = {};
+                if (from) w.createdAt.gte = from;
+                if (to) w.createdAt.lt = to;
+              }
+              return w;
+            })()
+          })
+        ]);
+
+        const emailTokens = emailUsage.count * EMAIL_TOKEN_COST;
+        const whatsappTokens =
+          leadTemplatesCount * WHATSAPP_MESSAGE_TOKEN_COST;
+
+        const planTotalTokens =
+          base.totalTokens + emailTokens + whatsappTokens;
+
+        return {
+          ...base,
+          emailCount: emailUsage.count,
+          leadTemplatesCount,
+          emailTokens,
+          whatsappTokens,
+          planTotalTokens
+        };
+      })
     );
 
-    // Sort by totalTokens desc for convenience
-    usages.sort((a, b) => b.totalTokens - a.totalTokens);
+    // Sort by planTotalTokens desc for convenience
+    usages.sort((a, b) => b.planTotalTokens - a.planTotalTokens);
 
     return res.json({
       from: from ? from.toISOString() : null,
@@ -117,6 +157,7 @@ router.get("/usage/bots", async (req: Request, res: Response) => {
 // - limit: max number of users (default 100)
 // - from / to: date filters
 // - period=month
+// GET /api/usage/users
 router.get("/usage/users", async (req: Request, res: Response) => {
   try {
     const range = computeDateRange(req, res);
@@ -138,7 +179,43 @@ router.get("/usage/users", async (req: Request, res: Response) => {
     });
 
     const botUsages = await Promise.all(
-      bots.map((bot) => getUsageForBot({ bot, from, to }))
+      bots.map(async (bot) => {
+        const base = await getUsageForBot({ bot, from, to });
+
+        const [emailUsage, leadTemplatesCount] = await Promise.all([
+          getEmailUsageForBot({ botId: bot.id, from, to }),
+          prisma.metaLead.count({
+            where: (() => {
+              const w: any = {
+                botId: bot.id,
+                whatsappStatus: "SENT"
+              };
+              if (from || to) {
+                w.createdAt = {};
+                if (from) w.createdAt.gte = from;
+                if (to) w.createdAt.lt = to;
+              }
+              return w;
+            })()
+          })
+        ]);
+
+        const emailTokens = emailUsage.count * EMAIL_TOKEN_COST;
+        const whatsappTokens =
+          leadTemplatesCount * WHATSAPP_MESSAGE_TOKEN_COST;
+
+        const planTotalTokens =
+          base.totalTokens + emailTokens + whatsappTokens;
+
+        return {
+          ...base,
+          emailCount: emailUsage.count,
+          leadTemplatesCount,
+          emailTokens,
+          whatsappTokens,
+          planTotalTokens
+        };
+      })
     );
 
     type UserUsage = {
@@ -148,6 +225,9 @@ router.get("/usage/users", async (req: Request, res: Response) => {
       inputTokens: number;
       outputTokens: number;
       totalTokens: number;
+      emailTokens: number;
+      whatsappTokens: number;
+      planTotalTokens: number;
     };
 
     const userMap = new Map<string, UserUsage>();
@@ -160,20 +240,26 @@ router.get("/usage/users", async (req: Request, res: Response) => {
         trainingTokens: 0,
         inputTokens: 0,
         outputTokens: 0,
-        totalTokens: 0
+        totalTokens: 0,
+        emailTokens: 0,
+        whatsappTokens: 0,
+        planTotalTokens: 0
       };
 
       existing.trainingTokens += bu.trainingTokens;
       existing.inputTokens += bu.inputTokens;
       existing.outputTokens += bu.outputTokens;
       existing.totalTokens += bu.totalTokens;
+      existing.emailTokens += bu.emailTokens;
+      existing.whatsappTokens += bu.whatsappTokens;
+      existing.planTotalTokens += bu.planTotalTokens;
 
       userMap.set(key, existing);
     }
 
     let users = Array.from(userMap.values());
-    // Sort by totalTokens desc
-    users.sort((a, b) => b.totalTokens - a.totalTokens);
+    // Sort by planTotalTokens desc
+    users.sort((a, b) => b.planTotalTokens - a.planTotalTokens);
     // Apply limit
     users = users.slice(0, limit);
 

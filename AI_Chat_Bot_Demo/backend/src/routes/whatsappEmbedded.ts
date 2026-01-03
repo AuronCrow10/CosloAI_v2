@@ -62,11 +62,13 @@ router.post(
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      /*
       if (bot.status !== "ACTIVE") {
         return res.status(400).json({
           error: "Bot must be active before connecting WhatsApp"
         });
       }
+      */
 
       // 1) Exchange code -> waAccessToken
       const params: Record<string, string> = {

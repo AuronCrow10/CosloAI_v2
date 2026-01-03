@@ -8,8 +8,10 @@ import {
 } from "../services/conversationAnalyticsService";
 import axios from "axios";
 import { config } from "../config";
-import { logMessage } from "../services/conversationService";
+import { logMessage, HUMAN_HANDOFF_MESSAGE } from "../services/conversationService";
 import { sendGraphText } from "./metaWebhook";
+import { MessageRole, ConversationMode } from "@prisma/client";
+import type { Server as SocketIOServer } from "socket.io";
 
 
 
@@ -187,6 +189,7 @@ router.get(
       channel: c.channel,
       externalUserId: c.externalUserId,
       lastMessageAt: c.lastMessageAt,
+      mode: c.mode,
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
       latestEval: c.evals[0]
@@ -308,6 +311,14 @@ router.get(
       }
     }
 
+
+    const lastUserMessage = await prisma.message.findFirst({
+      where: { conversationId: id, role: MessageRole.USER },
+      orderBy: { createdAt: "desc" }
+    });
+
+    const lastUserMessageAt = lastUserMessage?.createdAt ?? null;
+
     return res.json({
       id: conversation.id,
       botId: conversation.botId,
@@ -315,6 +326,8 @@ router.get(
       externalUserId: conversation.externalUserId,
       createdAt: conversation.createdAt,
       lastMessageAt: conversation.lastMessageAt,
+      lastUserMessageAt,
+      mode: conversation.mode,
       business: {
         title: businessTitle,
         subtitle: businessSubtitle
@@ -326,6 +339,91 @@ router.get(
     });
   }
 );
+
+
+/**
+ * POST /api/conversations/:id/mode
+ *
+ * Body: { mode: "AI" | "HUMAN" }
+ *
+ * Allows an agent to toggle between automatic AI replies and HUMAN handoff.
+ */
+router.post(
+  "/conversations/:id/mode",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { mode } = req.body as { mode?: "AI" | "HUMAN" };
+
+    if (mode !== "AI" && mode !== "HUMAN") {
+      return res.status(400).json({ error: "Invalid mode. Use 'AI' or 'HUMAN'." });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id
+      },
+      include: { bot: true }
+    });
+
+    if (!conversation || conversation.bot.userId !== req.user!.id) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    if (conversation.mode === mode) {
+      return res.json({ ok: true, mode: conversation.mode });
+    }
+
+    const updated = await prisma.conversation.update({
+      where: { id },
+      data: {
+        mode: mode === "HUMAN" ? ConversationMode.HUMAN : ConversationMode.AI
+      }
+    });
+
+    // When switching into HUMAN mode manually, drop the generic handoff message
+    if (mode === "HUMAN") {
+      try {
+        await logMessage({
+          conversationId: conversation.id,
+          role: MessageRole.ASSISTANT,
+          content: HUMAN_HANDOFF_MESSAGE
+        });
+      } catch (err) {
+        console.error("Failed to log HUMAN handoff message", err);
+      }
+    }
+
+    // NEW: emit socket event so the mobile app (and web UI) can react
+    try {
+      const io = req.app.get("io") as SocketIOServer | undefined;
+
+      if (io) {
+        // last USER message timestamp for 24h rule in the mobile app
+        const lastUserMessage = await prisma.message.findFirst({
+          where: { conversationId: conversation.id, role: MessageRole.USER },
+          orderBy: { createdAt: "desc" }
+        });
+
+        const lastUserMessageAt = lastUserMessage?.createdAt ?? null;
+
+        io.to(`user:${conversation.bot.userId}`).emit("conversation:modeChanged", {
+          conversationId: conversation.id,
+          botId: conversation.botId,
+          mode: updated.mode,
+          channel: conversation.channel,
+          lastMessageAt: conversation.lastMessageAt,
+          lastUserMessageAt
+        });
+      }
+    } catch (err) {
+      console.error("Failed to emit conversation:modeChanged", err);
+    }
+
+    return res.json({ ok: true, mode: updated.mode });
+  }
+);
+
 
 
 /**
@@ -434,6 +532,146 @@ router.post(
     }
   }
 );
+
+
+/**
+ * POST /api/conversations/:id/send
+ *
+ * Body: { text: string }
+ *
+ * Sends a manual HUMAN message to the external user for this conversation.
+ * Applies 24h reply window for WhatsApp / FB / IG.
+ */
+router.post(
+  "/conversations/:id/send",
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { text } = req.body as { text?: string };
+
+    const trimmed = (text || "").trim();
+    if (!trimmed) {
+      return res.status(400).json({ error: "Text is required" });
+    }
+
+    // 1) Load conversation + bot for ownership check
+    const conversation = await prisma.conversation.findFirst({
+      where: { id },
+      include: { bot: true }
+    });
+
+    if (!conversation || conversation.bot.userId !== req.user!.id) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    // 2) Enforce 24h window for IG / FB / WhatsApp
+    if (
+      conversation.channel === "WHATSAPP" ||
+      conversation.channel === "FACEBOOK" ||
+      conversation.channel === "INSTAGRAM"
+    ) {
+      const lastUserMessage = await prisma.message.findFirst({
+        where: {
+          conversationId: id,
+          role: MessageRole.USER
+        },
+        orderBy: { createdAt: "desc" }
+      });
+
+      const now = new Date();
+      const threshold = new Date(now.getTime() - 24 * 60 * 60 * 1000); // 24h ago
+
+      const outsideWindow =
+        !lastUserMessage || lastUserMessage.createdAt < threshold;
+
+      if (outsideWindow) {
+        return res.status(400).json({
+          error:
+            "Cannot send manual message: the last user message is more than 24 hours old on this channel. To respect the Meta 24h policy, use an approved template or wait for the user to write again."
+        });
+      }
+    }
+
+    // 3) Same sending logic as test-send, but different requestId + HUMAN role
+    try {
+      if (conversation.channel === "WHATSAPP") {
+        await sendWhatsappTextForConversation(
+          conversation.botId,
+          conversation.externalUserId,
+          trimmed
+        );
+      } else if (
+        conversation.channel === "FACEBOOK" ||
+        conversation.channel === "INSTAGRAM"
+      ) {
+        const channel = await prisma.botChannel.findFirst({
+          where: {
+            botId: conversation.botId,
+            type: conversation.channel
+          }
+        });
+
+        if (!channel) {
+          return res.status(400).json({
+            error: `No ${conversation.channel} channel configured for this bot.`
+          });
+        }
+
+        const meta = (channel.meta as any) || {};
+        let graphTargetId: string | undefined;
+
+        if (conversation.channel === "FACEBOOK") {
+          graphTargetId = meta.pageId || channel.externalId;
+        } else {
+          // For IG, replies go via PAGE ID when using FB login
+          graphTargetId = meta.pageId || channel.externalId;
+        }
+
+        if (!graphTargetId) {
+          return res.status(400).json({
+            error: "Missing graph target id for Meta channel."
+          });
+        }
+
+        const platform = conversation.channel === "FACEBOOK" ? "FB" : "IG";
+
+        const result = await sendGraphText(
+          "manual-send", // requestId for logs (different from "manual-test")
+          platform,
+          channel.id,
+          graphTargetId,
+          conversation.externalUserId,
+          trimmed
+        );
+
+        if (!result.ok) {
+          console.error("Meta manual send failed", result);
+          return res
+            .status(502)
+            .json({ error: "Failed to send message via Meta." });
+        }
+      } else if (conversation.channel === "WEB") {
+        // For WEB we just log the message so it appears in the conversation.
+        // Delivery to the widget would be handled separately (e.g. WebSocket).
+      }
+
+      // 4) Log the HUMAN message in the conversation history
+      await logMessage({
+        conversationId: conversation.id,
+        role: "HUMAN",  // <--- key difference vs test-send
+        content: trimmed
+      });
+
+      return res.json({ ok: true });
+    } catch (err: any) {
+      console.error("Failed to send manual message", err);
+      return res.status(500).json({
+        error:
+          "Failed to send manual message. Check channel configuration and tokens."
+      });
+    }
+  }
+);
+
 
 /**
  * POST /api/conversations/:id/eval
