@@ -48,6 +48,7 @@ type PaymentWithBotLite = {
   periodStart: Date | null;
   periodEnd: Date | null;
   stripeInvoiceId: string | null;
+  kind: "SUBSCRIPTION" | "TOP_UP";
   bot: {
     id: string;
     name: string;
@@ -61,6 +62,34 @@ function formatAmountForUi(amountCents: number, currency: string): string {
     currency: currency.toUpperCase(),
     minimumFractionDigits: 2
   }).format(amountCents / 100);
+}
+
+function getCurrentCalendarMonthRange(): { from: Date; to: Date } {
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth(), 1);
+  const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  return { from, to };
+}
+
+async function getCurrentBillingPeriodRangeForBot(
+  botId: string
+): Promise<{ from: Date; to: Date } | null> {
+  const payment = await prisma.payment.findFirst({
+    where: {
+      botId,
+      kind: "SUBSCRIPTION",
+      status: "paid",
+      periodStart: { not: null },
+      periodEnd: { not: null }
+    },
+    orderBy: { periodStart: "desc" }
+  });
+
+  if (!payment?.periodStart || !payment?.periodEnd) {
+    return null;
+  }
+
+  return { from: payment.periodStart, to: payment.periodEnd };
 }
 
 // Require auth for all /billing/* routes
@@ -86,10 +115,6 @@ router.get("/billing/overview", async (req, res) => {
       }
     });
 
-    const now = new Date();
-    const from = new Date(now.getFullYear(), now.getMonth(), 1);
-    const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
     const subscriptions: any[] = [];
 
     for (const bot of bots) {
@@ -98,15 +123,49 @@ router.get("/billing/overview", async (req, res) => {
 
       const usagePlan = sub.usagePlan ?? null;
 
+      const billingRange =
+        (await getCurrentBillingPeriodRangeForBot(bot.id)) ??
+        getCurrentCalendarMonthRange();
+      const { from, to } = billingRange;
+
+      // Base token usage (OpenAI + knowledge + virtual tokens) for this period
       const usage = await getUsageForBot({ bot, from, to });
       const usedTokens = usage.totalTokens;
-      const monthlyTokens = usagePlan?.monthlyTokens ?? null;
+
+      let monthlyTokens = usagePlan?.monthlyTokens ?? null;
+
+      if (monthlyTokens && monthlyTokens > 0) {
+        const topupPayments = await prisma.payment.findMany({
+          where: {
+            botId: bot.id,
+            kind: "TOP_UP",
+            status: "paid",
+            createdAt: {
+              gte: from,
+              lt: to
+            },
+            topupTokens: { not: null }
+          },
+          select: { topupTokens: true }
+        });
+
+        const extraTokens = topupPayments.reduce(
+          (sum, p) => sum + (p.topupTokens ?? 0),
+          0
+        );
+
+        monthlyTokens += extraTokens;
+      }
+
       const usagePercent =
         monthlyTokens && monthlyTokens > 0
-          ? Math.min(100, Math.round((usedTokens / monthlyTokens) * 100))
+          ? Math.min(
+              100,
+              Math.round((usedTokens / monthlyTokens) * 100)
+            )
           : null;
 
-      // NEW: email usage
+      // Email usage
       const emailUsage = await getEmailUsageForBot({
         botId: bot.id,
         from,
@@ -116,34 +175,61 @@ router.get("/billing/overview", async (req, res) => {
       const monthlyEmails = usagePlan?.monthlyEmails ?? null;
       const emailUsagePercent =
         monthlyEmails && monthlyEmails > 0
-          ? Math.min(100, Math.round((usedEmails / monthlyEmails) * 100))
+          ? Math.min(
+              100,
+              Math.round((usedEmails / monthlyEmails) * 100)
+            )
+          : null;
+
+      // ✅ WhatsApp lead messages usage (only SENT lead templates)
+      const usedWhatsappLeads = await prisma.metaLead.count({
+        where: {
+          botId: bot.id,
+          whatsappStatus: "SENT",
+          createdAt: {
+            gte: from,
+            lt: to
+          }
+        }
+      });
+
+      const monthlyWhatsappLeads =
+        (usagePlan as any)?.monthlyWhatsappLeads ?? null;
+      const whatsappUsagePercent =
+        monthlyWhatsappLeads && monthlyWhatsappLeads > 0
+          ? Math.min(
+              100,
+              Math.round(
+                (usedWhatsappLeads / monthlyWhatsappLeads) * 100
+              )
+            )
           : null;
 
       const snap: any = sub.planSnapshotJson ?? null;
 
-// ✅ Features are included in the plan now — always 0 in billing/overview.
-const featuresAmountCents = 0;
+      // ✅ Features are included in the plan now — always 0 in billing/overview.
+      const featuresAmountCents = 0;
 
-// Plan amount: prefer snapshot pt, else DB usagePlan
-let planAmountCents: number | null =
-  typeof snap?.pt === "number"
-    ? snap.pt
-    : usagePlan?.monthlyAmountCents ?? null;
+      // Plan amount: prefer snapshot pt, else DB usagePlan
+      let planAmountCents: number | null =
+        typeof snap?.pt === "number"
+          ? snap.pt
+          : usagePlan?.monthlyAmountCents ?? null;
 
-// Currency: snapshot > subscription > usagePlan > default
-const currency: string =
-  (snap?.c as string | undefined) ||
-  sub.currency ||
-  usagePlan?.currency ||
-  "eur";
+      // Currency: snapshot > subscription > usagePlan > default
+      const currency: string =
+        (snap?.c as string | undefined) ||
+        sub.currency ||
+        usagePlan?.currency ||
+        "eur";
 
-// ✅ Total must be PLAN ONLY.
-// Even if old snapshots had t/fp that included feature add-ons, we ignore them.
-if (planAmountCents == null && usagePlan) {
-  planAmountCents = usagePlan.monthlyAmountCents;
-}
+      // ✅ Total must be PLAN ONLY.
+      // Even if old snapshots had t/fp that included feature add-ons, we ignore them.
+      if (planAmountCents == null && usagePlan) {
+        planAmountCents = usagePlan.monthlyAmountCents;
+      }
 
-const totalAmountCents = planAmountCents ?? 0;
+      const totalAmountCents = planAmountCents ?? 0;
 
       const totalMonthlyAmountCents = totalAmountCents || 0;
       const totalMonthlyAmountFormatted = formatAmountForUi(
@@ -165,14 +251,21 @@ const totalAmountCents = planAmountCents ?? 0;
         usagePlanId: usagePlan?.id ?? null,
         usagePlanName: usagePlan?.name ?? null,
         usagePlanCode: usagePlan?.code ?? null,
+
+        // Tokens
         monthlyTokens,
         usedTokensThisPeriod: usedTokens,
         usagePercent,
 
-        // NEW: email quota info
+        // Emails
         monthlyEmails,
         usedEmailsThisPeriod: usedEmails,
         emailUsagePercent,
+
+        // ✅ WhatsApp leads
+        monthlyWhatsappLeads,
+        usedWhatsappLeadsThisPeriod: usedWhatsappLeads,
+        whatsappUsagePercent,
 
         periodStart: from,
         periodEnd: to
@@ -186,7 +279,9 @@ const totalAmountCents = planAmountCents ?? 0;
 
     const currency =
       subscriptions[0]?.currency ??
-      (subscriptions.length > 0 ? subscriptions[0].currency : "eur");
+      (subscriptions.length > 0
+        ? subscriptions[0].currency
+        : "eur");
 
     const totalMonthlyAmountFormatted = formatAmountForUi(
       totalMonthlyAmountCents,
@@ -215,7 +310,8 @@ const totalAmountCents = planAmountCents ?? 0;
       createdAt: p.createdAt,
       periodStart: p.periodStart,
       periodEnd: p.periodEnd,
-      hasInvoice: !!p.stripeInvoiceId
+      hasInvoice: !!p.stripeInvoiceId,
+      kind: p.kind
     }));
 
     return res.json({
@@ -226,7 +322,9 @@ const totalAmountCents = planAmountCents ?? 0;
     });
   } catch (err: any) {
     console.error("Failed to fetch billing overview", err);
-    return res.status(500).json({ error: "Failed to load billing overview" });
+    return res
+      .status(500)
+      .json({ error: "Failed to load billing overview" });
   }
 });
 
@@ -641,5 +739,271 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
     return res.status(500).json({ error: "Failed to change usage plan" });
   }
 });
+
+
+router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
+  try {
+    const botId = req.params.id;
+    const userId = (req as any).user.id as string;
+
+    const bot = await prisma.bot.findUnique({
+      where: { id: botId },
+      include: {
+        subscription: {
+          include: { usagePlan: true }
+        }
+      }
+    });
+
+    if (!bot || bot.userId !== userId) {
+      return res.status(404).json({ error: "Bot not found" });
+    }
+
+    const sub = bot.subscription;
+    const usagePlan = sub?.usagePlan ?? null;
+
+    if (!sub || !usagePlan) {
+      return res
+        .status(400)
+        .json({ error: "Bot has no active usage plan for top-ups" });
+    }
+
+    const baseMonthlyTokens = usagePlan.monthlyTokens ?? null;
+    if (!baseMonthlyTokens || baseMonthlyTokens <= 0) {
+      return res.status(400).json({
+        error:
+          "Top-ups are only available for plans with a monthly token limit"
+      });
+    }
+
+    const snap: any = sub.planSnapshotJson ?? null;
+
+    let planAmountCents: number | null =
+      typeof snap?.pt === "number"
+        ? snap.pt
+        : usagePlan.monthlyAmountCents ?? null;
+
+    if (planAmountCents == null) {
+      planAmountCents = usagePlan.monthlyAmountCents;
+    }
+
+    const currency: string =
+      (snap?.c as string | undefined) ||
+      sub.currency ||
+      usagePlan.currency ||
+      "eur";
+
+    const rawOptions = [
+      { code: "TOPUP_10", percentTokens: 10, percentPrice: 20 },
+      { code: "TOPUP_20", percentTokens: 20, percentPrice: 30 },
+      { code: "TOPUP_30", percentTokens: 30, percentPrice: 40 }
+    ] as const;
+
+    const options = rawOptions.map((opt) => {
+      const extraTokens = Math.round(
+        (baseMonthlyTokens * opt.percentTokens) / 100
+      );
+      const priceCents = Math.round(
+        (planAmountCents! * opt.percentPrice) / 100
+      );
+
+      return {
+        code: opt.code,
+        percentTokens: opt.percentTokens,
+        percentPrice: opt.percentPrice,
+        extraTokens,
+        priceCents,
+        priceFormatted: formatAmountForUi(priceCents, currency)
+      };
+    });
+
+    const baseMonthlyAmountCents = planAmountCents!;
+    const baseMonthlyAmountFormatted = formatAmountForUi(
+      baseMonthlyAmountCents,
+      currency
+    );
+
+    return res.json({
+      botId: bot.id,
+      botName: bot.name,
+      usagePlanName: usagePlan.name,
+      currency,
+      baseMonthlyTokens,
+      baseMonthlyAmountCents,
+      baseMonthlyAmountFormatted,
+      options
+    });
+  } catch (err) {
+    console.error("Failed to load top-up options", err);
+    return res.status(500).json({ error: "Failed to load top-up options" });
+  }
+});
+
+
+
+router.post("/bots/:id/topup-checkout", requireAuth, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res
+        .status(500)
+        .json({ error: "Stripe is not configured" });
+    }
+
+    const botId = req.params.id;
+    const userId = (req as any).user.id as string;
+    const { optionCode } = (req.body || {}) as { optionCode?: string };
+
+    if (!optionCode) {
+      return res.status(400).json({ error: "optionCode is required" });
+    }
+
+    const bot = await prisma.bot.findUnique({
+      where: { id: botId },
+      include: {
+        user: true,
+        subscription: {
+          include: { usagePlan: true }
+        }
+      }
+    });
+
+    if (!bot || bot.userId !== userId) {
+      return res.status(404).json({ error: "Bot not found" });
+    }
+
+    const sub = bot.subscription;
+    const usagePlan = sub?.usagePlan ?? null;
+
+    if (!sub || !usagePlan) {
+      return res
+        .status(400)
+        .json({ error: "Bot has no active usage plan for top-ups" });
+    }
+
+    const baseMonthlyTokens = usagePlan.monthlyTokens ?? null;
+    if (!baseMonthlyTokens || baseMonthlyTokens <= 0) {
+      return res.status(400).json({
+        error:
+          "Top-ups are only available for plans with a monthly token limit"
+      });
+    }
+
+    const snap: any = sub.planSnapshotJson ?? null;
+
+    let planAmountCents: number | null =
+      typeof snap?.pt === "number"
+        ? snap.pt
+        : usagePlan.monthlyAmountCents ?? null;
+
+    if (planAmountCents == null) {
+      planAmountCents = usagePlan.monthlyAmountCents;
+    }
+
+    const currency: string =
+      (snap?.c as string | undefined) ||
+      sub.currency ||
+      usagePlan.currency ||
+      "eur";
+
+    const rawOptions = [
+      { code: "TOPUP_10", percentTokens: 10, percentPrice: 20 },
+      { code: "TOPUP_20", percentTokens: 20, percentPrice: 30 },
+      { code: "TOPUP_30", percentTokens: 30, percentPrice: 40 }
+    ] as const;
+
+    const selected = rawOptions.find((o) => o.code === optionCode);
+    if (!selected) {
+      return res.status(400).json({ error: "Invalid top-up option" });
+    }
+
+    const extraTokens = Math.round(
+      (baseMonthlyTokens * selected.percentTokens) / 100
+    );
+    const priceCents = Math.round(
+      (planAmountCents! * selected.percentPrice) / 100
+    );
+
+    // Reuse Stripe customer from subscription
+    let stripeCustomerId = sub.stripeCustomerId;
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: bot.user.email,
+        metadata: { userId: bot.userId }
+      });
+      stripeCustomerId = customer.id;
+
+      await prisma.subscription.update({
+        where: { id: sub.id },
+        data: { stripeCustomerId }
+      });
+    }
+
+    const frontendOrigin =
+      process.env.FRONTEND_ORIGIN || "http://localhost:3000";
+
+    // NOTE: adjust these URLs to whatever route renders your BillingPage
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer: stripeCustomerId,
+      line_items: [
+        {
+          price_data: {
+            currency,
+            product_data: {
+              name: `Token top-up for ${bot.name}`
+            },
+            unit_amount: priceCents
+          },
+          quantity: 1
+        }
+      ],
+      success_url: `${frontendOrigin}/app/billing?topup=success&bot=${bot.id}`,
+      cancel_url: `${frontendOrigin}/app/billing?topup=cancelled&bot=${bot.id}`,
+
+      automatic_tax: { enabled: true },
+      billing_address_collection: "required",
+      customer_update: { address: "auto", name: "auto" },
+      tax_id_collection: { enabled: true },
+
+      metadata: {
+        kind: "TOP_UP",
+        botId,
+        userId: bot.userId,
+        usagePlanId: usagePlan.id,
+        topupCode: selected.code,
+        topupPercentTokens: String(selected.percentTokens),
+        topupPercentPrice: String(selected.percentPrice),
+        topupTokens: String(extraTokens),
+        topupPriceCents: String(priceCents)
+      },
+
+      invoice_creation: {
+        enabled: true,
+        invoice_data: {
+          metadata: {
+            kind: "TOP_UP",
+            botId,
+            userId: bot.userId,
+            usagePlanId: usagePlan.id,
+            topupCode: selected.code,
+            topupPercentTokens: String(selected.percentTokens),
+            topupPercentPrice: String(selected.percentPrice),
+            topupTokens: String(extraTokens),
+            topupPriceCents: String(priceCents)
+          }
+        }
+      }
+    });
+
+    return res.json({ checkoutUrl: session.url });
+  } catch (err) {
+    console.error("Error starting top-up checkout session:", err);
+    return res
+      .status(500)
+      .json({ error: "Unable to start top-up checkout" });
+  }
+});
+
+
 
 export default router;

@@ -181,6 +181,7 @@ model Bot {
 
   metaLeadAutomations MetaLeadAutomation[]
   metaLeads           MetaLead[]
+  planUsageAlerts PlanUsageAlert[]
 
 }
 
@@ -373,6 +374,8 @@ model UsagePlan {
   // Null = unlimited emails.
   monthlyEmails Int?
 
+  monthlyWhatsappLeads Int?
+
   // Billing info
   monthlyAmountCents Int
   currency           String
@@ -384,6 +387,11 @@ model UsagePlan {
   updatedAt DateTime @updatedAt
 
   subscriptions Subscription[]
+}
+
+enum PaymentKind {
+  SUBSCRIPTION
+  TOP_UP
 }
 
 //
@@ -403,6 +411,12 @@ model Payment {
   amountCents Int
   currency    String
   status      String
+
+  // NEW: classify subscription vs top-up
+  kind         PaymentKind @default(SUBSCRIPTION)
+
+  // NEW: for TOP_UP payments, how many extra tokens were purchased
+  topupTokens  Int?
 
   billingEmail       String?
   billingName        String?
@@ -752,5 +766,21 @@ model MobileDevice {
 
   @@index([userId])
   @@index([expoPushToken])
+}
+
+
+model PlanUsageAlert {
+  id        String   @id @default(uuid())
+  botId     String
+  bot       Bot      @relation(fields: [botId], references: [id])
+
+  year      Int      // billing year (UTC)
+  month     Int      // billing month 1-12 (UTC)
+  threshold Int      // 50, 70, 90, 100
+
+  sentAt    DateTime @default(now())
+
+  @@index([botId])
+  @@unique([botId, year, month, threshold], name: "bot_month_threshold_unique")
 }
 

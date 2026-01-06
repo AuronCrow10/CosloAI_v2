@@ -19,7 +19,8 @@ router.use("/dashboard", requireAuth);
 
 /**
  * Given a knowledge usage summary, compute crawler training + search tokens.
- * We use totalTokens here because that's what you pay on (same logic as usageAggregationService).
+ * We use totalTokens here because that's what you pay on
+ * (same logic as usageAggregationService).
  */
 function computeCrawlerTokens(
   knowledge: KnowledgeUsageSummary | null
@@ -53,6 +54,8 @@ function computeCrawlerTokens(
  * - KPIs
  * - Conversations last 10 days per bot
  * - Tokens last 10 days per bot (AI + Knowledge + Email + WA lead templates)
+ * - Token breakdown per day by channel (OpenAI+knowledge / email / WA)
+ * - Token breakdown by bot (OpenAI+knowledge / email / WA) over the last 10 days
  * - Top bots by conversations in last 30 days
  */
 router.get(
@@ -62,11 +65,10 @@ router.get(
 
     const now = new Date();
     const today = startOfDay(now);
-    const tenDaysAgo = subDays(today, 9); // inclusive, 10 days window
+    const tenDaysAgo = subDays(today, 9); // inclusive, 10-day window
     const thirtyDaysAgo = subDays(today, 29);
     const monthStart = startOfMonth(now);
 
-    // Important:
     // We need:
     // - tokens "this month" => monthStart..now
     // - tokens "last 10 days" => tenDaysAgo..now
@@ -196,21 +198,21 @@ router.get(
       )
     ).reduce((sum, v) => sum + v, 0);
 
-    // 👉 Base tokens (AI + Knowledge)
+    // Base tokens (AI + Knowledge)
     const baseTokensThisMonth = aiTokensThisMonth + knowledgeTokensThisMonth;
 
-    // 👉 Virtual tokens for emails & WA lead templates
+    // Virtual tokens for emails & WA lead templates
     const emailTokensThisMonth = totalEmailsThisMonth * EMAIL_TOKEN_COST;
     const whatsappLeadTokensThisMonth =
       totalLeadTemplatesThisMonth * WHATSAPP_MESSAGE_TOKEN_COST;
 
-    // 👉 New plan "total tokens" for this month: AI + Knowledge + Email + WA lead templates
+    // Total "plan tokens" for this month
     const totalTokensThisMonth =
       baseTokensThisMonth +
       emailTokensThisMonth +
       whatsappLeadTokensThisMonth;
 
-    // ----- Plan totals (sum across bots) -----
+    // Plan totals (sum across bots)
     const allowedStatuses = new Set(["ACTIVE", "TRIALING", "PAST_DUE"]);
 
     let monthlyTokensLimit: number | null = 0;
@@ -284,7 +286,8 @@ router.get(
       };
     });
 
- // ----- Tokens last 10 days per bot -----
+    // ----- Tokens last 10 days per bot -----
+
     // 1) AI tokens
     const openAiUsageLast10 = openAiUsageSinceWindowStart.filter(
       (u) => u.createdAt >= tenDaysAgo
@@ -292,13 +295,34 @@ router.get(
 
     const tokensDailyMap = new Map<string, number>(); // `${day}|${botId}` -> tokens
 
-    // NEW: global per-day split maps
-    const baseTokensDaily = new Map<string, number>();      // OpenAI + Knowledge
-    const emailTokensDaily = new Map<string, number>();     // email virtual tokens
-    const whatsappTokensDaily = new Map<string, number>();  // WA template virtual tokens
+    // Global per-day split maps
+    const baseTokensDaily = new Map<string, number>(); // OpenAI + Knowledge
+    const emailTokensDaily = new Map<string, number>(); // email virtual tokens
+    const whatsappTokensDaily = new Map<string, number>(); // WA template virtual tokens
 
-    const bump = (map: Map<string, number>, day: string, amount: number) => {
+    const bumpDay = (
+      map: Map<string, number>,
+      day: string,
+      amount: number
+    ) => {
       map.set(day, (map.get(day) || 0) + amount);
+    };
+
+    // NEW: per-bot totals by channel over the last 10 days
+    type TokenByBotTotals = {
+      openAiTokens: number;
+      emailTokens: number;
+      whatsappTokens: number;
+    };
+    const tokensByBot = new Map<string, TokenByBotTotals>();
+
+    const ensureBotTotals = (botId: string): TokenByBotTotals => {
+      let entry = tokensByBot.get(botId);
+      if (!entry) {
+        entry = { openAiTokens: 0, emailTokens: 0, whatsappTokens: 0 };
+        tokensByBot.set(botId, entry);
+      }
+      return entry;
     };
 
     openAiUsageLast10.forEach((u) => {
@@ -310,7 +334,10 @@ router.get(
       tokensDailyMap.set(key, (tokensDailyMap.get(key) || 0) + u.totalTokens);
 
       // base tokens (OpenAI + Knowledge)
-      bump(baseTokensDaily, dayKey, u.totalTokens);
+      bumpDay(baseTokensDaily, dayKey, u.totalTokens);
+
+      // per-bot OpenAI tokens
+      ensureBotTotals(botId).openAiTokens += u.totalTokens;
     });
 
     // 2) Knowledge tokens (ingest+search), fetched per day
@@ -338,7 +365,10 @@ router.get(
               );
 
               // base tokens (OpenAI + Knowledge)
-              bump(baseTokensDaily, dayKey, crawlerTokens);
+              bumpDay(baseTokensDaily, dayKey, crawlerTokens);
+
+              // per-bot OpenAI+knowledge tokens
+              ensureBotTotals(b.id).openAiTokens += crawlerTokens;
             }
           } catch (err) {
             console.error(
@@ -381,6 +411,8 @@ router.get(
 
     emailUsageLast10.forEach((e) => {
       const botId = e.botId;
+      if (!botId) return;
+
       const dayKey = toDayString(startOfDay(e.createdAt));
       const key = `${dayKey}|${botId}`;
       tokensDailyMap.set(
@@ -388,11 +420,16 @@ router.get(
         (tokensDailyMap.get(key) || 0) + EMAIL_TOKEN_COST
       );
 
-      bump(emailTokensDaily, dayKey, EMAIL_TOKEN_COST);
+      bumpDay(emailTokensDaily, dayKey, EMAIL_TOKEN_COST);
+
+      // per-bot email tokens
+      ensureBotTotals(botId).emailTokens += EMAIL_TOKEN_COST;
     });
 
     waLeadsLast10.forEach((lead) => {
       const botId = lead.botId;
+      if (!botId) return;
+
       const dayKey = toDayString(startOfDay(lead.createdAt));
       const key = `${dayKey}|${botId}`;
       tokensDailyMap.set(
@@ -400,7 +437,10 @@ router.get(
         (tokensDailyMap.get(key) || 0) + WHATSAPP_MESSAGE_TOKEN_COST
       );
 
-      bump(whatsappTokensDaily, dayKey, WHATSAPP_MESSAGE_TOKEN_COST);
+      bumpDay(whatsappTokensDaily, dayKey, WHATSAPP_MESSAGE_TOKEN_COST);
+
+      // per-bot WA tokens
+      ensureBotTotals(botId).whatsappTokens += WHATSAPP_MESSAGE_TOKEN_COST;
     });
 
     const tokensSeries = bots.map((bot) => {
@@ -416,85 +456,106 @@ router.get(
       };
     });
 
-    // Build breakdown arrays aligned with `dates`
-    const openAiTokensSplit = dates.map(
-      (day) => baseTokensDaily.get(day) || 0
-    );
-    const emailTokensSplit = dates.map(
-      (day) => emailTokensDaily.get(day) || 0
-    );
-    const whatsappTokensSplit = dates.map(
-      (day) => whatsappTokensDaily.get(day) || 0
-    );
+    const tokensLast10Days = {
+      dates,
+      series: tokensSeries
+    };
 
-    // ----- Top bots by conversations (last 30 days) -----
-    const conversationsByBot = new Map<
+    // Per-day breakdown by channel
+    const tokenBreakdownLast10Days = {
+      dates,
+      openAiTokens: dates.map((d) => baseTokensDaily.get(d) || 0),
+      emailTokens: dates.map((d) => emailTokensDaily.get(d) || 0),
+      whatsappTokens: dates.map((d) => whatsappTokensDaily.get(d) || 0)
+    };
+
+    // NEW: per-bot breakdown by channel over last 10 days (aggregated)
+    const tokenBreakdownByBotLast10Days = Array.from(
+      tokensByBot.entries()
+    ).map(([botId, totals]) => {
+      const botMeta = botMap.get(botId);
+      return {
+        botId,
+        botName: botMeta?.name ?? "Unknown bot",
+        openAiTokens: totals.openAiTokens,
+        emailTokens: totals.emailTokens,
+        whatsappTokens: totals.whatsappTokens
+      };
+    });
+
+    // Sort bots by total plan tokens desc (more active first)
+    tokenBreakdownByBotLast10Days.sort((a, b) => {
+      const totalA = a.openAiTokens + a.emailTokens + a.whatsappTokens;
+      const totalB = b.openAiTokens + b.emailTokens + b.whatsappTokens;
+      return totalB - totalA;
+    });
+
+    // ----- Top bots by conversations in last 30 days -----
+    const botConversationCounts = new Map<
       string,
       { count: number; lastConversationAt: Date | null }
     >();
 
     conversationsLast30.forEach((c) => {
-      const botId = c.botId;
-      if (!botId) return;
-
-      const existing =
-        conversationsByBot.get(botId) || {
+      const entry =
+        botConversationCounts.get(c.botId) || {
           count: 0,
-          lastConversationAt: null as Date | null
+          lastConversationAt: null
         };
 
-      existing.count += 1;
+      entry.count += 1;
       if (
-        !existing.lastConversationAt ||
-        c.lastMessageAt > existing.lastConversationAt
+        !entry.lastConversationAt ||
+        entry.lastConversationAt < c.lastMessageAt
       ) {
-        existing.lastConversationAt = c.lastMessageAt;
+        entry.lastConversationAt = c.lastMessageAt;
       }
 
-      conversationsByBot.set(botId, existing);
+      botConversationCounts.set(c.botId, entry);
     });
 
     const topBotsByConversationsLast30Days = Array.from(
-      conversationsByBot.entries()
+      botConversationCounts.entries()
     )
-      .map(([botId, info]) => ({
-        botId,
-        botName: botMap.get(botId)?.name ?? "Unknown bot",
-        conversationCount: info.count,
-        lastConversationAt: info.lastConversationAt
-          ? info.lastConversationAt.toISOString()
-          : null
-      }))
+      .map(([botId, info]) => {
+        const bot = botMap.get(botId);
+        return {
+          botId,
+          botName: bot?.name ?? "Unknown bot",
+          conversationCount: info.count,
+          lastConversationAt: info.lastConversationAt
+            ? info.lastConversationAt.toISOString()
+            : null
+        };
+      })
       .sort((a, b) => b.conversationCount - a.conversationCount)
-      .slice(0, 5);
+      .slice(0, 10);
 
-    // ----- Final response -----
-    res.json({
-      kpis: {
-        totalBots,
-        activeBots,
-        totalConversationsLast30Days,
-        totalTokensThisMonth, // now includes AI + Knowledge + Email + WA lead templates
-        monthlyTokensLimit,
-        tokensUsagePercent,
-        totalEmailsThisMonth,
-        monthlyEmailsLimit,
-        emailsUsagePercent
-      },
+    // Alias for clarity in KPIs
+    const totalWhatsappLeadsThisMonth = totalLeadTemplatesThisMonth;
+
+    const kpis = {
+      totalBots,
+      activeBots,
+      totalConversationsLast30Days,
+      totalTokensThisMonth,
+      monthlyTokensLimit,
+      tokensUsagePercent,
+      totalEmailsThisMonth,
+      monthlyEmailsLimit,
+      emailsUsagePercent,
+      totalWhatsappLeadsThisMonth
+    };
+
+     res.json({
+      kpis,
       conversationsLast10Days: {
         dates,
         series: conversationsSeries
       },
-      tokensLast10Days: {
-        dates,
-        series: tokensSeries
-      },
-      tokenBreakdownLast10Days: {
-        dates,
-        openAiTokens: openAiTokensSplit,
-        emailTokens: emailTokensSplit,
-        whatsappTokens: whatsappTokensSplit
-      },
+      tokensLast10Days,
+      tokenBreakdownLast10Days,
+      tokenBreakdownByBotLast10Days,
       topBotsByConversationsLast30Days
     });
   }

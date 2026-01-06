@@ -4,8 +4,8 @@ import { prisma } from "../prisma/prisma";
 import { getUsageForBot } from "./usageAggregationService";
 import { getEmailUsageForBot } from "./emailUsageService";
 
-export const EMAIL_TOKEN_COST = 10;
-export const WHATSAPP_MESSAGE_TOKEN_COST = 20;
+export const EMAIL_TOKEN_COST = 400;
+export const WHATSAPP_MESSAGE_TOKEN_COST = 24000;
 
 export type PlanUsageSnapshot = {
   botId: string;
@@ -24,6 +24,29 @@ function getCurrentMonthUtcRange(): { from: Date; to: Date } {
   return { from, to };
 }
 
+
+async function getCurrentBillingPeriodForBot(
+  botId: string
+): Promise<{ from: Date; to: Date } | null> {
+  const payment = await prisma.payment.findFirst({
+    where: {
+      botId,
+      kind: "SUBSCRIPTION",
+      status: "paid",
+      periodStart: { not: null },
+      periodEnd: { not: null }
+    },
+    orderBy: { periodStart: "desc" }
+  });
+
+  if (!payment?.periodStart || !payment?.periodEnd) {
+    return null;
+  }
+
+  return { from: payment.periodStart, to: payment.periodEnd };
+}
+
+
 export async function getPlanUsageForBot(
   botId: string
 ): Promise<PlanUsageSnapshot | null> {
@@ -37,8 +60,11 @@ export async function getPlanUsageForBot(
 
   if (!bot) return null;
 
-  const monthlyTokenLimit = bot.subscription?.usagePlan?.monthlyTokens ?? null;
-  const { from, to } = getCurrentMonthUtcRange();
+  let monthlyTokenLimit =
+    bot.subscription?.usagePlan?.monthlyTokens ?? null;
+
+  const billingRange = await getCurrentBillingPeriodForBot(botId);
+  const { from, to } = billingRange ?? getCurrentMonthUtcRange();
 
   // 1) OpenAI usage (chat + crawler + analytics)
   const agg = await getUsageForBot({
@@ -53,29 +79,42 @@ export async function getPlanUsageForBot(
   const emailUsage = await getEmailUsageForBot({ botId, from, to });
   const emailTokens = emailUsage.count * EMAIL_TOKEN_COST;
 
-  // 3) WhatsApp messages → token-equivalent
-  // assistant messages in WA conversations
-  const [waAssistantCount, leadSentCount] = await Promise.all([
-    prisma.message.count({
-      where: {
-        conversation: { botId, channel: "WHATSAPP" },
-        role: "ASSISTANT",
-        createdAt: { gte: from, lt: to }
-      }
-    }),
-    prisma.metaLead.count({
-      where: {
-        botId,
-        whatsappStatus: "SENT",
-        createdAt: { gte: from, lt: to }
-      }
-    })
-  ]);
+  // 3) WhatsApp lead templates → token-equivalent
+  const leadSentCount = await prisma.metaLead.count({
+    where: {
+      botId,
+      whatsappStatus: "SENT",
+      createdAt: { gte: from, lt: to }
+    }
+  });
 
-  const whatsappCount = waAssistantCount + leadSentCount;
-  const whatsappTokens = whatsappCount * WHATSAPP_MESSAGE_TOKEN_COST;
+  const whatsappTokens = leadSentCount * WHATSAPP_MESSAGE_TOKEN_COST;
 
   const usedTokensTotal = openAITokens + emailTokens + whatsappTokens;
+
+  // Add any paid top-ups for this billing period
+  if (monthlyTokenLimit && monthlyTokenLimit > 0) {
+    const topupPayments = await prisma.payment.findMany({
+      where: {
+        botId,
+        kind: "TOP_UP",
+        status: "paid",
+        createdAt: {
+          gte: from,
+          lt: to
+        },
+        topupTokens: { not: null }
+      },
+      select: { topupTokens: true }
+    });
+
+    const extraTokens = topupPayments.reduce(
+      (sum, p) => sum + (p.topupTokens ?? 0),
+      0
+    );
+
+    monthlyTokenLimit += extraTokens;
+  }
 
   const remainingTokens =
     monthlyTokenLimit && monthlyTokenLimit > 0

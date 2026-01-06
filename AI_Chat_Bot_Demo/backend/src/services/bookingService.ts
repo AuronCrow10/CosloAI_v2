@@ -4,9 +4,9 @@ import { DateTime } from "luxon";
 import { getBotConfigBySlug, BookingConfig } from "../bots/config";
 import {
   createCalendarEvent,
-  checkConflicts,
   updateCalendarEvent,
-  deleteCalendarEvent
+  deleteCalendarEvent,
+  countEventsInRange
 } from "../google/calendar";
 import { prisma } from "../prisma/prisma";
 import { sendBotMail } from "./mailer";
@@ -46,6 +46,13 @@ export interface BookingResult {
 
   confirmationEmailSent?: boolean;
   confirmationEmailError?: string;
+
+  /**
+   * Optional alternative slots (ISO strings) near the requested time.
+   * These are pre-filtered by DB + weekly schedule and, when a calendar is
+   * configured, also checked against Google Calendar conflicts.
+   */
+  suggestedSlots?: string[];
 }
 
 let bookingRequestCounter = 0;
@@ -180,6 +187,196 @@ async function loadBotWeeklySchedule(
   return bot.bookingWeeklySchedule as BookingWeeklySchedule;
 }
 
+
+async function computeSuggestedSlots(options: {
+  requestedStart: DateTime;
+  bookingCfg: NormalizedBookingConfig;
+  botId: string | null;
+  weeklySchedule: BookingWeeklySchedule | null;
+  calendarId: string;
+  shouldCheckCalendarConflicts: boolean;
+}): Promise<string[]> {
+  const {
+    requestedStart,
+    bookingCfg,
+    botId,
+    weeklySchedule,
+    calendarId,
+    shouldCheckCalendarConflicts
+  } = options;
+
+  const {
+    timeZone,
+    defaultDurationMinutes,
+    minLeadHours,
+    maxAdvanceDays,
+    maxSimultaneousBookings
+  } = bookingCfg;
+
+  const now = DateTime.now().setZone(timeZone);
+
+  const duration = defaultDurationMinutes || 30;
+  if (duration <= 0) return [];
+
+  // Search window around the requested time (±4 hours)
+  const SEARCH_HOURS = 4;
+  const windowStart = requestedStart.minus({ hours: SEARCH_HOURS });
+  const windowEnd = requestedStart.plus({ hours: SEARCH_HOURS });
+
+  // Preload overlapping bookings in this window for capacity checks
+  let existing: { start: Date; end: Date }[] = [];
+  if (botId && maxSimultaneousBookings > 0) {
+    existing = await prisma.booking.findMany({
+      where: {
+        botId,
+        status: "ACTIVE",
+        start: { lt: windowEnd.toJSDate() },
+        end: { gt: windowStart.toJSDate() }
+      },
+      select: { start: true, end: true }
+    });
+  }
+
+  const candidates: DateTime[] = [];
+  let cursor = windowStart;
+
+  const maxIterations =
+    Math.ceil(((SEARCH_HOURS * 2 * 60) / duration)) + 2;
+
+  for (let i = 0; i < maxIterations && cursor <= windowEnd; i++) {
+    const candidateStart = cursor;
+    cursor = cursor.plus({ minutes: duration });
+
+    // Skip the original requested time (we already know it's not usable)
+    if (candidateStart.toMillis() === requestedStart.toMillis()) continue;
+
+    const candidateEnd = candidateStart.plus({ minutes: duration });
+
+    // Basic constraints: future only
+    if (candidateStart < now) continue;
+
+    if (minLeadHours !== null && minLeadHours > 0) {
+      const minAllowed = now.plus({ hours: minLeadHours });
+      if (candidateStart < minAllowed) continue;
+    }
+
+    if (maxAdvanceDays !== null && maxAdvanceDays > 0) {
+      const maxAllowed = now.plus({ days: maxAdvanceDays });
+      if (candidateStart > maxAllowed) continue;
+    }
+
+    if (
+      !isWithinWeeklySchedule(
+        candidateStart,
+        duration,
+        weeklySchedule
+      )
+    ) {
+      continue;
+    }
+
+    if (botId && maxSimultaneousBookings > 0) {
+      const overlappingCount = existing.filter((b) => {
+        const bStart = DateTime.fromJSDate(b.start);
+        const bEnd = DateTime.fromJSDate(b.end);
+        return bStart < candidateEnd && bEnd > candidateStart;
+      }).length;
+
+      if (overlappingCount >= maxSimultaneousBookings) {
+        continue;
+      }
+    }
+
+    candidates.push(candidateStart);
+  }
+
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const before = candidates
+    .filter((dt) => dt < requestedStart)
+    .sort((a, b) => a.toMillis() - b.toMillis());
+
+  const after = candidates
+    .filter((dt) => dt >= requestedStart)
+    .sort((a, b) => a.toMillis() - b.toMillis());
+
+  let calendarChecks = 0;
+  const MAX_CALENDAR_CHECKS = 8;
+
+  async function isFreeInCalendar(slotStart: DateTime): Promise<boolean> {
+    if (!shouldCheckCalendarConflicts || !calendarId) {
+      // This bot does not use external conflicts (e.g. no calendar configured)
+      return true;
+    }
+
+    if (calendarChecks >= MAX_CALENDAR_CHECKS) {
+      // Hard cap on external API calls
+      return false;
+    }
+
+    calendarChecks += 1;
+    const slotEnd = slotStart.plus({ minutes: duration });
+
+    try {
+      const gcalEventsCount = await countEventsInRange({
+        calendarId,
+        timeMin: slotStart.toISO()!,
+        timeMax: slotEnd.toISO()!,
+        maxResults: maxSimultaneousBookings
+      });
+
+      // Slot is free in the calendar if it has fewer events than our capacity
+      return gcalEventsCount < maxSimultaneousBookings;
+    } catch (err) {
+      // On error, be conservative: treat as conflict so we don't suggest it.
+      console.error("📅 [Booking] Error checking calendar capacity for suggestion", {
+        calendarId,
+        start: slotStart.toISO(),
+        error: err
+      });
+      return false;
+    }
+  }
+
+  async function pickFirstFree(sortedCandidates: DateTime[]): Promise<DateTime | null> {
+    for (const dt of sortedCandidates) {
+      const free = await isFreeInCalendar(dt);
+      if (free) return dt;
+    }
+    return null;
+  }
+
+  const suggestions: DateTime[] = [];
+
+  const bestBefore = await pickFirstFree([...before].reverse()); // closest before
+  const bestAfter = await pickFirstFree(after);                  // closest after
+
+  if (bestBefore) suggestions.push(bestBefore);
+  if (bestAfter) suggestions.push(bestAfter);
+
+  // If we only have "after", try to get a second "after"
+  if (!bestBefore && suggestions.length < 2 && bestAfter) {
+    const remainingAfter = after.filter(
+      (dt) => dt.toMillis() !== bestAfter.toMillis()
+    );
+    const secondAfter = await pickFirstFree(remainingAfter);
+    if (secondAfter) suggestions.push(secondAfter);
+  }
+
+  // If we only have "before", try to get a second "before"
+  if (!bestAfter && suggestions.length < 2 && bestBefore) {
+    const remainingBefore = [...before]
+      .reverse()
+      .filter((dt) => dt.toMillis() !== bestBefore.toMillis());
+    const secondBefore = await pickFirstFree(remainingBefore);
+    if (secondBefore) suggestions.push(secondBefore);
+  }
+
+  return suggestions.slice(0, 2).map((dt) => dt.toISO()!);
+}
+
 function normalizeBookingConfig(
   raw: BookingConfig | undefined
 ): NormalizedBookingConfig | null {
@@ -308,6 +505,8 @@ export async function handleBookAppointment(
     maxSimultaneousBookings
   } = bookingCfg;
 
+  const shouldCheckCalendarConflicts = !!calendarId;
+
   // Enforce required fields from config
   const missing: string[] = [];
   for (const field of bookingCfg.requiredFields) {
@@ -367,77 +566,117 @@ export async function handleBookAppointment(
   const now = DateTime.now().setZone(timeZone);
 
   if (start < now) {
-    const result: BookingResult = {
-      success: false,
-      errorMessage:
-        "The requested time is in the past. Please choose another time."
-    };
-    console.warn("📅 [Booking] Rejected - time in the past", {
-      requestId,
-      slug,
-      requested: start.toISO(),
-      now: now.toISO()
-    });
-    return result;
-  }
+  const suggestedSlots = await computeSuggestedSlots({
+    requestedStart: start,
+    bookingCfg,
+    botId: botConfig.botId ?? null,
+    weeklySchedule,
+    calendarId,
+    shouldCheckCalendarConflicts
+  });
+
+  const result: BookingResult = {
+    success: false,
+    errorMessage:
+      "The requested time is in the past. Please choose another time.",
+    suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+  };
+  console.warn("📅 [Booking] Rejected - time in the past", {
+    requestId,
+    slug,
+    requested: start.toISO(),
+    now: now.toISO()
+  });
+  return result;
+}
 
   // Enforce bookingMinLeadHours
   if (minLeadHours !== null && minLeadHours > 0) {
-    const minAllowed = now.plus({ hours: minLeadHours });
-    if (start < minAllowed) {
-      const result: BookingResult = {
-        success: false,
-        errorMessage: `Bookings must be made at least ${minLeadHours} hour(s) in advance.`
-      };
-      console.warn("📅 [Booking] Rejected - below min lead hours", {
-        requestId,
-        slug,
-        requested: start.toISO(),
-        minAllowed: minAllowed.toISO(),
-        minLeadHours
-      });
-      return result;
-    }
+  const minAllowed = now.plus({ hours: minLeadHours });
+  if (start < minAllowed) {
+    const suggestedSlots = await computeSuggestedSlots({
+      requestedStart: start,
+      bookingCfg,
+      botId: botConfig.botId ?? null,
+      weeklySchedule,
+      calendarId,
+      shouldCheckCalendarConflicts
+    });
+
+    const result: BookingResult = {
+      success: false,
+      errorMessage: `Bookings must be made at least ${minLeadHours} hour(s) in advance.`,
+      suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+    };
+    console.warn("📅 [Booking] Rejected - below min lead hours", {
+      requestId,
+      slug,
+      requested: start.toISO(),
+      minAllowed: minAllowed.toISO(),
+      minLeadHours
+    });
+    return result;
   }
+}
 
   // Enforce bookingMaxAdvanceDays
   if (maxAdvanceDays !== null && maxAdvanceDays > 0) {
-    const maxAllowed = now.plus({ days: maxAdvanceDays });
-    if (start > maxAllowed) {
-      const result: BookingResult = {
-        success: false,
-        errorMessage: `Bookings cannot be made more than ${maxAdvanceDays} day(s) in advance.`
-      };
-      console.warn("📅 [Booking] Rejected - beyond max advance days", {
-        requestId,
-        slug,
-        requested: start.toISO(),
-        maxAllowed: maxAllowed.toISO(),
-        maxAdvanceDays
-      });
-      return result;
-    }
+  const maxAllowed = now.plus({ days: maxAdvanceDays });
+  if (start > maxAllowed) {
+    const suggestedSlots = await computeSuggestedSlots({
+      requestedStart: start,
+      bookingCfg,
+      botId: botConfig.botId ?? null,
+      weeklySchedule,
+      calendarId,
+      shouldCheckCalendarConflicts
+    });
+
+    const result: BookingResult = {
+      success: false,
+      errorMessage: `Bookings cannot be made more than ${maxAdvanceDays} day(s) in advance.`,
+      suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+    };
+    console.warn("📅 [Booking] Rejected - beyond max advance days", {
+      requestId,
+      slug,
+      requested: start.toISO(),
+      maxAllowed: maxAllowed.toISO(),
+      maxAdvanceDays
+    });
+    return result;
   }
+}
 
   // Enforce weekly opening hours (if configured on the bot)
   if (!isWithinWeeklySchedule(start, defaultDurationMinutes, weeklySchedule)) {
-    const result: BookingResult = {
-      success: false,
-      errorMessage:
-        "That time is outside of the business's opening hours. Please choose another time within the available schedule."
-    };
+  const suggestedSlots = await computeSuggestedSlots({
+    requestedStart: start,
+    bookingCfg,
+    botId: botConfig.botId ?? null,
+    weeklySchedule,
+    calendarId,
+    shouldCheckCalendarConflicts
+  });
 
-    console.warn("📅 [Booking] Rejected - outside opening hours", {
-      requestId,
-      slug,
-      start: start.toISO(),
-      durationMinutes: defaultDurationMinutes,
-      timeZone,
-      weeklyScheduleConfigured: !!weeklySchedule
-    });
+  const result: BookingResult = {
+    success: false,
+    errorMessage:
+      "That time is outside of the business's opening hours. Please choose another time within the available schedule.",
+    suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+  };
 
-    return result;
-  }
+  console.warn("📅 [Booking] Rejected - outside opening hours", {
+    requestId,
+    slug,
+    start: start.toISO(),
+    durationMinutes: defaultDurationMinutes,
+    timeZone,
+    weeklyScheduleConfigured: !!weeklySchedule
+  });
+
+  return result;
+}
 
   const end = start.plus({ minutes: defaultDurationMinutes });
 
@@ -453,21 +692,31 @@ export async function handleBookAppointment(
     });
 
     if (overlappingCount >= maxSimultaneousBookings) {
-      const result: BookingResult = {
-        success: false,
-        errorMessage:
-          "That time slot is fully booked. Please choose another time."
-      };
-      console.warn("📅 [Booking] Rejected - slot at capacity", {
-        slug,
-        botId: botConfig.botId,
-        start: start.toISO(),
-        end: end.toISO(),
-        maxSimultaneousBookings,
-        overlappingCount
-      });
-      return result;
-    }
+  const suggestedSlots = await computeSuggestedSlots({
+    requestedStart: start,
+    bookingCfg,
+    botId: botConfig.botId ?? null,
+    weeklySchedule,
+    calendarId,
+    shouldCheckCalendarConflicts
+  });
+
+  const result: BookingResult = {
+    success: false,
+    errorMessage:
+      "That time slot is fully booked. Please choose another time.",
+    suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+  };
+  console.warn("📅 [Booking] Rejected - slot at capacity", {
+    slug,
+    botId: botConfig.botId,
+    start: start.toISO(),
+    end: end.toISO(),
+    maxSimultaneousBookings,
+    overlappingCount
+  });
+  return result;
+}
   }
 
   console.log("📅 [Booking] Validated booking slot", {
@@ -480,47 +729,68 @@ export async function handleBookAppointment(
     durationMinutes: defaultDurationMinutes
   });
 
+  // Optional: external calendar capacity check (Google Calendar)
+  if (shouldCheckCalendarConflicts && maxSimultaneousBookings > 0) {
+    try {
+      const gcalEventsCount = await countEventsInRange({
+        calendarId,
+        timeMin: start.toISO()!,
+        timeMax: end.toISO()!,
+        // We don't need more than maxSimultaneousBookings events to know it's full
+        maxResults: maxSimultaneousBookings
+      });
 
-  const shouldCheckCalendarConflicts = maxSimultaneousBookings <= 1;
+      // If GCal already has >= maxSimultaneousBookings events in this slot,
+      // we consider the slot fully booked.
+      if (gcalEventsCount >= maxSimultaneousBookings) {
+        const suggestedSlots = await computeSuggestedSlots({
+          requestedStart: start,
+          bookingCfg,
+          botId: botConfig.botId ?? null,
+          weeklySchedule,
+          calendarId,
+          shouldCheckCalendarConflicts
+        });
 
-  // Optional: conflict check
-  if (shouldCheckCalendarConflicts) {
-  try {
-    const hasConflict = await checkConflicts({
-      calendarId,
-      timeMin: start.toISO()!,
-      timeMax: end.toISO()!
-    });
+        const result: BookingResult = {
+          success: false,
+          errorMessage:
+            "That time slot is fully booked. Please choose another time.",
+          suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+        };
 
-    if (hasConflict) {
-      const result: BookingResult = {
-        success: false,
-        errorMessage:
-          "That time appears to be already booked. Please choose another time."
-      };
-      console.warn("📅 [Booking] Conflict detected", {
+        console.warn("📅 [Booking] Rejected - calendar at capacity", {
+          requestId,
+          slug,
+          calendarId,
+          start: start.toISO(),
+          end: end.toISO(),
+          maxSimultaneousBookings,
+          gcalEventsCount
+        });
+
+        return result;
+      }
+
+      console.log("📅 [Booking] Calendar has free capacity for slot", {
         requestId,
         slug,
         calendarId,
         start: start.toISO(),
-        end: end.toISO()
+        end: end.toISO(),
+        maxSimultaneousBookings,
+        gcalEventsCount
       });
-      return result;
+    } catch (err) {
+      console.error("📅 [Booking] Error checking capacity in Google Calendar", {
+        requestId,
+        slug,
+        calendarId,
+        error: err
+      });
+      // Continue anyway; still try to create event
     }
-
-    console.log("📅 [Booking] No conflicts found", {
-      requestId,
-      slug,
-      calendarId
-    });
-  } catch (err) {
-    console.error("📅 [Booking] Error checking conflicts in Google Calendar", {
-      requestId,
-      slug,
-      error: err
-    });
-    // Continue anyway; still try to create event
-  }}
+  }
 
   try {
     const phone = args.phone?.trim() || "";
@@ -707,13 +977,16 @@ export async function handleUpdateAppointment(
   }
 
   const {
-    calendarId,
-    timeZone,
-    defaultDurationMinutes,
-    minLeadHours,
-    maxAdvanceDays,
-    confirmationEmailEnabled
-  } = bookingCfg;
+  calendarId,
+  timeZone,
+  defaultDurationMinutes,
+  minLeadHours,
+  maxAdvanceDays,
+  confirmationEmailEnabled,
+  maxSimultaneousBookings
+} = bookingCfg;
+
+const shouldCheckCalendarConflicts = !!calendarId;
 
   if (!args.email || !args.originalDatetime || !args.newDatetime) {
     return {
@@ -769,77 +1042,165 @@ export async function handleUpdateAppointment(
   const now = DateTime.now().setZone(timeZone);
 
   if (newStart < now) {
-    return {
-      success: false,
-      action: "updated",
-      errorMessage:
-        "The new time is already in the past. Please choose another time."
-    };
-  }
+  const suggestedSlots = await computeSuggestedSlots({
+    requestedStart: newStart,
+    bookingCfg,
+    botId: botConfig.botId ?? null,
+    weeklySchedule,
+    calendarId,
+    shouldCheckCalendarConflicts
+  });
+
+  return {
+    success: false,
+    action: "updated",
+    errorMessage:
+      "The new time is already in the past. Please choose another time.",
+    suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+  };
+}
 
   if (minLeadHours !== null && minLeadHours > 0) {
-    const minAllowed = now.plus({ hours: minLeadHours });
-    if (newStart < minAllowed) {
-      return {
-        success: false,
-        action: "updated",
-        errorMessage: `Bookings must be updated to at least ${minLeadHours} hour(s) in advance.`
-      };
-    }
-  }
+  const minAllowed = now.plus({ hours: minLeadHours });
+  if (newStart < minAllowed) {
+    const suggestedSlots = await computeSuggestedSlots({
+      requestedStart: newStart,
+      bookingCfg,
+      botId: botConfig.botId ?? null,
+      weeklySchedule,
+      calendarId,
+      shouldCheckCalendarConflicts
+    });
 
-  if (maxAdvanceDays !== null && maxAdvanceDays > 0) {
-    const maxAllowed = now.plus({ days: maxAdvanceDays });
-    if (newStart > maxAllowed) {
-      return {
-        success: false,
-        action: "updated",
-        errorMessage: `Bookings cannot be moved more than ${maxAdvanceDays} day(s) in advance.`
-      };
-    }
-  }
-
-  if (!isWithinWeeklySchedule(newStart, defaultDurationMinutes, weeklySchedule)) {
     return {
       success: false,
       action: "updated",
-      errorMessage:
-        "The new time is outside of the business's opening hours. Please choose another time within the available schedule."
+      errorMessage: `Bookings must be updated to at least ${minLeadHours} hour(s) in advance.`,
+      suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
     };
   }
+}
+
+  if (maxAdvanceDays !== null && maxAdvanceDays > 0) {
+  const maxAllowed = now.plus({ days: maxAdvanceDays });
+  if (newStart > maxAllowed) {
+    const suggestedSlots = await computeSuggestedSlots({
+      requestedStart: newStart,
+      bookingCfg,
+      botId: botConfig.botId ?? null,
+      weeklySchedule,
+      calendarId,
+      shouldCheckCalendarConflicts
+    });
+
+    return {
+      success: false,
+      action: "updated",
+      errorMessage: `Bookings cannot be moved more than ${maxAdvanceDays} day(s) in advance.`,
+      suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+    };
+  }
+}
+
+  if (!isWithinWeeklySchedule(newStart, defaultDurationMinutes, weeklySchedule)) {
+  const suggestedSlots = await computeSuggestedSlots({
+    requestedStart: newStart,
+    bookingCfg,
+    botId: botConfig.botId ?? null,
+    weeklySchedule,
+    calendarId,
+    shouldCheckCalendarConflicts
+  });
+
+  return {
+    success: false,
+    action: "updated",
+    errorMessage:
+      "The new time is outside of the business's opening hours. Please choose another time within the available schedule.",
+    suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+  };
+}
 
   const newEnd = newStart.plus({ minutes: defaultDurationMinutes });
 
-  // Conflict check for new slot
-  try {
-    const hasConflict = await checkConflicts({
-      calendarId,
-      timeMin: newStart.toISO()!,
-      timeMax: newEnd.toISO()!
+  if (botConfig.botId && maxSimultaneousBookings > 0) {
+    const overlappingCount = await prisma.booking.count({
+      where: {
+        botId: botConfig.botId,
+        status: "ACTIVE",
+        // overlap condition: existing.start < newEnd && existing.end > newStart
+        start: { lt: newEnd.toJSDate() },
+        end: { gt: newStart.toJSDate() }
+      }
     });
 
-    if (hasConflict) {
-      console.warn("📅 [Booking] Update conflict detected", {
-        requestId,
-        slug,
+    if (overlappingCount >= maxSimultaneousBookings) {
+      const suggestedSlots = await computeSuggestedSlots({
+        requestedStart: newStart,
+        bookingCfg,
+        botId: botConfig.botId ?? null,
+        weeklySchedule,
         calendarId,
-        newStart: newStart.toISO(),
-        newEnd: newEnd.toISO()
+        shouldCheckCalendarConflicts
       });
+
       return {
         success: false,
         action: "updated",
         errorMessage:
-          "The new time appears to be already booked. Please choose another time."
+          "That time slot is fully booked. Please choose another time.",
+        suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
     }
-  } catch (err) {
-    console.error("📅 [Booking] Error checking conflicts for update", {
-      requestId,
-      slug,
-      calendarId,
-      error: err
-    });
+  }
+
+  // Check external calendar capacity for the new slot (Google Calendar)
+  if (shouldCheckCalendarConflicts && maxSimultaneousBookings > 0) {
+    try {
+      const gcalEventsCount = await countEventsInRange({
+        calendarId,
+        timeMin: newStart.toISO()!,
+        timeMax: newEnd.toISO()!,
+        maxResults: maxSimultaneousBookings
+      });
+
+      if (gcalEventsCount >= maxSimultaneousBookings) {
+        console.warn("📅 [Booking] Update rejected - calendar at capacity", {
+          requestId,
+          slug,
+          calendarId,
+          newStart: newStart.toISO(),
+          newEnd: newEnd.toISO(),
+          maxSimultaneousBookings,
+          gcalEventsCount
+        });
+
+        const suggestedSlots = await computeSuggestedSlots({
+          requestedStart: newStart,
+          bookingCfg,
+          botId: botConfig.botId ?? null,
+          weeklySchedule,
+          calendarId,
+          shouldCheckCalendarConflicts
+        });
+
+        return {
+          success: false,
+          action: "updated",
+          errorMessage:
+            "That time slot is fully booked. Please choose another time.",
+          suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
+        };
+      }
+    } catch (err) {
+      console.error("📅 [Booking] Error checking calendar capacity for update", {
+        requestId,
+        slug,
+        calendarId,
+        error: err
+      });
+      // On error we proceed; behaviour stays similar to before (best-effort check)
+    }
   }
 
   // Update calendar event (if we know it)

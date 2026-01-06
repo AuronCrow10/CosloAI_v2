@@ -76,7 +76,7 @@ export async function createCalendarEvent(
   };
 }
 
-// Optional simple conflict checker
+// Optional simple conflict checker (kept for backwards-compat, no longer used by bookingService)
 export async function checkConflicts(params: {
   calendarId: string;
   timeMin: string;
@@ -94,6 +94,31 @@ export async function checkConflicts(params: {
 
   const events = res.data.items || [];
   return events.length > 0;
+}
+
+/**
+ * Count how many events exist in a given time range.
+ * We allow passing maxResults so we don't fetch more than needed
+ * for simultaneous slot capacity checks.
+ */
+export async function countEventsInRange(params: {
+  calendarId: string;
+  timeMin: string;
+  timeMax: string;
+  maxResults?: number;
+}): Promise<number> {
+  const calendar = getCalendarClient();
+
+  const res = await calendar.events.list({
+    calendarId: params.calendarId,
+    timeMin: params.timeMin,
+    timeMax: params.timeMax,
+    singleEvents: true,
+    maxResults: params.maxResults
+  });
+
+  const events = res.data.items || [];
+  return events.length;
 }
 
 export interface UpdateCalendarEventParams {

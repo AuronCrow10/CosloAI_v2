@@ -146,7 +146,7 @@ export async function getConversationHistoryAsChatMessages(
 
 
 export const HUMAN_HANDOFF_MESSAGE =
-  "A human will be here for you shortly.";
+  "Un operatore sarà da te a breve.";
 
 const HUMAN_KEYWORDS = [
   // English

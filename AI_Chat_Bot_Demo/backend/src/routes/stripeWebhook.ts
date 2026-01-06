@@ -193,7 +193,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         break;
       }
 
-      case "invoice.payment_succeeded": {
+            case "invoice.payment_succeeded": {
         const invoice = event.data.object as Stripe.Invoice;
 
         const stripeCustomerId =
@@ -216,7 +216,10 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         const periodStart = period?.start ? new Date(period.start * 1000) : null;
         const periodEnd = period?.end ? new Date(period.end * 1000) : null;
 
-        // Identify bot via subscription record
+        const invoiceMetadata = invoice.metadata || {};
+
+        // Identify bot via subscription record (normal subscription invoices)
+        // or via explicit botId for one-off top-ups
         let botId: string | undefined;
         let subscriptionDbId: string | undefined;
 
@@ -226,15 +229,28 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           });
           botId = dbSub?.botId;
           subscriptionDbId = dbSub?.id;
+        } else if (invoiceMetadata.botId) {
+          botId = invoiceMetadata.botId as string;
         }
 
         if (!botId) {
           console.warn(
-            "invoice.payment_succeeded without identifiable botId",
+            "invoice.payment_succeeded without identifiable botId for invoice",
             stripeInvoiceId
           );
           break;
         }
+
+        const kind =
+          (invoiceMetadata.kind as string | undefined) === "TOP_UP"
+            ? "TOP_UP"
+            : "SUBSCRIPTION";
+
+        const topupTokensRaw = invoiceMetadata.topupTokens as string | undefined;
+        const topupTokens =
+          kind === "TOP_UP" && topupTokensRaw
+            ? parseInt(topupTokensRaw, 10) || 0
+            : null;
 
         const payment = await prisma.payment.create({
           data: {
@@ -250,11 +266,13 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             billingName,
             billingAddressJson: billingAddress ? (billingAddress as any) : undefined,
             periodStart: periodStart ?? undefined,
-            periodEnd: periodEnd ?? undefined
+            periodEnd: periodEnd ?? undefined,
+            kind,
+            topupTokens: topupTokens ?? undefined
           }
         });
 
-        // ✅ Referral commission ledger per paid invoice
+        // ✅ Referral commission ledger per paid invoice (subscription invoices only)
         if (stripeSubscriptionId) {
           const attribution = await prisma.referralAttribution.findUnique({
             where: { stripeSubscriptionId },
@@ -264,7 +282,8 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           if (attribution && attribution.partner.status === "ACTIVE") {
             // Prefer subtotal (pre-tax). If not present, fall back to amount_paid.
             const base =
-              typeof (invoice as any).subtotal === "number" && (invoice as any).subtotal > 0
+              typeof (invoice as any).subtotal === "number" &&
+              (invoice as any).subtotal > 0
                 ? (invoice as any).subtotal
                 : amountCents;
 
@@ -277,9 +296,6 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
               periodStart ?? new Date(invoice.created * 1000)
             );
 
-            // ✅ Avoid tx callback form to prevent implicit-any on `tx`
-            // 1) create commission (idempotent via unique stripeInvoiceId+kind)
-            // 2) upsert payout period and increment
             try {
               await prisma.$transaction([
                 prisma.referralCommission.create({
@@ -333,6 +349,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
 
         break;
       }
+
 
       case "invoice.payment_failed": {
         const invoice = event.data.object as Stripe.Invoice;

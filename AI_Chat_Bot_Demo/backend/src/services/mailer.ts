@@ -12,6 +12,7 @@ import {
   ensureBotHasTokens,
   EMAIL_TOKEN_COST
 } from "./planUsageService";
+import { maybeSendUsageAlertsForBot } from "./planUsageAlertService";
 
 let transporter: nodemailer.Transporter | null = null;
 let smtpConfigChecked = false;
@@ -109,7 +110,8 @@ export type SendBotMailResult =
         | "quota_exceeded"
         | "smtp_not_configured"
         | "bot_not_found"
-        | "error";
+        | "error"
+        | "email_soft_cap_reached";
       usedThisPeriod?: number;
       limit?: number | null;
       error?: unknown;
@@ -165,7 +167,34 @@ export async function sendBotMail(params: {
       return { sent: false, reason: "bot_not_found" };
     }
 
-    const monthlyTokens = bot.subscription?.usagePlan?.monthlyTokens ?? null;
+    const usagePlan = bot.subscription?.usagePlan;
+    const monthlyTokens = usagePlan?.monthlyTokens ?? null;
+    const monthlyEmailCap = usagePlan?.monthlyEmails ?? null;
+
+    // ---- Email soft cap (per bot / per month) ----
+    if (params.botId && monthlyEmailCap && monthlyEmailCap > 0) {
+      const now = new Date();
+      const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const to = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+      );
+
+      const emailUsage = await getEmailUsageForBot({
+        botId: params.botId,
+        from,
+        to
+      });
+
+      if (emailUsage.count >= monthlyEmailCap) {
+        // Soft cap reached → block this send (you can change this to "warn-only" if you prefer)
+        return {
+          sent: false,
+          reason: "email_soft_cap_reached",
+          usedThisPeriod: emailUsage.count,
+          limit: monthlyEmailCap
+        };
+      }
+    }
 
     // If no monthly token limit → no quota check
     if (!monthlyTokens || monthlyTokens <= 0) {
@@ -181,6 +210,10 @@ export async function sendBotMail(params: {
         kind: params.kind,
         to: params.to
       });
+
+      if (params.botId) {
+        void maybeSendUsageAlertsForBot(params.botId);
+      }
 
       return { sent: true, limit: null };
     }
@@ -218,6 +251,10 @@ export async function sendBotMail(params: {
       kind: params.kind,
       to: params.to
     });
+
+    if (params.botId) {
+      void maybeSendUsageAlertsForBot(params.botId);
+    }
 
     const usedAfter =
       (quota.snapshot?.usedTokensTotal ?? 0) + EMAIL_TOKEN_COST;

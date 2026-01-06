@@ -7,6 +7,7 @@ import {
   ensureBotHasTokens,
   WHATSAPP_MESSAGE_TOKEN_COST
 } from "./planUsageService";
+import { maybeSendUsageAlertsForBot } from "./planUsageAlertService";
 
 export async function sendLeadWhatsAppTemplate(
   requestId: string,
@@ -16,6 +17,43 @@ export async function sendLeadWhatsAppTemplate(
   languageCode: string,
   components?: any[]
 ) {
+
+  // ---- WhatsApp lead soft cap (per bot / per month) ----
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId },
+    include: {
+      subscription: {
+        include: { usagePlan: true }
+      }
+    }
+  });
+
+  const whatsappCap =
+    bot?.subscription?.usagePlan?.monthlyWhatsappLeads ?? null;
+
+  if (whatsappCap && whatsappCap > 0) {
+    const now = new Date();
+    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const to = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+    );
+
+    const leadsThisMonth = await prisma.metaLead.count({
+      where: {
+        botId,
+        whatsappStatus: "SENT",
+        createdAt: { gte: from, lt: to }
+      }
+    });
+
+    if (leadsThisMonth >= whatsappCap) {
+      const err: any = new Error("WhatsApp lead soft cap reached");
+      err.code = "WHATSAPP_LEAD_SOFT_CAP_REACHED";
+      err.usedThisPeriod = leadsThisMonth;
+      err.limit = whatsappCap;
+      throw err;
+    }
+  }
   // Token quota check for lead WA messages
   const quota = await ensureBotHasTokens(botId, WHATSAPP_MESSAGE_TOKEN_COST);
   if (!quota.ok) {
@@ -68,6 +106,9 @@ export async function sendLeadWhatsAppTemplate(
       },
       timeout: 10000
     });
+
+    // We only get here on successful send → usage will increase via MetaLead.
+    void maybeSendUsageAlertsForBot(botId);
 
     return resp.data;
   } catch (err) {

@@ -1,7 +1,3 @@
--- seed_usage_plans.sql
--- NOTE: replace the stripePriceId values with your REAL Stripe price IDs
--- before running in production.
-
 BEGIN;
 
 INSERT INTO "UsagePlan" (
@@ -11,6 +7,7 @@ INSERT INTO "UsagePlan" (
   "description",
   "monthlyTokens",
   "monthlyEmails",
+  "monthlyWhatsappLeads",
   "monthlyAmountCents",
   "currency",
   "stripePriceId",
@@ -18,15 +15,32 @@ INSERT INTO "UsagePlan" (
   "createdAt",
   "updatedAt"
 ) VALUES
+  -- FREE plan
+  (
+    gen_random_uuid(),
+    'FREE',
+    'Free',
+    'Get started with a limited free quota.',
+    200000,        -- monthlyTokens (adjust as you like)
+    20,            -- monthlyEmails (or NULL if not used)
+    0,              -- monthlyWhatsappLeads (soft cap, adjust later)
+    0,              -- €0.00
+    'eur',
+    'price_1SlnQBGSx2QSwLkUOFgLsD65',  -- TODO: replace with real Stripe price ID for the free plan
+    TRUE,
+    NOW(),
+    NOW()
+  ),
   -- STARTER plan
   (
     gen_random_uuid(),
     'STARTER',
     'Starter',
     'For small projects and testing.',
-    5000000,      -- monthlyInputTokens
-    1000,       -- monthlyEmails
-    2799,       -- €19.00
+    5000000,        -- monthlyTokens
+    300,           -- monthlyEmails
+    50,              -- monthlyWhatsappLeads
+    2799,           -- €27.99 (check your comment vs amount)
     'eur',
     'price_1SagU9GSx2QSwLkUo1XAOg5n',  -- TODO: replace with real Stripe price ID
     TRUE,
@@ -39,9 +53,10 @@ INSERT INTO "UsagePlan" (
     'GROWTH',
     'Growth',
     'For serious usage across multiple channels.',
-    25000000,     -- monthlyInputTokens
-    5000,
-    8999,       -- €49.00
+    25000000,       -- monthlyTokens
+    1500,           -- monthlyEmails
+    150,              -- monthlyWhatsappLeads
+    8999,           -- €89.99
     'eur',
     'price_1SagWbGSx2QSwLkU0h6ZAYX5',   -- TODO: replace with real Stripe price ID
     TRUE,
@@ -54,9 +69,10 @@ INSERT INTO "UsagePlan" (
     'SCALE',
     'Scale',
     'For high-volume bots in production.',
-    110000000,    -- monthlyInputTokens
-    20000,
-    27999,      -- €129.00
+    110000000,      -- monthlyTokens
+    10000,          -- monthlyEmails
+    1000,              -- monthlyWhatsappLeads
+    27999,          -- €279.99
     'eur',
     'price_1SagZ5GSx2QSwLkUvuDdr17o',    -- TODO: replace with real Stripe price ID
     TRUE,
@@ -69,8 +85,9 @@ INSERT INTO "UsagePlan" (
     'CUSTOM',
     'Custom',
     'For custom limits and enterprise deals.',
-    NULL,       -- monthlyInputTokens
-    NULL,       -- monthlyEmails
+    NULL,           -- monthlyTokens
+    NULL,           -- monthlyEmails
+    NULL,              -- monthlyWhatsappLeads (you can change to NULL if you prefer)
     0,
     'eur',
     NULL,
@@ -84,6 +101,7 @@ SET
   "description"           = EXCLUDED."description",
   "monthlyTokens"         = EXCLUDED."monthlyTokens",
   "monthlyEmails"         = EXCLUDED."monthlyEmails",
+  "monthlyWhatsappLeads"  = EXCLUDED."monthlyWhatsappLeads",
   "monthlyAmountCents"    = EXCLUDED."monthlyAmountCents",
   "currency"              = EXCLUDED."currency",
   "stripePriceId"         = EXCLUDED."stripePriceId",
