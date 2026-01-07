@@ -13,7 +13,6 @@ export type HumanConversationPushPayload = {
   channel: ChannelType;
 };
 
-
 export type UsageAlertPushPayload = {
   botId: string;
   botName: string;
@@ -40,28 +39,21 @@ function formatChannelLabel(channel: ChannelType): string {
 /**
  * Send a push notification to all registered devices for this user
  * when a conversation switches into HUMAN mode.
- *
- * This assumes a MobileDevice model like:
- *
- * model MobileDevice {
- *   id            String   @id @default(cuid())
- *   userId        String
- *   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
- *   expoPushToken String
- *   platform      String   // "ios" | "android"
- *   createdAt     DateTime @default(now())
- *   updatedAt     DateTime @updatedAt
- * }
  */
 export async function sendHumanConversationPush(
   userId: string,
   payload: HumanConversationPushPayload
 ): Promise<void> {
+  console.log("[Push] HUMAN -> called for user", userId, "payload:", payload);
+
   const devices = await prisma.mobileDevice.findMany({
     where: { userId }
   });
 
+  console.log("[Push] HUMAN -> found devices:", devices.length);
+
   if (!devices.length) {
+    console.log("[Push] HUMAN -> no devices, abort");
     return;
   }
 
@@ -77,6 +69,7 @@ export async function sendHumanConversationPush(
         !token.startsWith("ExponentPushToken") &&
         !token.startsWith("ExpoPushToken")
       ) {
+        console.warn("[Push] HUMAN -> skipping invalid token", token);
         return null;
       }
 
@@ -108,23 +101,32 @@ export async function sendHumanConversationPush(
       } => n !== null
     );
 
+  console.log(
+    "[Push] HUMAN -> notifications to send to:",
+    notifications.map((n) => n.to)
+  );
+
   if (!notifications.length) {
+    console.log("[Push] HUMAN -> no valid notifications after filtering");
     return;
   }
 
   try {
-    // Expo supports sending an array of messages in one request
-    await axios.post(EXPO_PUSH_URL, notifications, {
+    const resp = await axios.post(EXPO_PUSH_URL, notifications, {
       headers: {
         "Content-Type": "application/json"
       },
       timeout: 10000
     });
+
+    console.log(
+      "[Push] HUMAN -> Expo response:",
+      JSON.stringify(resp.data, null, 2)
+    );
   } catch (err) {
-    console.error("Failed to send Expo push notifications", err);
+    console.error("[Push] HUMAN -> Failed to send Expo push notifications", err);
   }
 }
-
 
 /**
  * Send a push notification to all registered devices for this user
@@ -134,11 +136,16 @@ export async function sendUsageAlertPushToUser(
   userId: string,
   payload: UsageAlertPushPayload
 ): Promise<void> {
+  console.log("[Push] USAGE -> called for user", userId, "payload:", payload);
+
   const devices = await prisma.mobileDevice.findMany({
     where: { userId }
   });
 
+  console.log("[Push] USAGE -> found devices:", devices.length);
+
   if (!devices.length) {
+    console.log("[Push] USAGE -> no devices, abort");
     return;
   }
 
@@ -168,6 +175,7 @@ export async function sendUsageAlertPushToUser(
         !token.startsWith("ExponentPushToken") &&
         !token.startsWith("ExpoPushToken")
       ) {
+        console.warn("[Push] USAGE -> skipping invalid token", token);
         return null;
       }
 
@@ -203,18 +211,32 @@ export async function sendUsageAlertPushToUser(
       } => n !== null
     );
 
+  console.log(
+    "[Push] USAGE -> notifications to send to:",
+    notifications.map((n) => n.to)
+  );
+
   if (!notifications.length) {
+    console.log("[Push] USAGE -> no valid notifications after filtering");
     return;
   }
 
   try {
-    await axios.post(EXPO_PUSH_URL, notifications, {
+    const resp = await axios.post(EXPO_PUSH_URL, notifications, {
       headers: {
         "Content-Type": "application/json"
       },
       timeout: 10000
     });
+
+    console.log(
+      "[Push] USAGE -> Expo response:",
+      JSON.stringify(resp.data, null, 2)
+    );
   } catch (err) {
-    console.error("Failed to send Expo usage alert push notifications", err);
+    console.error(
+      "[Push] USAGE -> Failed to send Expo usage alert push notifications",
+      err
+    );
   }
 }
