@@ -5,7 +5,7 @@ import { getUsageForBot } from "./usageAggregationService";
 import { getEmailUsageForBot } from "./emailUsageService";
 
 export const EMAIL_TOKEN_COST = 400;
-export const WHATSAPP_MESSAGE_TOKEN_COST = 24000;
+export const WHATSAPP_MESSAGE_TOKEN_COST = 1;
 
 export type PlanUsageSnapshot = {
   botId: string;

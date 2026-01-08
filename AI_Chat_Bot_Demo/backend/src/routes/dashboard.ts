@@ -9,7 +9,8 @@ import {
 } from "../services/knowledgeUsageService";
 import {
   EMAIL_TOKEN_COST,
-  WHATSAPP_MESSAGE_TOKEN_COST
+  WHATSAPP_MESSAGE_TOKEN_COST,
+  getPlanUsageForBot
 } from "../services/planUsageService";
 
 const router = Router();
@@ -162,82 +163,79 @@ router.get(
       })
     );
 
+    const planSnapshots = await Promise.all(
+      botIds.map((botId) => getPlanUsageForBot(botId))
+    );
+
+    // Map botId -> snapshot for easy lookup
+    const planUsageByBot = new Map<
+      string,
+      { monthlyTokenLimit: number | null; usedTokensTotal: number }
+    >();
+
+    for (const snap of planSnapshots) {
+      if (!snap) continue;
+        planUsageByBot.set(snap.botId, {
+        monthlyTokenLimit: snap.monthlyTokenLimit,
+      usedTokensTotal: snap.usedTokensTotal
+    });
+  }
+
+
     // ----- KPIs -----
-    const totalBots = bots.length;
-    const activeBots = bots.filter((b) => b.status === "ACTIVE").length;
-    const totalConversationsLast30Days = conversationsLast30.length;
+const totalBots = bots.length;
+const activeBots = bots.filter((b) => b.status === "ACTIVE").length;
+const totalConversationsLast30Days = conversationsLast30.length;
 
-    // AI tokens this month (filter to monthStart..now)
-    const aiTokensThisMonth = openAiUsageSinceWindowStart
-      .filter((u) => u.createdAt >= monthStart)
-      .reduce((sum, u) => sum + u.totalTokens, 0);
+const allowedStatuses = new Set(["ACTIVE", "TRIALING", "PAST_DUE"]);
 
-    // Knowledge tokens this month (sum ingest + search)
-    const knowledgeBots = bots.filter((b) => !!b.knowledgeClientId);
+let totalTokensThisMonth = 0;
+let monthlyTokensLimit: number | null = 0;
+let monthlyEmailsLimit: number | null = 0;
 
-    const knowledgeTokensThisMonth = (
-      await Promise.all(
-        knowledgeBots.map(async (b) => {
-          try {
-            const summary = await fetchKnowledgeUsageForClient({
-              clientId: b.knowledgeClientId as string,
-              from: monthStart,
-              to: now
-            });
+// Aggregate plan usage snapshots and plan limits across all bots
+for (const bot of bots) {
+  const snap = planUsageByBot.get(bot.id);
+  if (snap) {
+    // OpenAI + knowledge + emails + WhatsApp (current billing period / month)
+    totalTokensThisMonth += snap.usedTokensTotal;
+  }
 
-            return computeCrawlerTokens(summary).totalTokens;
-          } catch (err) {
-            console.error(
-              "Failed to fetch monthly knowledge usage for bot",
-              b.id,
-              err
-            );
-            return 0;
-          }
-        })
-      )
-    ).reduce((sum, v) => sum + v, 0);
+  const sub = subscriptions.find((s) => s.botId === bot.id);
+  if (!sub) continue;
+  if (!allowedStatuses.has(sub.status)) continue;
+  const plan = sub.usagePlan;
+  if (!plan) continue;
 
-    // Base tokens (AI + Knowledge)
-    const baseTokensThisMonth = aiTokensThisMonth + knowledgeTokensThisMonth;
+  // Token limit: use snapshot limit (includes top-ups) when available,
+  // otherwise fall back to the raw plan monthlyTokens
+  if (monthlyTokensLimit !== null) {
+    const limitForBot =
+      (snap && snap.monthlyTokenLimit != null
+        ? snap.monthlyTokenLimit
+        : plan.monthlyTokens) ?? null;
 
-    // Virtual tokens for emails & WA lead templates
-    const emailTokensThisMonth = totalEmailsThisMonth * EMAIL_TOKEN_COST;
-    const whatsappLeadTokensThisMonth =
-      totalLeadTemplatesThisMonth * WHATSAPP_MESSAGE_TOKEN_COST;
-
-    // Total "plan tokens" for this month
-    const totalTokensThisMonth =
-      baseTokensThisMonth +
-      emailTokensThisMonth +
-      whatsappLeadTokensThisMonth;
-
-    // Plan totals (sum across bots)
-    const allowedStatuses = new Set(["ACTIVE", "TRIALING", "PAST_DUE"]);
-
-    let monthlyTokensLimit: number | null = 0;
-    let monthlyEmailsLimit: number | null = 0;
-
-    for (const s of subscriptions) {
-      if (!allowedStatuses.has(s.status)) continue;
-      const plan = s.usagePlan;
-      if (!plan) continue;
-
-      if (monthlyTokensLimit !== null) {
-        if (plan.monthlyTokens == null) monthlyTokensLimit = null;
-        else monthlyTokensLimit += plan.monthlyTokens;
-      }
-
-      if (monthlyEmailsLimit !== null) {
-        if (plan.monthlyEmails == null) monthlyEmailsLimit = null;
-        else monthlyEmailsLimit += plan.monthlyEmails;
-      }
+    if (limitForBot == null) {
+      monthlyTokensLimit = null;
+    } else {
+      monthlyTokensLimit += limitForBot;
     }
+  }
+
+  // Email limit aggregation stays plan-based
+  if (monthlyEmailsLimit !== null) {
+    if (plan.monthlyEmails == null) monthlyEmailsLimit = null;
+    else monthlyEmailsLimit += plan.monthlyEmails;
+  }
+}
 
     const tokensUsagePercent =
       monthlyTokensLimit && monthlyTokensLimit > 0
-        ? (totalTokensThisMonth / monthlyTokensLimit) * 100
-        : null;
+      ? Math.min(100, (totalTokensThisMonth / monthlyTokensLimit) * 100)
+      : null;
+
+
+    const knowledgeBots = bots.filter((b) => !!b.knowledgeClientId);
 
     const emailsUsagePercent =
       monthlyEmailsLimit && monthlyEmailsLimit > 0

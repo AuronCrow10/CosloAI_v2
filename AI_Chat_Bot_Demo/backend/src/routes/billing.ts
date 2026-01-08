@@ -7,7 +7,7 @@ import {
   updateBotSubscriptionForUsagePlanChange,
   botToFeatureFlags
 } from "../services/billingService";
-import { getUsageForBot } from "../services/usageAggregationService";
+import { getPlanUsageForBot } from "../services/planUsageService";
 import { getEmailUsageForBot } from "../services/emailUsageService";
 
 // ✅ Referrals
@@ -66,8 +66,12 @@ function formatAmountForUi(amountCents: number, currency: string): string {
 
 function getCurrentCalendarMonthRange(): { from: Date; to: Date } {
   const now = new Date();
-  const from = new Date(now.getFullYear(), now.getMonth(), 1);
-  const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const from = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+  );
+  const to = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  );
   return { from, to };
 }
 
@@ -128,42 +132,20 @@ router.get("/billing/overview", async (req, res) => {
         getCurrentCalendarMonthRange();
       const { from, to } = billingRange;
 
-      // Base token usage (OpenAI + knowledge + virtual tokens) for this period
-      const usage = await getUsageForBot({ bot, from, to });
-      const usedTokens = usage.totalTokens;
+// Canonical plan usage snapshot (includes OpenAI + knowledge + emails + WhatsApp,
+// and already accounts for paid top-ups in the token limit)
+      const planUsage = await getPlanUsageForBot(bot.id);
 
-      let monthlyTokens = usagePlan?.monthlyTokens ?? null;
+      const usedTokens = planUsage?.usedTokensTotal ?? 0; 
 
-      if (monthlyTokens && monthlyTokens > 0) {
-        const topupPayments = await prisma.payment.findMany({
-          where: {
-            botId: bot.id,
-            kind: "TOP_UP",
-            status: "paid",
-            createdAt: {
-              gte: from,
-              lt: to
-            },
-            topupTokens: { not: null }
-          },
-          select: { topupTokens: true }
-        });
-
-        const extraTokens = topupPayments.reduce(
-          (sum, p) => sum + (p.topupTokens ?? 0),
-          0
-        );
-
-        monthlyTokens += extraTokens;
-      }
+// If snapshot has a limit, prefer that; otherwise fall back to the raw plan
+      let monthlyTokens =
+        planUsage?.monthlyTokenLimit ?? usagePlan?.monthlyTokens ?? null;
 
       const usagePercent =
         monthlyTokens && monthlyTokens > 0
-          ? Math.min(
-              100,
-              Math.round((usedTokens / monthlyTokens) * 100)
-            )
-          : null;
+        ? Math.min(100, Math.round((usedTokens / monthlyTokens) * 100))
+        : null;
 
       // Email usage
       const emailUsage = await getEmailUsageForBot({
@@ -787,6 +769,12 @@ router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
       planAmountCents = usagePlan.monthlyAmountCents;
     }
 
+    if (!planAmountCents || planAmountCents <= 0) {
+      return res.status(400).json({
+        error: "Top-ups are not available for this plan."
+      });
+    }
+
     const currency: string =
       (snap?.c as string | undefined) ||
       sub.currency ||
@@ -897,6 +885,12 @@ router.post("/bots/:id/topup-checkout", requireAuth, async (req, res) => {
 
     if (planAmountCents == null) {
       planAmountCents = usagePlan.monthlyAmountCents;
+    }
+
+    if (!planAmountCents || planAmountCents <= 0) {
+      return res.status(400).json({
+        error: "Top-ups are not available for this plan."
+      });
     }
 
     const currency: string =
