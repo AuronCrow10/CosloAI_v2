@@ -33,7 +33,7 @@
     var hints = hintsAttr
       ? hintsAttr.split("|").map(function (h) { return h.trim(); }).filter(Boolean)
       : [
-          "Hai bisogno di una mano?",
+          "Hai bisogno di una mano PORCO DIO?",
           "Fai una domanda, sono qui 👋",
           "Vuoi un consiglio veloce?",
           "Scrivimi, rispondo subito!"
@@ -60,18 +60,16 @@ launcher.type = "button";
 launcher.style.position = "fixed";
 launcher.style.zIndex = "2147483647";
 
-// BIGGER CIRCLE
-launcher.style.width = "88px";
-launcher.style.height = "88px";
-launcher.style.borderRadius = "50%";
-
-// PURE WHITE BACKGROUND (no more purple)
-launcher.style.backgroundColor = "#ffffff";
+// No circle/background; keep only the image
+launcher.style.width = "auto";
+launcher.style.height = "auto";
+launcher.style.borderRadius = "0";
+launcher.style.backgroundColor = "transparent";
 launcher.style.backgroundImage = "none";
 
 launcher.style.border = "none";
 launcher.style.cursor = "pointer";
-launcher.style.boxShadow = "0 6px 18px rgba(0,0,0,0.18)";
+launcher.style.boxShadow = "none";
 launcher.style.display = "flex";
 launcher.style.alignItems = "center";
 launcher.style.justifyContent = "center";
@@ -91,11 +89,9 @@ if (position === "bottom-left") {
 
 launcher.addEventListener("mouseenter", function () {
   launcher.style.transform = "translateY(-2px) scale(1.04)";
-  launcher.style.boxShadow = "0 10px 26px rgba(0,0,0,0.25)";
 });
 launcher.addEventListener("mouseleave", function () {
   launcher.style.transform = "translateY(0) scale(1)";
-  launcher.style.boxShadow = "0 6px 18px rgba(0,0,0,0.18)";
 });
 
 console.warn(iconUrl);
@@ -104,9 +100,9 @@ if (iconUrl) {
   img.src = iconUrl; // GIF
   img.alt = "Chat bot";
 
-  // MAKE GIF BIGGER BUT WITH ROOM TO JUMP
-  img.style.width = "76%";
-  img.style.height = "76%";
+  // Size the image directly (button stays transparent)
+  img.style.width = "72px";
+  img.style.height = "72px";
   img.style.objectFit = "contain";
 
   // keep it nicely centered, no extra clipping
