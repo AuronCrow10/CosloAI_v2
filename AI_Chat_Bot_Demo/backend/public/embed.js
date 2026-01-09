@@ -15,6 +15,10 @@
   }
 
   function init() {
+    if (window.self !== window.top) {
+      // Prevent embedding the launcher inside the widget iframe
+      return;
+    }
     var script = getConfigScript();
     if (!script) {
       console.warn("[Bot Widget] No config script found (data-bot-slug).");
@@ -33,7 +37,7 @@
     var hints = hintsAttr
       ? hintsAttr.split("|").map(function (h) { return h.trim(); }).filter(Boolean)
       : [
-          "Hai bisogno di una mano PORCO DIO?",
+          "Hai bisogno di una mano ?",
           "Fai una domanda, sono qui 👋",
           "Vuoi un consiglio veloce?",
           "Scrivimi, rispondo subito!"
@@ -101,8 +105,8 @@ if (iconUrl) {
   img.alt = "Chat bot";
 
   // Size the image directly (button stays transparent)
-  img.style.width = "72px";
-  img.style.height = "72px";
+  img.style.width = "100px";
+  img.style.height = "100px";
   img.style.objectFit = "contain";
 
   // keep it nicely centered, no extra clipping
