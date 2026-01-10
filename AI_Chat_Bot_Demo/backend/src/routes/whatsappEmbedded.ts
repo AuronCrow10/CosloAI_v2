@@ -14,6 +14,24 @@ function assertWhatsAppEmbeddedConfigured() {
   }
 }
 
+function resolveWhatsAppRedirectUri(provided?: string): string | null {
+  if (provided) {
+    try {
+      const url = new URL(provided);
+      const frontendOrigin = process.env.FRONTEND_ORIGIN;
+      if (frontendOrigin) {
+        const allowedOrigin = new URL(frontendOrigin).origin;
+        if (url.origin !== allowedOrigin) return null;
+      }
+      return provided;
+    } catch {
+      return null;
+    }
+  }
+
+  return config.whatsappEmbeddedRedirectUri || config.metaRedirectUri || null;
+}
+
 /**
  * STEP 1 – embedded signup callback from JS SDK
  * POST /api/bots/:botId/whatsapp/embedded/complete
@@ -29,7 +47,10 @@ router.post(
   requireAuth,
   async (req: Request, res: Response) => {
     const { botId } = req.params;
-    const { code } = req.body as { code?: string };
+    const { code, redirectUri } = req.body as {
+      code?: string;
+      redirectUri?: string;
+    };
 
     if (!code) {
       return res.status(400).json({ error: "Missing code" });
@@ -71,17 +92,17 @@ router.post(
       */
 
       // 1) Exchange code -> waAccessToken
+      const resolvedRedirectUri = resolveWhatsAppRedirectUri(redirectUri);
+      if (!resolvedRedirectUri) {
+        return res.status(400).json({ error: "Missing or invalid redirectUri" });
+      }
+
       const params: Record<string, string> = {
         client_id: config.metaAppId!,
         client_secret: config.metaAppSecret!,
-        code
+        code,
+        redirect_uri: resolvedRedirectUri
       };
-
-      if (config.whatsappEmbeddedRedirectUri) {
-        params.redirect_uri = config.whatsappEmbeddedRedirectUri;
-      } else if (config.metaRedirectUri) {
-        params.redirect_uri = config.metaRedirectUri;
-      }
 
       const tokenRes = await axios.get(
         "https://graph.facebook.com/v22.0/oauth/access_token",
@@ -114,14 +135,13 @@ router.post(
           target_ids?: string[];
         }>) || [];
 
-      const waScope =
-        granularScopes.find(
-          (g) =>
-            g.scope === "whatsapp_business_messaging" ||
-            g.scope === "whatsapp_business_management"
-        ) || granularScopes[0];
+      const whatsappScopes = granularScopes.filter(
+        (g) =>
+          g.scope === "whatsapp_business_messaging" ||
+          g.scope === "whatsapp_business_management"
+      );
 
-      const wabaId = waScope?.target_ids?.[0];
+      const wabaId = whatsappScopes.flatMap((g) => g.target_ids || [])[0];
 
       if (!wabaId) {
         console.error("No WABA id found in granular_scopes", debugData);
@@ -236,6 +256,32 @@ router.post(
         (selectedPhone.display_phone_number as string | undefined) || null;
       const verifiedName =
         (selectedPhone.verified_name as string | undefined) || null;
+      const graphBaseUrl =
+        config.metaGraphApiBaseUrl || "https://graph.facebook.com/v22.0";
+
+      let tokenExpiresAt: string | null = null;
+      try {
+        const appAccessToken = `${config.metaAppId}|${config.metaAppSecret}`;
+        const debugRes = await axios.get(
+          `${graphBaseUrl}/debug_token`,
+          {
+            params: {
+              input_token: session.waAccessToken,
+              access_token: appAccessToken
+            },
+            timeout: 10000
+          }
+        );
+        const expiresAt = debugRes.data?.data?.expires_at;
+        if (typeof expiresAt === "number") {
+          tokenExpiresAt = new Date(expiresAt * 1000).toISOString();
+        }
+      } catch (err: any) {
+        console.warn(
+          "Failed to debug WhatsApp access token",
+          err?.response?.data || err
+        );
+      }
 
       const botChannel = await prisma.botChannel.upsert({
         where: {
@@ -250,7 +296,8 @@ router.post(
           meta: {
             wabaId: session.wabaId,
             displayPhoneNumber,
-            verifiedName
+            verifiedName,
+            tokenExpiresAt
           }
         },
         create: {
@@ -261,10 +308,31 @@ router.post(
           meta: {
             wabaId: session.wabaId,
             displayPhoneNumber,
-            verifiedName
+            verifiedName,
+            tokenExpiresAt
           }
         }
       });
+
+      if (session.wabaId && session.waAccessToken) {
+        try {
+          await axios.post(
+            `${graphBaseUrl}/${session.wabaId}/subscribed_apps`,
+            null,
+            {
+              params: {
+                access_token: session.waAccessToken
+              },
+              timeout: 10000
+            }
+          );
+        } catch (err: any) {
+          console.warn(
+            "Failed to subscribe WABA to webhooks",
+            err?.response?.data || err
+          );
+        }
+      }
 
       await prisma.whatsappConnectSession.delete({
         where: { id: session.id }
