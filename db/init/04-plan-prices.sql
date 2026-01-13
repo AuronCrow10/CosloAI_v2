@@ -21,12 +21,12 @@ INSERT INTO "UsagePlan" (
     'FREE',
     'Free',
     'Get started with a limited free quota.',
-    200000,        -- monthlyTokens (adjust as you like)
-    20,            -- monthlyEmails (or NULL if not used)
-    0,              -- monthlyWhatsappLeads (soft cap, adjust later)
-    0,              -- €0.00
+    200000,        -- monthlyTokens (≈ up to 150 messages OR 100 pages)
+    20,            -- monthlyEmails
+    0,             -- monthlyWhatsappLeads (WhatsApp template messages)
+    0,             -- €0.00
     'eur',
-    'price_1SlnQBGSx2QSwLkUOFgLsD65',  -- TODO: replace with real Stripe price ID for the free plan
+    'price_1SpAepGSx2QSwLkU8pQSFAZp',  -- TODO: replace with real Stripe price ID for the free plan (if you use one)
     TRUE,
     NOW(),
     NOW()
@@ -37,12 +37,12 @@ INSERT INTO "UsagePlan" (
     'STARTER',
     'Starter',
     'For small projects and testing.',
-    5000000,        -- monthlyTokens
-    300,           -- monthlyEmails
-    50,              -- monthlyWhatsappLeads
-    2799,           -- €27.99 (check your comment vs amount)
+    6000000,       -- monthlyTokens (6M)
+    1000,          -- monthlyEmails
+    200,           -- monthlyWhatsappLeads (WhatsApp template messages)
+    2999,          -- €29.99
     'eur',
-    'price_1SagU9GSx2QSwLkUo1XAOg5n',  -- TODO: replace with real Stripe price ID
+    'price_1SpAfxGSx2QSwLkUDwarmw6z',  -- TODO: replace with real Stripe price ID for €29.99
     TRUE,
     NOW(),
     NOW()
@@ -53,12 +53,12 @@ INSERT INTO "UsagePlan" (
     'GROWTH',
     'Growth',
     'For serious usage across multiple channels.',
-    25000000,       -- monthlyTokens
-    1500,           -- monthlyEmails
-    150,              -- monthlyWhatsappLeads
-    8999,           -- €89.99
+    30000000,      -- monthlyTokens (30M)
+    5000,          -- monthlyEmails
+    1000,          -- monthlyWhatsappLeads (WhatsApp template messages)
+    9999,          -- €99.99
     'eur',
-    'price_1SagWbGSx2QSwLkU0h6ZAYX5',   -- TODO: replace with real Stripe price ID
+    'price_1SpAghGSx2QSwLkU2wO3ZiLY',   -- TODO: replace with real Stripe price ID for €99.99
     TRUE,
     NOW(),
     NOW()
@@ -69,12 +69,12 @@ INSERT INTO "UsagePlan" (
     'SCALE',
     'Scale',
     'For high-volume bots in production.',
-    110000000,      -- monthlyTokens
-    10000,          -- monthlyEmails
-    1000,              -- monthlyWhatsappLeads
-    27999,          -- €279.99
+    130000000,     -- monthlyTokens (130M)
+    20000,         -- monthlyEmails
+    5000,          -- monthlyWhatsappLeads (WhatsApp template messages)
+    29999,         -- €299.99
     'eur',
-    'price_1SagZ5GSx2QSwLkUvuDdr17o',    -- TODO: replace with real Stripe price ID
+    'price_1SpAhEGSx2QSwLkUXAi3Ckl1',    -- TODO: replace with real Stripe price ID for €299.99
     TRUE,
     NOW(),
     NOW()
@@ -85,9 +85,9 @@ INSERT INTO "UsagePlan" (
     'CUSTOM',
     'Custom',
     'For custom limits and enterprise deals.',
-    NULL,           -- monthlyTokens
-    NULL,           -- monthlyEmails
-    NULL,              -- monthlyWhatsappLeads (you can change to NULL if you prefer)
+    NULL,          -- monthlyTokens
+    NULL,          -- monthlyEmails
+    NULL,          -- monthlyWhatsappLeads
     0,
     'eur',
     NULL,
