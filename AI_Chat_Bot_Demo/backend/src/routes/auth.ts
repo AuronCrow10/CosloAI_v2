@@ -239,7 +239,12 @@ const googleSchema = z.object({
 });
 
 router.post("/google", async (req: Request, res: Response) => {
-  if (!googleClient || !config.googleClientId) {
+  const audiences = [
+    config.googleClientId,
+    (config as any).googleAndroidClientId
+  ].filter(Boolean);
+
+  if (!googleClient || audiences.length === 0) {
     return res.status(500).json({ error: "Google OAuth not configured" });
   }
 
@@ -254,7 +259,7 @@ router.post("/google", async (req: Request, res: Response) => {
   try {
     ticket = await googleClient.verifyIdToken({
       idToken,
-      audience: config.googleClientId
+      audience: audiences
     });
   } catch (err) {
     console.error("Google token verification failed", err);

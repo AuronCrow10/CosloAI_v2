@@ -40,6 +40,7 @@ export interface AppConfig {
 
   googleClientId: string | null;
   googleClientSecret: string | null;
+  googleAndroidClientId: string | null;
 
   stripeSecretKey: string | null;
   stripeWebhookSecret: string | null;
@@ -104,6 +105,7 @@ export const config: AppConfig = {
 
   googleClientId: process.env.GOOGLE_CLIENT_ID || null,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || null,
+  googleAndroidClientId: process.env.GOOGLE_ANDROID_CLIENT_ID || null,
 
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || null,
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || null,

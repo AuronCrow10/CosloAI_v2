@@ -144,7 +144,11 @@ export async function sendVerificationEmail(userId: string, email: string): Prom
   });
 }
 
-export const googleClient =
-  config.googleClientId && config.googleClientSecret
-    ? new OAuth2Client(config.googleClientId)
-    : null;
+const googleClientId =
+  config.googleClientId ||
+  (config as any).googleAndroidClientId ||
+  (config as any).googleIosClientId;
+
+export const googleClient = googleClientId
+  ? new OAuth2Client(googleClientId)
+  : null;
