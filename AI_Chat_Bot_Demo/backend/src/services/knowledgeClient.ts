@@ -120,3 +120,14 @@ export async function deleteKnowledgeClient(clientId: string): Promise<void> {
     throw err;
   }
 }
+
+export async function deactivateChunksByJob(params: {
+  clientId: string;
+  jobId: string;
+}): Promise<{ status: string; jobId: string; jobType: string; deactivated: number }> {
+  const res = await client.post("/chunks/deactivate", {
+    clientId: params.clientId,
+    jobId: params.jobId
+  });
+  return res.data;
+}

@@ -10,7 +10,8 @@ import {
   getCrawlJob,
   estimateCrawl,
   estimateDocs,
-  listCrawlJobs
+  listCrawlJobs,
+  deactivateChunksByJob
 } from "../services/knowledgeClient";
 
 const router = Router();
@@ -192,6 +193,33 @@ router.get("/bots/:id/knowledge/crawl-status", async (req: Request, res: Respons
     return res.json(data);
   } catch (err) {
     console.error("Error in crawl-status", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// --- Deactivate chunks by crawl job ---
+router.post("/bots/:id/knowledge/deactivate-job", async (req: Request, res: Response) => {
+  try {
+    const botId = req.params.id;
+    const userId = req.user!.id;
+    const jobId: string | undefined = req.body?.jobId;
+
+    if (!jobId) return res.status(400).json({ error: "jobId is required" });
+
+    const bot = await getUserBot(botId, userId);
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (!bot.knowledgeClientId) {
+      return res.status(400).json({ error: "Bot has no knowledge client yet" });
+    }
+
+    const data = await deactivateChunksByJob({
+      clientId: bot.knowledgeClientId,
+      jobId
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Error in deactivate-job", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

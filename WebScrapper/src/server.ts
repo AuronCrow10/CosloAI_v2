@@ -139,6 +139,7 @@ async function jobToPublic(job: CrawlJob): Promise<CrawlJobPublicView> {
     id: job.id,
     clientId: job.clientId,
     status: job.status,
+    isActive: job.isActive ?? true,
 
     jobType,
     origin,
@@ -168,8 +169,6 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
       embeddingModel?: string;
       mainDomain?: string;
     };
-
-    console.log(mainDomain);
 
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (!mainDomain) return res.status(400).json({ error: 'mainDomain is required' });
@@ -732,11 +731,52 @@ app.post('/search', requireInternalAuth, async (req, res) => {
       options: { domain, limit },
     });
 
-    console.log(results);
-
     return res.json({ results });
   } catch (err) {
     logger.error('Error in /search', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// --- Deactivate chunks by crawl job (soft delete) ---
+app.post('/chunks/deactivate', requireInternalAuth, async (req, res) => {
+  try {
+    const { clientId, jobId } = req.body as { clientId?: string; jobId?: string };
+    if (!clientId || !jobId) {
+      return res.status(400).json({ error: 'clientId and jobId are required' });
+    }
+
+    const job = await db.getCrawlJobById(jobId);
+    if (!job || job.clientId !== clientId) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const jobType = inferJobType(job.startUrl);
+    let deactivated = 0;
+
+    if (jobType === 'docs') {
+      deactivated = await db.deactivateChunksForClientByUrl({
+        clientId,
+        url: job.startUrl,
+      });
+    } else {
+      const normalizedDomain = extractDomain(job.domain || job.startUrl);
+      deactivated = await db.deactivateChunksForClientByDomain({
+        clientId,
+        domain: normalizedDomain,
+      });
+    }
+
+    await db.markCrawlJobDeactivated(jobId);
+
+    return res.json({
+      status: 'ok',
+      jobId,
+      jobType,
+      deactivated,
+    });
+  } catch (err) {
+    logger.error('Error in POST /chunks/deactivate', err);
     return res.status(500).json({ error: 'Internal error' });
   }
 });

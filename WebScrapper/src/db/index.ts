@@ -208,6 +208,7 @@ export class Database {
         start_url: string;
         status: CrawlJobStatus;
         job_type: KnowledgeJobType;
+        is_active: boolean;
         total_pages_estimated: number | null;
         pages_visited: number;
         pages_stored: number;
@@ -230,7 +231,7 @@ export class Database {
         )
         RETURNING
           id, client_id, domain, start_url, status, job_type,
-          total_pages_estimated, pages_visited, pages_stored, chunks_stored,
+          is_active, total_pages_estimated, pages_visited, pages_stored, chunks_stored,
           error_message, created_at, started_at, finished_at, updated_at
         `,
         [
@@ -250,6 +251,7 @@ export class Database {
         domain: row.domain,
         startUrl: row.start_url,
         status: row.status,
+        isActive: row.is_active,
         totalPagesEstimated: row.total_pages_estimated,
         pagesVisited: row.pages_visited,
         pagesStored: row.pages_stored,
@@ -374,6 +376,7 @@ export class Database {
         start_url: string;
         status: CrawlJobStatus;
         job_type: KnowledgeJobType;
+        is_active: boolean;
         total_pages_estimated: number | null;
         pages_visited: number;
         pages_stored: number;
@@ -387,7 +390,7 @@ export class Database {
         `
         SELECT
           id, client_id, domain, start_url, status, job_type,
-          total_pages_estimated, pages_visited, pages_stored, chunks_stored,
+          is_active, total_pages_estimated, pages_visited, pages_stored, chunks_stored,
           error_message, created_at, started_at, finished_at, updated_at
         FROM crawl_jobs
         WHERE id = $1
@@ -404,6 +407,7 @@ export class Database {
         domain: row.domain,
         startUrl: row.start_url,
         status: row.status,
+        isActive: row.is_active,
         totalPagesEstimated: row.total_pages_estimated,
         pagesVisited: row.pages_visited,
         pagesStored: row.pages_stored,
@@ -466,6 +470,7 @@ export class Database {
           start_url: string;
           status: CrawlJobStatus;
           job_type: KnowledgeJobType;
+          is_active: boolean;
           total_pages_estimated: number | null;
           pages_visited: number;
           pages_stored: number;
@@ -479,7 +484,7 @@ export class Database {
           `
           SELECT
             id, client_id, domain, start_url, status, job_type,
-            total_pages_estimated, pages_visited, pages_stored, chunks_stored,
+            is_active, total_pages_estimated, pages_visited, pages_stored, chunks_stored,
             error_message, created_at, started_at, finished_at, updated_at
           FROM crawl_jobs
           WHERE client_id = $1
@@ -497,6 +502,7 @@ export class Database {
         domain: row.domain,
         startUrl: row.start_url,
         status: row.status,
+        isActive: row.is_active,
         totalPagesEstimated: row.total_pages_estimated,
         pagesVisited: row.pages_visited,
         pagesStored: row.pages_stored,
@@ -512,6 +518,23 @@ export class Database {
       })) as any as CrawlJob[];
 
       return { items, totalItems };
+    } finally {
+      client.release();
+    }
+  }
+
+  async markCrawlJobDeactivated(jobId: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query(
+        `
+        UPDATE crawl_jobs
+        SET is_active = false,
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [jobId],
+      );
     } finally {
       client.release();
     }
@@ -557,6 +580,7 @@ export class Database {
     chunk: ChunkWithEmbedding,
   ): Promise<void> {
     const { tableName, dims } = this.getTableForModel(model);
+    const supportsActiveFlag = model === 'text-embedding-3-small';
 
     if (chunk.embedding.length !== dims) {
       throw new Error(
@@ -584,7 +608,8 @@ export class Database {
           gen_random_uuid(),
           $1, $2, $3, $4, $5, $6, $7::vector
         )
-        ON CONFLICT (client_id, chunk_hash) DO NOTHING
+        ON CONFLICT (client_id, chunk_hash)
+        ${supportsActiveFlag ? 'DO UPDATE SET is_active = true' : 'DO NOTHING'}
         RETURNING id
         `,
         [
@@ -620,6 +645,7 @@ export class Database {
   }): Promise<SearchResult[]> {
     const { clientId, model, queryEmbedding, domain, limit } = params;
     const { tableName, dims } = this.getTableForModel(model);
+    const supportsActiveFlag = model === 'text-embedding-3-small';
 
     if (queryEmbedding.length !== dims) {
       throw new Error(
@@ -650,6 +676,7 @@ export class Database {
           FROM ${tableName}
           WHERE client_id = $1
             AND domain = $2
+            ${supportsActiveFlag ? 'AND is_active = true' : ''}
           ORDER BY (embedding::halfvec) <-> $3::halfvec
           LIMIT $4
         `;
@@ -668,6 +695,7 @@ export class Database {
           FROM ${tableName}
           WHERE client_id = $1
             AND domain = $2
+            ${supportsActiveFlag ? 'AND is_active = true' : ''}
           ORDER BY embedding <-> $3::vector
           LIMIT $4
         `;
@@ -687,6 +715,7 @@ export class Database {
             (embedding::halfvec) <-> $2::halfvec AS distance
           FROM ${tableName}
           WHERE client_id = $1
+            ${supportsActiveFlag ? 'AND is_active = true' : ''}
           ORDER BY (embedding::halfvec) <-> $2::halfvec
           LIMIT $3
         `;
@@ -704,6 +733,7 @@ export class Database {
             embedding <-> $2::vector AS distance
           FROM ${tableName}
           WHERE client_id = $1
+            ${supportsActiveFlag ? 'AND is_active = true' : ''}
           ORDER BY embedding <-> $2::vector
           LIMIT $3
         `;
@@ -919,6 +949,52 @@ export class Database {
         totalPromptTokens: Number(row.prompt_tokens ?? 0),
         totalTokens: Number(row.total_tokens ?? 0),
       }));
+    } finally {
+      client.release();
+    }
+  }
+
+  async deactivateChunksForClientByUrl(params: {
+    clientId: string;
+    url: string;
+  }): Promise<number> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{ id: string }>(
+        `
+        UPDATE page_chunks_small
+        SET is_active = false
+        WHERE client_id = $1
+          AND url = $2
+          AND is_active = true
+        RETURNING id
+        `,
+        [params.clientId, params.url],
+      );
+      return res.rowCount ?? 0;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deactivateChunksForClientByDomain(params: {
+    clientId: string;
+    domain: string;
+  }): Promise<number> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{ id: string }>(
+        `
+        UPDATE page_chunks_small
+        SET is_active = false
+        WHERE client_id = $1
+          AND domain = $2
+          AND is_active = true
+        RETURNING id
+        `,
+        [params.clientId, params.domain],
+      );
+      return res.rowCount ?? 0;
     } finally {
       client.release();
     }

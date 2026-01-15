@@ -91,6 +91,7 @@ export interface CrawlJob {
   domain: string;
   startUrl: string;
   status: CrawlJobStatus;
+  isActive: boolean;
   totalPagesEstimated: number | null;
   pagesVisited: number;
   pagesStored: number;
@@ -110,6 +111,7 @@ export interface CrawlJobPublicView {
   id: string;
   clientId: string; // ownership validation
   status: CrawlJobStatus;
+  isActive: boolean;
 
   jobType: KnowledgeJobType;
 
