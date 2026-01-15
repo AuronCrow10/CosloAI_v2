@@ -770,6 +770,164 @@ export class Database {
     }
   }
 
+  async listChunksForClientByDomain(params: {
+    clientId: string;
+    domain: string;
+  }): Promise<
+    {
+      id: string;
+      url: string;
+      chunkIndex: number;
+      text: string;
+      createdAt: Date;
+    }[]
+  > {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{
+        id: string;
+        url: string;
+        chunk_index: number;
+        chunk_text: string;
+        created_at: Date;
+      }>(
+        `
+        SELECT id, url, chunk_index, chunk_text, created_at
+        FROM page_chunks_small
+        WHERE client_id = $1
+          AND domain = $2
+          AND is_active = true
+        ORDER BY url ASC, chunk_index ASC
+        `,
+        [params.clientId, params.domain],
+      );
+      return res.rows.map((row) => ({
+        id: row.id,
+        url: row.url,
+        chunkIndex: row.chunk_index,
+        text: row.chunk_text,
+        createdAt: row.created_at,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  async listChunksForClientByUrl(params: {
+    clientId: string;
+    url: string;
+  }): Promise<
+    {
+      id: string;
+      url: string;
+      chunkIndex: number;
+      text: string;
+      createdAt: Date;
+    }[]
+  > {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{
+        id: string;
+        url: string;
+        chunk_index: number;
+        chunk_text: string;
+        created_at: Date;
+      }>(
+        `
+        SELECT id, url, chunk_index, chunk_text, created_at
+        FROM page_chunks_small
+        WHERE client_id = $1
+          AND url = $2
+          AND is_active = true
+        ORDER BY chunk_index ASC
+        `,
+        [params.clientId, params.url],
+      );
+      return res.rows.map((row) => ({
+        id: row.id,
+        url: row.url,
+        chunkIndex: row.chunk_index,
+        text: row.chunk_text,
+        createdAt: row.created_at,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateChunkForClient(params: {
+    clientId: string;
+    chunkId: string;
+    text: string;
+    chunkHash: string;
+    embedding: number[];
+  }): Promise<
+    | {
+        id: string;
+        url: string;
+        chunkIndex: number;
+        text: string;
+        createdAt: Date;
+      }
+    | null
+  > {
+    const client = await this.pool.connect();
+    try {
+      const embeddingLiteral = `[${params.embedding.join(',')}]`;
+      const res = await client.query<{
+        id: string;
+        url: string;
+        chunk_index: number;
+        chunk_text: string;
+        created_at: Date;
+      }>(
+        `
+        UPDATE page_chunks_small
+        SET chunk_text = $3,
+            chunk_hash = $4,
+            embedding = $5::vector,
+            is_active = true
+        WHERE id = $1
+          AND client_id = $2
+        RETURNING id, url, chunk_index, chunk_text, created_at
+        `,
+        [params.chunkId, params.clientId, params.text, params.chunkHash, embeddingLiteral],
+      );
+      if (res.rowCount === 0) return null;
+      const row = res.rows[0];
+      return {
+        id: row.id,
+        url: row.url,
+        chunkIndex: row.chunk_index,
+        text: row.chunk_text,
+        createdAt: row.created_at,
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  async deleteChunkForClient(params: {
+    clientId: string;
+    chunkId: string;
+  }): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(
+        `
+        DELETE FROM page_chunks_small
+        WHERE id = $1
+          AND client_id = $2
+        `,
+        [params.chunkId, params.clientId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    } finally {
+      client.release();
+    }
+  }
+
   // ---------- USAGE TRACKING ----------
   async recordUsage(params: {
     clientId: string;

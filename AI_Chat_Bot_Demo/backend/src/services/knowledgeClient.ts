@@ -131,3 +131,43 @@ export async function deactivateChunksByJob(params: {
   });
   return res.data;
 }
+
+export async function listChunksByJob(params: {
+  clientId: string;
+  jobId: string;
+}): Promise<{
+  jobId: string;
+  jobType: string;
+  chunks: { id: string; url: string; chunkIndex: number; text: string; createdAt: string }[];
+}> {
+  const q = new URLSearchParams({
+    clientId: params.clientId,
+    jobId: params.jobId
+  });
+  const res = await client.get(`/chunks/by-job?${q.toString()}`);
+  return res.data;
+}
+
+export async function updateChunkText(params: {
+  clientId: string;
+  chunkId: string;
+  text: string;
+}): Promise<{ chunk: { id: string; url: string; chunkIndex: number; text: string; createdAt: string } }> {
+  const res = await client.post("/chunks/update", {
+    clientId: params.clientId,
+    chunkId: params.chunkId,
+    text: params.text
+  });
+  return res.data;
+}
+
+export async function deleteChunk(params: {
+  clientId: string;
+  chunkId: string;
+}): Promise<{ status: string; chunkId: string }> {
+  const res = await client.post("/chunks/delete", {
+    clientId: params.clientId,
+    chunkId: params.chunkId
+  });
+  return res.data;
+}

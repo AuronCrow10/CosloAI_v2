@@ -1,5 +1,6 @@
 // server.ts
 import express from 'express';
+import crypto from 'node:crypto';
 import multer from 'multer';
 
 import { loadConfig } from './config/index.js';
@@ -734,6 +735,131 @@ app.post('/search', requireInternalAuth, async (req, res) => {
     return res.json({ results });
   } catch (err) {
     logger.error('Error in /search', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+function computeChunkHash(text: string): string {
+  return crypto.createHash('sha256').update(text).digest('hex');
+}
+
+// --- Chunks by job ---
+app.get('/chunks/by-job', requireInternalAuth, async (req, res) => {
+  try {
+    const clientId = String(req.query.clientId || '').trim();
+    const jobId = String(req.query.jobId || '').trim();
+    if (!clientId || !jobId) {
+      return res.status(400).json({ error: 'clientId and jobId are required' });
+    }
+
+    const client = await db.getClientById(clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const job = await db.getCrawlJobById(jobId);
+    if (!job || job.clientId !== clientId) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const jobType = inferJobType(job.startUrl);
+    let chunks;
+    if (jobType === 'docs') {
+      chunks = await db.listChunksForClientByUrl({
+        clientId,
+        url: job.startUrl,
+      });
+    } else {
+      const normalizedDomain = extractDomain(job.domain || job.startUrl);
+      chunks = await db.listChunksForClientByDomain({
+        clientId,
+        domain: normalizedDomain,
+      });
+    }
+
+    return res.json({ jobId, jobType, chunks });
+  } catch (err) {
+    logger.error('Error in GET /chunks/by-job', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// --- Update single chunk text (hard update) ---
+app.post('/chunks/update', requireInternalAuth, async (req, res) => {
+  try {
+    const { clientId, chunkId, text } = req.body as {
+      clientId?: string;
+      chunkId?: string;
+      text?: string;
+    };
+
+    if (!clientId || !chunkId || !text) {
+      return res.status(400).json({ error: 'clientId, chunkId, and text are required' });
+    }
+
+    const client = await db.getClientById(clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const cleanedText = String(text).trim();
+    if (!cleanedText) return res.status(400).json({ error: 'text is empty' });
+
+    const { vectors, usage } = await embeddings.embedBatch(
+      [cleanedText],
+      client.embeddingModel,
+    );
+
+    if (usage && usage.totalTokens > 0) {
+      await db.recordUsage({
+        clientId,
+        model: client.embeddingModel,
+        operation: 'embeddings_edit',
+        promptTokens: usage.promptTokens,
+        totalTokens: usage.totalTokens,
+      });
+    }
+
+    const chunkHash = computeChunkHash(cleanedText);
+
+    let updated;
+    try {
+      updated = await db.updateChunkForClient({
+        clientId,
+        chunkId,
+        text: cleanedText,
+        chunkHash,
+        embedding: vectors[0],
+      });
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        return res.status(409).json({ error: 'Chunk text already exists for this client' });
+      }
+      throw err;
+    }
+
+    if (!updated) return res.status(404).json({ error: 'Chunk not found' });
+
+    return res.json({ chunk: updated });
+  } catch (err) {
+    logger.error('Error in POST /chunks/update', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// --- Delete single chunk (hard delete) ---
+app.post('/chunks/delete', requireInternalAuth, async (req, res) => {
+  try {
+    const { clientId, chunkId } = req.body as { clientId?: string; chunkId?: string };
+    if (!clientId || !chunkId) {
+      return res.status(400).json({ error: 'clientId and chunkId are required' });
+    }
+
+    const client = await db.getClientById(clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const deleted = await db.deleteChunkForClient({ clientId, chunkId });
+    if (!deleted) return res.status(404).json({ error: 'Chunk not found' });
+
+    return res.json({ status: 'ok', chunkId });
+  } catch (err) {
+    logger.error('Error in POST /chunks/delete', err);
     return res.status(500).json({ error: 'Internal error' });
   }
 });

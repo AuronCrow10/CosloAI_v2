@@ -11,7 +11,10 @@ import {
   estimateCrawl,
   estimateDocs,
   listCrawlJobs,
-  deactivateChunksByJob
+  deactivateChunksByJob,
+  listChunksByJob,
+  updateChunkText,
+  deleteChunk
 } from "../services/knowledgeClient";
 
 const router = Router();
@@ -220,6 +223,90 @@ router.post("/bots/:id/knowledge/deactivate-job", async (req: Request, res: Resp
     return res.json(data);
   } catch (err) {
     console.error("Error in deactivate-job", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// --- List chunks for a crawl job ---
+router.get("/bots/:id/knowledge/chunks", async (req: Request, res: Response) => {
+  try {
+    const botId = req.params.id;
+    const userId = req.user!.id;
+    const jobId = String(req.query.jobId || "").trim();
+
+    if (!jobId) return res.status(400).json({ error: "jobId is required" });
+
+    const bot = await getUserBot(botId, userId);
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (!bot.knowledgeClientId) {
+      return res.status(400).json({ error: "Bot has no knowledge client yet" });
+    }
+
+    const data = await listChunksByJob({
+      clientId: bot.knowledgeClientId,
+      jobId
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Error in list job chunks", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// --- Update a single chunk ---
+router.patch("/bots/:id/knowledge/chunks/:chunkId", async (req: Request, res: Response) => {
+  try {
+    const botId = req.params.id;
+    const userId = req.user!.id;
+    const chunkId = req.params.chunkId;
+    const text = String(req.body?.text || "").trim();
+
+    if (!text) return res.status(400).json({ error: "text is required" });
+
+    const bot = await getUserBot(botId, userId);
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (!bot.knowledgeClientId) {
+      return res.status(400).json({ error: "Bot has no knowledge client yet" });
+    }
+
+    const data = await updateChunkText({
+      clientId: bot.knowledgeClientId,
+      chunkId,
+      text
+    });
+
+    return res.json(data);
+  } catch (err: any) {
+    if (err?.response?.status === 409) {
+      return res.status(409).json({ error: "Chunk text already exists for this bot" });
+    }
+    console.error("Error in update chunk", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// --- Delete a single chunk (hard delete) ---
+router.delete("/bots/:id/knowledge/chunks/:chunkId", async (req: Request, res: Response) => {
+  try {
+    const botId = req.params.id;
+    const userId = req.user!.id;
+    const chunkId = req.params.chunkId;
+
+    const bot = await getUserBot(botId, userId);
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (!bot.knowledgeClientId) {
+      return res.status(400).json({ error: "Bot has no knowledge client yet" });
+    }
+
+    const data = await deleteChunk({
+      clientId: bot.knowledgeClientId,
+      chunkId
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Error in delete chunk", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
