@@ -106,8 +106,7 @@ router.post(
       const params: Record<string, string> = {
         client_id: config.metaAppId!,
         client_secret: config.metaAppSecret!,
-        code,
-        redirect_uri: resolvedRedirectUri
+        code
       };
 
       const tokenRes = await axios.get(
