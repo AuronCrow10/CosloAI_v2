@@ -1,3 +1,4 @@
+// routes/whatsappEmbedded.ts
 import { Router, Request, Response } from "express";
 import axios from "axios";
 import { prisma } from "../prisma/prisma";
@@ -15,6 +16,8 @@ function assertWhatsAppEmbeddedConfigured() {
 }
 
 function resolveWhatsAppRedirectUri(provided?: string): string | null {
+  console.log("resolveWhatsAppRedirectUri", provided);
+
   if (provided) {
     try {
       const url = new URL(provided);
@@ -35,12 +38,12 @@ function resolveWhatsAppRedirectUri(provided?: string): string | null {
 /**
  * STEP 1 – embedded signup callback from JS SDK
  * POST /api/bots/:botId/whatsapp/embedded/complete
- * Body: { code }
+ * Body: { code, redirectUri? }
  *
  * - Exchanges code -> waAccessToken
  * - Finds WABA + phone_numbers
  * - Stores in WhatsappConnectSession
- * - Returns { sessionId, numbers: [...] }
+ * - Returns { sessionId, numbers: [.] }
  */
 router.post(
   "/bots/:botId/whatsapp/embedded/complete",
@@ -93,8 +96,11 @@ router.post(
 
       // 1) Exchange code -> waAccessToken
       const resolvedRedirectUri = resolveWhatsAppRedirectUri(redirectUri);
+
       if (!resolvedRedirectUri) {
-        return res.status(400).json({ error: "Missing or invalid redirectUri" });
+        return res
+          .status(400)
+          .json({ error: "Missing or invalid redirectUri" });
       }
 
       const params: Record<string, string> = {
@@ -151,13 +157,14 @@ router.post(
         });
       }
 
-      // 3) Fetch phone numbers for this WABA
+      // 3) Fetch phone numbers for this WABA (include certificate)
       const phoneRes = await axios.get(
         `https://graph.facebook.com/v22.0/${wabaId}/phone_numbers`,
         {
           params: {
             access_token: waAccessToken,
-            fields: "id,display_phone_number,verified_name"
+            // NEW: fetch certificate as well
+            fields: "id,display_phone_number,verified_name,certificate"
           }
         }
       );
@@ -166,6 +173,7 @@ router.post(
         id: string;
         display_phone_number?: string;
         verified_name?: string;
+        certificate?: string;
       }> = phoneRes.data?.data || [];
 
       if (!phones.length) {
@@ -174,7 +182,7 @@ router.post(
         });
       }
 
-      // 4) Create WhatsappConnectSession
+      // 4) Create WhatsappConnectSession (we keep certificate inside phoneNumbersJson)
       const session = await prisma.whatsappConnectSession.create({
         data: {
           botId: bot.id,
@@ -185,7 +193,7 @@ router.post(
         }
       });
 
-      // 5) Return session + numbers
+      // 5) Return session + numbers (no certificate in response)
       return res.json({
         sessionId: session.id,
         numbers: phones.map((p) => ({
@@ -209,7 +217,7 @@ router.post(
 /**
  * STEP 2 – attach a specific phone number to the bot
  * POST /api/whatsapp/sessions/:sessionId/attach
- * Body: { phoneId }
+ * Body: { phoneId, pin? }
  */
 router.post(
   "/whatsapp/sessions/:sessionId/attach",
@@ -221,7 +229,10 @@ router.post(
       }
       const user = req.user;
       const { sessionId } = req.params;
-      const { phoneId } = req.body as { phoneId?: string };
+      const { phoneId, pin } = req.body as {
+        phoneId?: string;
+        pin?: string;
+      };
 
       if (!phoneId) {
         return res.status(400).json({ error: "Missing phoneId" });
@@ -256,22 +267,76 @@ router.post(
         (selectedPhone.display_phone_number as string | undefined) || null;
       const verifiedName =
         (selectedPhone.verified_name as string | undefined) || null;
+      const certificate: string | undefined =
+        typeof selectedPhone.certificate === "string"
+          ? selectedPhone.certificate
+          : undefined;
+
       const graphBaseUrl =
         config.metaGraphApiBaseUrl || "https://graph.facebook.com/v22.0";
 
-      let tokenExpiresAt: string | null = null;
+      // ✅ NEW: register the phone number with Cloud API
+      const registerPayload: {
+        messaging_product: "whatsapp";
+        certificate?: string;
+        pin?: string;
+      } = {
+        messaging_product: "whatsapp"
+      };
+
+      if (certificate) {
+        registerPayload.certificate = certificate;
+      }
+
+      const trimmedPin = typeof pin === "string" ? pin.trim() : "";
+      if (trimmedPin) {
+        registerPayload.pin = trimmedPin;
+      }
+
       try {
-        const appAccessToken = `${config.metaAppId}|${config.metaAppSecret}`;
-        const debugRes = await axios.get(
-          `${graphBaseUrl}/debug_token`,
+        await axios.post(
+          `${graphBaseUrl}/${phoneNumberId}/register`,
+          registerPayload,
           {
             params: {
-              input_token: session.waAccessToken,
-              access_token: appAccessToken
+              access_token: session.waAccessToken
             },
             timeout: 10000
           }
         );
+      } catch (err: any) {
+        const errData = err?.response?.data;
+        const msg: string | undefined =
+          errData?.error?.message || errData?.message;
+
+        // If already registered we just continue; otherwise bubble up
+        if (!msg || !msg.toLowerCase().includes("already registered")) {
+          console.error(
+            "Failed to register WhatsApp phone number",
+            errData || err
+          );
+          return res.status(500).json({
+            error: "Failed to register WhatsApp phone number"
+          });
+        }
+
+        console.warn(
+          "WhatsApp phone number already registered, continuing",
+          errData || err
+        );
+      }
+
+      // Debug token to compute expiry (unchanged logic)
+      let tokenExpiresAt: string | null = null;
+      try {
+        const appAccessToken = `${config.metaAppId}|${config.metaAppSecret}`;
+        const debugRes = await axios.get(`${graphBaseUrl}/debug_token`, {
+          params: {
+            input_token: session.waAccessToken,
+            access_token: appAccessToken
+          },
+          timeout: 10000
+        });
         const expiresAt = debugRes.data?.data?.expires_at;
         if (typeof expiresAt === "number") {
           tokenExpiresAt = new Date(expiresAt * 1000).toISOString();
@@ -314,6 +379,7 @@ router.post(
         }
       });
 
+      // Subscribe WABA to webhooks (unchanged)
       if (session.wabaId && session.waAccessToken) {
         try {
           await axios.post(
