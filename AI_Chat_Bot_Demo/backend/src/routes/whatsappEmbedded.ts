@@ -97,12 +97,6 @@ router.post(
       // 1) Exchange code -> waAccessToken
       const resolvedRedirectUri = resolveWhatsAppRedirectUri(redirectUri);
 
-      if (!resolvedRedirectUri) {
-        return res
-          .status(400)
-          .json({ error: "Missing or invalid redirectUri" });
-      }
-
       const params: Record<string, string> = {
         client_id: config.metaAppId!,
         client_secret: config.metaAppSecret!,
