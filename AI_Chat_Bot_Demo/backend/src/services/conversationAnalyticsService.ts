@@ -95,7 +95,7 @@ export async function maybeUpdateConversationMemorySummary(
 
   const summary = await getChatCompletion({
     messages: messagesForSummary,
-    model: "gpt-4o-mini",
+    model: "gpt-4.1-mini",
     maxTokens: 256,
     usageContext: {
       ...usageBase,
@@ -119,7 +119,7 @@ export async function maybeUpdateConversationMemorySummary(
     where: { id: conversationId },
     data: {
       memorySummary: summary,
-      memorySummaryModel: "gpt-4o-mini",
+      memorySummaryModel: "gpt-4.1-mini",
       memorySummaryUpdatedAt: new Date()
     }
   });
@@ -209,7 +209,7 @@ export async function evaluateConversation(
 
   const raw = await getChatCompletion({
     messages: messagesForEval,
-    model: "gpt-4o-mini",
+    model: "gpt-4.1-mini",
     maxTokens: 256,
     usageContext: {
       ...usageBase,
@@ -265,7 +265,7 @@ export async function evaluateConversation(
       score,
       label,
       details,
-      model: "gpt-4o-mini",
+      model: "gpt-4.1-mini",
       isAuto
     }
   });
