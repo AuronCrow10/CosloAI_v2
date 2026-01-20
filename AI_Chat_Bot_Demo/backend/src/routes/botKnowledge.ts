@@ -16,6 +16,7 @@ import {
   updateChunkText,
   deleteChunk
 } from "../services/knowledgeClient";
+import { getPlanUsageForBot } from "../services/planUsageService";
 
 const router = Router();
 
@@ -83,6 +84,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
     const botId = req.params.id;
     const userId = req.user!.id;
     const overrideDomain: string | undefined = req.body?.domain;
+    const confirmed: boolean = req.body?.confirm === true;
 
     const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
 
@@ -94,6 +96,50 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
 
     if (!bot.useDomainCrawler) {
       return res.status(400).json({ error: "Domain crawler disabled for this bot" });
+    }
+
+    let estimate: any = null;
+    try {
+      const estimateResp = await estimateCrawl(domainToUse);
+      estimate = estimateResp?.estimate ?? null;
+    } catch (err) {
+      console.error("Error in pre-crawl estimate", err);
+    }
+
+    const snapshot = await getPlanUsageForBot(bot.id);
+    const limit = snapshot?.monthlyTokenLimit ?? null;
+    const usedTokens = snapshot?.usedTokensTotal ?? 0;
+    const remainingTokens =
+      limit && limit > 0 ? Math.max(limit - usedTokens, 0) : null;
+
+    const requiredTokens =
+      estimate && typeof estimate.tokensEstimated === "number"
+        ? estimate.tokensEstimated
+        : 0;
+
+    if (limit && limit > 0 && remainingTokens != null && requiredTokens > remainingTokens) {
+      return res.status(200).json({
+        status: "estimate",
+        canProceed: false,
+        error: "Crawl would exceed the monthly token limit.",
+        estimate,
+        limit,
+        usedTokens,
+        remainingTokens,
+        requiredTokens
+      });
+    }
+
+    if (!confirmed) {
+      return res.status(200).json({
+        status: "estimate",
+        canProceed: true,
+        estimate,
+        limit,
+        usedTokens,
+        remainingTokens,
+        requiredTokens
+      });
     }
 
     const resp = await crawlDomain({
@@ -116,7 +162,8 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
       status: resp.status,
       jobId: resp.jobId,
       knowledgeClientId,
-      domain: resp.domain
+      domain: resp.domain,
+      estimate
     });
   } catch (err: any) {
     console.error("Error in crawl-domain", err);

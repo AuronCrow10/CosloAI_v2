@@ -3,6 +3,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import multer from 'multer';
 
+import { PlaywrightCrawler, RequestOptions } from '@crawlee/playwright';
 import { loadConfig } from './config/index.js';
 import { Database } from './db/index.js';
 import { EmbeddingService } from './embeddings/index.js';
@@ -160,6 +161,155 @@ async function jobToPublic(job: CrawlJob): Promise<CrawlJobPublicView> {
     finishedAt: job.finishedAt ? job.finishedAt.toISOString() : null,
     updatedAt: job.updatedAt.toISOString(),
   };
+}
+
+function normalizeUrlForEstimate(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+
+    u.hash = '';
+
+    const dropPrefixes = ['utm_'];
+    const dropExact = new Set([
+      'gclid',
+      'fbclid',
+      'igshid',
+      'mc_cid',
+      'mc_eid',
+      'ref',
+      'ref_src',
+      'mkt_tok',
+    ]);
+
+    const kept: [string, string][] = [];
+    for (const [k, v] of u.searchParams.entries()) {
+      const lower = k.toLowerCase();
+      if (dropExact.has(lower)) continue;
+      if (dropPrefixes.some((p) => lower.startsWith(p))) continue;
+      kept.push([k, v]);
+    }
+
+    u.search = '';
+    kept
+      .sort((a, b) => (a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])))
+      .forEach(([k, v]) => u.searchParams.append(k, v));
+
+    if (u.pathname.length > 1 && u.pathname.endsWith('/')) {
+      u.pathname = u.pathname.slice(0, -1);
+    }
+
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function estimateDomainTokensWithBrowser(params: {
+  startUrl: string;
+  host: string;
+  sitemapUrls: string[];
+}): Promise<{
+  pagesEstimated: number;
+  pagesVisited: number;
+  pagesCounted: number;
+  totalTokens: number;
+}> {
+  const { startUrl, host, sitemapUrls } = params;
+
+  const discoveredUrls = new Set<string>();
+  const addDiscovered = (rawUrl: string): boolean => {
+    const norm = normalizeUrlForEstimate(rawUrl);
+    if (!norm) return false;
+    if (discoveredUrls.has(norm)) return false;
+    discoveredUrls.add(norm);
+    return true;
+  };
+
+  const seedUrls = sitemapUrls.length > 0 ? [startUrl, ...sitemapUrls] : [startUrl];
+  const startRequests = seedUrls.map((url) => ({ url, userData: { depth: 0 } }));
+  for (const r of startRequests) addDiscovered(r.url);
+
+  let pagesVisited = 0;
+  let pagesCounted = 0;
+  let totalTokens = 0;
+
+  const crawler = new PlaywrightCrawler({
+    maxRequestsPerCrawl: config.crawl.maxPages,
+    maxConcurrency: config.crawl.concurrency,
+    respectRobotsTxtFile: true,
+    useSessionPool: true,
+
+    async requestHandler({ request, page, enqueueLinks, log }) {
+      const depth: number = (request.userData.depth as number) ?? 0;
+      if (depth > config.crawl.maxDepth) {
+        log.info(`Skipping ${request.url}, depth ${depth} > ${config.crawl.maxDepth}`);
+        return;
+      }
+
+      try {
+        if (config.crawl.contentWaitSelector) {
+          await page.waitForSelector(config.crawl.contentWaitSelector, { timeout: 15000 });
+        } else {
+          await page.waitForLoadState('networkidle', { timeout: 15000 });
+        }
+      } catch {
+        log.warning(`Timeout waiting for page to load: ${request.url}`);
+      }
+
+      let html: string;
+      try {
+        html = await page.content();
+      } catch (err) {
+        log.error(`Failed to get page content for ${request.url}`, { err });
+        return;
+      }
+
+      pagesVisited += 1;
+
+      const parsed = (await import('./parser/index.js')).parseHtmlToText(
+        html,
+        request.url,
+        host,
+      );
+      if (parsed.cleanedText && parsed.cleanedText.length >= config.crawl.minChars) {
+        const chunks = chunkText(parsed.cleanedText, request.url, host, config.chunking);
+        for (const c of chunks) totalTokens += tokenize(c.text).length;
+        pagesCounted += 1;
+      }
+
+      if (depth < config.crawl.maxDepth) {
+        await enqueueLinks({
+          strategy: 'same-domain',
+          transformRequestFunction: (reqOpts: RequestOptions) => {
+            try {
+              const u = new URL(reqOpts.url);
+              if (u.hostname !== host) return null;
+
+              const norm = normalizeUrlForEstimate(u.toString());
+              if (!norm) return null;
+
+              if (discoveredUrls.size >= config.crawl.maxPages) return null;
+
+              const added = addDiscovered(norm);
+              if (!added) return null;
+
+              reqOpts.userData = { ...(reqOpts.userData || {}), depth: depth + 1 };
+              reqOpts.url = norm;
+              return reqOpts;
+            } catch {
+              return null;
+            }
+          },
+        });
+      }
+    },
+  });
+
+  await crawler.run(startRequests);
+
+  const pagesEstimated = Math.min(config.crawl.maxPages, discoveredUrls.size);
+
+  return { pagesEstimated, pagesVisited, pagesCounted, totalTokens };
 }
 
 // --- Clients ---
@@ -328,7 +478,6 @@ app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
     const startUrl = normalizeDomainToStartUrl(domain);
     const host = extractDomain(domain);
 
-    let pagesEstimated = config.crawl.maxPages;
     let urls: string[] = [];
     try {
       const sitemapUrl = new URL(startUrl);
@@ -352,48 +501,30 @@ app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
             }
           })
           .filter(Boolean) as string[];
-        if (urls.length > 0) {
-          pagesEstimated = Math.min(config.crawl.maxPages, urls.length + 1);
-        }
       }
     } catch {
       // ignore
     }
 
-    const sampleUrls = [startUrl, ...urls.slice(0, 9)];
-    let samplePages = 0;
-    let totalTokens = 0;
-
-    for (const u of sampleUrls) {
-      try {
-        const r = await fetch(u, { redirect: 'follow' });
-        if (!r.ok) continue;
-        const html = await r.text();
-        const parsed = (await import('./parser/index.js')).parseHtmlToText(html, u, host);
-        if (!parsed.cleanedText || parsed.cleanedText.length < config.crawl.minChars) continue;
-
-        const chunks = chunkText(parsed.cleanedText, u, host, config.chunking);
-        for (const c of chunks) totalTokens += tokenize(c.text).length;
-        samplePages += 1;
-      } catch {
-        // ignore
-      }
-    }
+    const { pagesEstimated, pagesCounted, totalTokens } =
+      await estimateDomainTokensWithBrowser({
+        startUrl,
+        host,
+        sitemapUrls: urls,
+      });
 
     const avgEmbeddingTokensPerPage =
-      samplePages > 0 ? Math.round(totalTokens / samplePages) : 0;
-
-    const tokensEstimated =
-      avgEmbeddingTokensPerPage > 0 ? avgEmbeddingTokensPerPage * pagesEstimated : 0;
+      pagesCounted > 0 ? Math.round(totalTokens / pagesCounted) : 0;
+    const tokensEstimated = totalTokens;
 
     const estimate: CrawlEstimate = {
       domain: host,
       pagesEstimated,
-      samplePages,
+      samplePages: pagesCounted,
       avgEmbeddingTokensPerPage,
       tokensEstimated,
-      tokensLow: Math.max(0, Math.round(tokensEstimated * 0.75)),
-      tokensHigh: Math.round(tokensEstimated * 1.35),
+      tokensLow: tokensEstimated,
+      tokensHigh: tokensEstimated,
     };
 
     return res.json({ estimate });

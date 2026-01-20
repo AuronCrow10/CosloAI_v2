@@ -29,18 +29,26 @@
     var iconUrl = script.getAttribute("data-bot-icon");
     var position = script.getAttribute("data-bot-position") || "bottom-left";
 
+    // NEW: optional language parameter (default: "en")
+    var lang = script.getAttribute("data-bot-lang") || "en";
+
     console.log(iconUrl);
 
     // optional: attention sentences (separated by "|")
     // es: data-bot-hints="Serve aiuto?|Fai una domanda|Parla con me 🙂"
     var hintsAttr = script.getAttribute("data-bot-hints");
     var hints = hintsAttr
-      ? hintsAttr.split("|").map(function (h) { return h.trim(); }).filter(Boolean)
+      ? hintsAttr
+          .split("|")
+          .map(function (h) {
+            return h.trim();
+          })
+          .filter(Boolean)
       : [
           "Hai bisogno di una mano ?",
           "Fai una domanda, sono qui 👋",
           "Vuoi un consiglio veloce?",
-          "Scrivimi, rispondo subito!"
+          "Scrivimi, rispondo subito!",
         ];
 
     if (!slug) {
@@ -58,70 +66,70 @@
 
     console.log("[Bot Widget] init on", baseUrl, "slug=CAZZO", slug);
 
-var launcher = document.createElement("button");
-launcher.type = "button";
+    var launcher = document.createElement("button");
+    launcher.type = "button";
 
-launcher.style.position = "fixed";
-launcher.style.zIndex = "2147483647";
+    launcher.style.position = "fixed";
+    launcher.style.zIndex = "2147483647";
 
-// No circle/background; keep only the image
-launcher.style.width = "auto";
-launcher.style.height = "auto";
-launcher.style.borderRadius = "0";
-launcher.style.backgroundColor = "transparent";
-launcher.style.backgroundImage = "none";
+    // No circle/background; keep only the image
+    launcher.style.width = "auto";
+    launcher.style.height = "auto";
+    launcher.style.borderRadius = "0";
+    launcher.style.backgroundColor = "transparent";
+    launcher.style.backgroundImage = "none";
 
-launcher.style.border = "none";
-launcher.style.cursor = "pointer";
-launcher.style.boxShadow = "none";
-launcher.style.display = "flex";
-launcher.style.alignItems = "center";
-launcher.style.justifyContent = "center";
-launcher.style.padding = "0";
-launcher.style.color = "#4f46e5";
-launcher.style.touchAction = "manipulation";
-launcher.style.transition =
-  "transform 0.15s ease-out, box-shadow 0.15s ease-out";
+    launcher.style.border = "none";
+    launcher.style.cursor = "pointer";
+    launcher.style.boxShadow = "none";
+    launcher.style.display = "flex";
+    launcher.style.alignItems = "center";
+    launcher.style.justifyContent = "center";
+    launcher.style.padding = "0";
+    launcher.style.color = "#4f46e5";
+    launcher.style.touchAction = "manipulation";
+    launcher.style.transition =
+      "transform 0.15s ease-out, box-shadow 0.15s ease-out";
 
-if (position === "bottom-left") {
-  launcher.style.left = "16px";
-  launcher.style.bottom = "16px";
-} else {
-  launcher.style.right = "16px";
-  launcher.style.bottom = "16px";
-}
+    if (position === "bottom-left") {
+      launcher.style.left = "16px";
+      launcher.style.bottom = "16px";
+    } else {
+      launcher.style.right = "16px";
+      launcher.style.bottom = "16px";
+    }
 
-launcher.addEventListener("mouseenter", function () {
-  launcher.style.transform = "translateY(-2px) scale(1.04)";
-});
-launcher.addEventListener("mouseleave", function () {
-  launcher.style.transform = "translateY(0) scale(1)";
-});
+    launcher.addEventListener("mouseenter", function () {
+      launcher.style.transform = "translateY(-2px) scale(1.04)";
+    });
+    launcher.addEventListener("mouseleave", function () {
+      launcher.style.transform = "translateY(0) scale(1)";
+    });
 
-console.warn(iconUrl);
-if (iconUrl) {
-  var img = document.createElement("img");
-  img.src = iconUrl; // GIF
-  img.alt = "Chat bot";
+    console.warn(iconUrl);
+    if (iconUrl) {
+      var img = document.createElement("img");
+      img.src = iconUrl; // GIF
+      img.alt = "Chat bot";
 
-  // Size the image directly (button stays transparent)
-  img.style.width = "100px";
-  img.style.height = "100px";
-  img.style.objectFit = "contain";
+      // Size the image directly (button stays transparent)
+      img.style.width = "100px";
+      img.style.height = "100px";
+      img.style.objectFit = "contain";
 
-  // keep it nicely centered, no extra clipping
-  img.style.display = "block";
+      // keep it nicely centered, no extra clipping
+      img.style.display = "block";
 
-  // transparency works with white circle behind
-  img.style.borderRadius = "0"; // we already have a circular button
-  img.referrerPolicy = "no-referrer";
-  launcher.appendChild(img);
-} else {
-  launcher.textContent = "💬";
-  launcher.style.fontSize = "32px";
-  launcher.style.backgroundColor = "#4f46e5";
-  launcher.style.color = "#fff";
-}
+      // transparency works with white circle behind
+      img.style.borderRadius = "0"; // we already have a circular button
+      img.referrerPolicy = "no-referrer";
+      launcher.appendChild(img);
+    } else {
+      launcher.textContent = "💬";
+      launcher.style.fontSize = "32px";
+      launcher.style.backgroundColor = "#4f46e5";
+      launcher.style.color = "#fff";
+    }
 
     // --- pannello ---
     var panel = document.createElement("div");
@@ -177,7 +185,15 @@ if (iconUrl) {
     panel.appendChild(header);
 
     var iframe = document.createElement("iframe");
-    iframe.src = baseUrl + "/widget/" + encodeURIComponent(slug);
+
+    // NEW: pass lang as query param to the widget
+    var widgetUrl = baseUrl + "/widget/" + encodeURIComponent(slug);
+    if (lang) {
+      var sep = widgetUrl.indexOf("?") === -1 ? "?" : "&";
+      widgetUrl += sep + "lang=" + encodeURIComponent(lang);
+    }
+    iframe.src = widgetUrl;
+
     iframe.style.border = "none";
     iframe.style.width = "100%";
     iframe.style.height = "calc(100% - 40px)";
@@ -211,7 +227,8 @@ if (iconUrl) {
     hintBubble.style.opacity = "0";
     hintBubble.style.transform = "translateY(10px)";
     hintBubble.style.pointerEvents = "none";
-    hintBubble.style.transition = "opacity 0.25s ease-out, transform 0.25s ease-out";
+    hintBubble.style.transition =
+      "opacity 0.25s ease-out, transform 0.25s ease-out";
 
     if (position === "bottom-left") {
       hintBubble.style.left = "90px";
@@ -262,7 +279,10 @@ if (iconUrl) {
     startHints();
   }
 
-  if (document.readyState === "complete" || document.readyState === "interactive") {
+  if (
+    document.readyState === "complete" ||
+    document.readyState === "interactive"
+  ) {
     init();
   } else {
     document.addEventListener("DOMContentLoaded", init);
