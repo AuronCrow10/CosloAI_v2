@@ -130,14 +130,7 @@ export async function crawlDomain(
 
   const sitemapUrls = await fetchSitemapUrls(startUrl, domain, config.crawl.enableSitemap);
   const filteredSitemapUrls = sitemapUrls.filter((u) => !shouldSkipCrawlUrl(u));
-  if (filteredSitemapUrls.length !== sitemapUrls.length) {
-    logger.info(
-      `Skipping ${sitemapUrls.length - filteredSitemapUrls.length} non-HTML URLs from sitemap.`,
-    );
-  }
-  logger.info(
-    `Sitemap URLs accepted for crawl: ${filteredSitemapUrls.length} (startUrl included)`,
-  );
+  logger.info(`Sitemap URLs accepted for crawl: ${filteredSitemapUrls.length}`);
 
   const startRequests =
     filteredSitemapUrls.length > 0
@@ -149,6 +142,7 @@ export async function crawlDomain(
 
   // ---- SMART TOTALS (works with or without sitemap) ----
   const discoveredUrls = new Set<string>();
+  let skippedByExtension = 0;
 
   const addDiscovered = (rawUrl: string): boolean => {
     const norm = normalizeUrlForDedup(rawUrl);
@@ -275,7 +269,10 @@ export async function crawlDomain(
               // same-domain only
               if (u.hostname !== domain) return null;
 
-              if (shouldSkipCrawlUrl(u.toString())) return null;
+              if (shouldSkipCrawlUrl(u.toString())) {
+                skippedByExtension += 1;
+                return null;
+              }
 
               // normalize for dedup
               const norm = normalizeUrlForDedup(u.toString());
@@ -326,4 +323,9 @@ export async function crawlDomain(
   logger.info(
     `Crawl discovery summary for domain=${domain}: discovered=${discoveredUrls.size}, seeds=${startRequests.length}`,
   );
+  if (skippedByExtension > 0) {
+    logger.info(
+      `Crawl link filter skipped ${skippedByExtension} non-HTML URLs during discovery.`,
+    );
+  }
 }

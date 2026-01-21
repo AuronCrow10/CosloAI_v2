@@ -488,12 +488,15 @@ app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
 
     const urls = await fetchSitemapUrls(startUrl, host, config.crawl.enableSitemap);
 
-    const { pagesEstimated, pagesCounted, totalTokens } =
+    const { pagesEstimated, pagesVisited, pagesCounted, totalTokens } =
       await estimateDomainTokensWithBrowser({
         startUrl,
         host,
         sitemapUrls: urls,
       });
+    logger.info(
+      `Estimate summary for domain=${host}: pagesEstimated=${pagesEstimated}, pagesVisited=${pagesVisited}, pagesCounted=${pagesCounted}, tokens=${totalTokens}`,
+    );
 
     const avgEmbeddingTokensPerPage =
       pagesCounted > 0 ? Math.round(totalTokens / pagesCounted) : 0;

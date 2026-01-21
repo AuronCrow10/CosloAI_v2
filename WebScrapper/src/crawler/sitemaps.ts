@@ -1,5 +1,6 @@
 import { load as cheerioLoad } from 'cheerio';
 import { logger } from '../logger.js';
+import { shouldSkipCrawlUrl } from './filters.js';
 
 const COMMON_SITEMAP_PATHS = [
   '/sitemap.xml',
@@ -157,5 +158,12 @@ export async function fetchSitemapUrls(
     );
   }
 
-  return Array.from(pageUrls);
+  const allUrls = Array.from(pageUrls);
+  const filtered = allUrls.filter((u) => !shouldSkipCrawlUrl(u));
+  const skipped = allUrls.length - filtered.length;
+  if (skipped > 0) {
+    logger.info(`Filtered ${skipped} non-HTML URLs from sitemap discovery.`);
+  }
+
+  return filtered;
 }
