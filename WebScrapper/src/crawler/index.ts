@@ -139,6 +139,12 @@ export async function crawlDomain(
           ...filteredSitemapUrls.map((url) => ({ url, userData: { depth: 0 } })),
         ]
       : [{ url: startUrl, userData: { depth: 0 } }];
+  const filteredStartRequests = startRequests.filter((r) => !shouldSkipCrawlUrl(r.url));
+  if (filteredStartRequests.length !== startRequests.length) {
+    logger.info(
+      `Skipping ${startRequests.length - filteredStartRequests.length} non-HTML start requests.`,
+    );
+  }
 
   // ---- SMART TOTALS (works with or without sitemap) ----
   const discoveredUrls = new Set<string>();
@@ -152,8 +158,8 @@ export async function crawlDomain(
     return true;
   };
 
-  for (const r of startRequests) addDiscovered(r.url);
-  logger.info(`Seeded ${startRequests.length} start requests`);
+  for (const r of filteredStartRequests) addDiscovered(r.url);
+  logger.info(`Seeded ${filteredStartRequests.length} start requests`);
 
   // Initial estimate:
   // - sitemap: bounded count is meaningful right away
@@ -312,7 +318,7 @@ export async function crawlDomain(
     },
   });
 
-  await crawler.run(startRequests);
+  await crawler.run(filteredStartRequests);
 
   // final totals report (helps UI be consistent right before completion webhook)
   await maybeReportTotals(true);
@@ -321,7 +327,7 @@ export async function crawlDomain(
     `Crawl finished for domain=${domain}, client=${clientInfo.id}. pagesVisited=${pagesVisited}, pagesStored=${pagesStored}, chunksStored=${chunksStored}, totalEstimated=${totalPagesEstimated}`,
   );
   logger.info(
-    `Crawl discovery summary for domain=${domain}: discovered=${discoveredUrls.size}, seeds=${startRequests.length}`,
+    `Crawl discovery summary for domain=${domain}: discovered=${discoveredUrls.size}, seeds=${filteredStartRequests.length}`,
   );
   if (skippedByExtension > 0) {
     logger.info(

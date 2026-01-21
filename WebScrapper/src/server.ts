@@ -231,7 +231,13 @@ async function estimateDomainTokensWithBrowser(params: {
   const filteredSitemapUrls = sitemapUrls.filter((u) => !shouldSkipCrawlUrl(u));
   const seedUrls = filteredSitemapUrls.length > 0 ? [startUrl, ...filteredSitemapUrls] : [startUrl];
   const startRequests = seedUrls.map((url) => ({ url, userData: { depth: 0 } }));
-  for (const r of startRequests) addDiscovered(r.url);
+  const filteredStartRequests = startRequests.filter((r) => !shouldSkipCrawlUrl(r.url));
+  if (filteredStartRequests.length !== startRequests.length) {
+    logger.info(
+      `Estimate skipping ${startRequests.length - filteredStartRequests.length} non-HTML start requests.`,
+    );
+  }
+  for (const r of filteredStartRequests) addDiscovered(r.url);
 
   let pagesVisited = 0;
   let pagesCounted = 0;
@@ -313,7 +319,7 @@ async function estimateDomainTokensWithBrowser(params: {
     },
   });
 
-  await crawler.run(startRequests);
+  await crawler.run(filteredStartRequests);
 
   const pagesEstimated = Math.min(config.crawl.maxPages, discoveredUrls.size);
 

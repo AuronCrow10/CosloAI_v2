@@ -6,10 +6,20 @@ const BLOCKED_EXTENSIONS = new Set([
   '.xlsx',
   '.ppt',
   '.pptx',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.bmp',
+  '.tif',
+  '.tiff',
 ]);
 
 export function shouldSkipCrawlUrl(rawUrl: string): boolean {
-  const extPattern = /\.(pdf|docx?|xlsx?|pptx?)(?:$|[?#])/i;
+  const extPattern =
+    /\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|gif|webp|svg|bmp|tiff?)(?:$|[?#])/i;
   if (extPattern.test(rawUrl)) return true;
   try {
     const u = new URL(rawUrl);
