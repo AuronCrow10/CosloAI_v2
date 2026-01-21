@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { PlaywrightCrawler, RequestOptions } from '@crawlee/playwright';
+import { RequestQueue } from '@crawlee/core';
 import { AppConfig, ParsedPage, Client } from '../types.js';
 import { Database } from '../db/index.js';
 import { EmbeddingService } from '../embeddings/index.js';
@@ -6,6 +8,7 @@ import { parseHtmlToText } from '../parser/index.js';
 import { logger } from '../logger.js';
 import { ingestTextForClient } from '../ingestion/ingestText.js';
 import { fetchSitemapUrls } from './sitemaps.js';
+import { shouldSkipCrawlUrl } from './filters.js';
 
 interface CrawlDependencies {
   config: AppConfig;
@@ -126,12 +129,21 @@ export async function crawlDomain(
   let chunksStored = 0;
 
   const sitemapUrls = await fetchSitemapUrls(startUrl, domain, config.crawl.enableSitemap);
+  const filteredSitemapUrls = sitemapUrls.filter((u) => !shouldSkipCrawlUrl(u));
+  if (filteredSitemapUrls.length !== sitemapUrls.length) {
+    logger.info(
+      `Skipping ${sitemapUrls.length - filteredSitemapUrls.length} non-HTML URLs from sitemap.`,
+    );
+  }
+  logger.info(
+    `Sitemap URLs accepted for crawl: ${filteredSitemapUrls.length} (startUrl included)`,
+  );
 
   const startRequests =
-    sitemapUrls.length > 0
+    filteredSitemapUrls.length > 0
       ? [
           { url: startUrl, userData: { depth: 0 } },
-          ...sitemapUrls.map((url) => ({ url, userData: { depth: 0 } })),
+          ...filteredSitemapUrls.map((url) => ({ url, userData: { depth: 0 } })),
         ]
       : [{ url: startUrl, userData: { depth: 0 } }];
 
@@ -147,6 +159,7 @@ export async function crawlDomain(
   };
 
   for (const r of startRequests) addDiscovered(r.url);
+  logger.info(`Seeded ${startRequests.length} start requests`);
 
   // Initial estimate:
   // - sitemap: bounded count is meaningful right away
@@ -185,11 +198,16 @@ export async function crawlDomain(
   // Emit initial totals immediately
   await maybeReportTotals(true);
 
+  const queueName = job?.id ? `crawl-${job.id}` : `crawl-${crypto.randomUUID()}`;
+  const requestQueue = await RequestQueue.open(queueName);
+  logger.info(`Request queue opened: ${queueName}`);
+
   const crawler = new PlaywrightCrawler({
     maxRequestsPerCrawl: config.crawl.maxPages,
     maxConcurrency: config.crawl.concurrency,
     respectRobotsTxtFile: config.crawl.respectRobotsTxt,
     useSessionPool: true,
+    requestQueue,
 
     async requestHandler({ request, page, enqueueLinks, log }) {
       const depth: number = (request.userData.depth as number) ?? 0;
@@ -257,6 +275,8 @@ export async function crawlDomain(
               // same-domain only
               if (u.hostname !== domain) return null;
 
+              if (shouldSkipCrawlUrl(u.toString())) return null;
+
               // normalize for dedup
               const norm = normalizeUrlForDedup(u.toString());
               if (!norm) return null;
@@ -302,5 +322,8 @@ export async function crawlDomain(
 
   logger.info(
     `Crawl finished for domain=${domain}, client=${clientInfo.id}. pagesVisited=${pagesVisited}, pagesStored=${pagesStored}, chunksStored=${chunksStored}, totalEstimated=${totalPagesEstimated}`,
+  );
+  logger.info(
+    `Crawl discovery summary for domain=${domain}: discovered=${discoveredUrls.size}, seeds=${startRequests.length}`,
   );
 }

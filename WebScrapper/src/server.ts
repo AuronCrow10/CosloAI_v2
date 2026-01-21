@@ -4,12 +4,14 @@ import crypto from 'node:crypto';
 import multer from 'multer';
 
 import { PlaywrightCrawler, RequestOptions } from '@crawlee/playwright';
+import { RequestQueue } from '@crawlee/core';
 import { loadConfig } from './config/index.js';
 import { Database } from './db/index.js';
 import { EmbeddingService } from './embeddings/index.js';
 import { searchClientContent } from './search/service.js';
 import { crawlDomain, normalizeDomainToStartUrl, extractDomain } from './crawler/index.js';
 import { fetchSitemapUrls } from './crawler/sitemaps.js';
+import { shouldSkipCrawlUrl } from './crawler/filters.js';
 
 import { extractTextFromBuffer } from './documents/extract.js';
 import { ingestTextForClient } from './ingestion/ingestText.js';
@@ -226,7 +228,8 @@ async function estimateDomainTokensWithBrowser(params: {
     return true;
   };
 
-  const seedUrls = sitemapUrls.length > 0 ? [startUrl, ...sitemapUrls] : [startUrl];
+  const filteredSitemapUrls = sitemapUrls.filter((u) => !shouldSkipCrawlUrl(u));
+  const seedUrls = filteredSitemapUrls.length > 0 ? [startUrl, ...filteredSitemapUrls] : [startUrl];
   const startRequests = seedUrls.map((url) => ({ url, userData: { depth: 0 } }));
   for (const r of startRequests) addDiscovered(r.url);
 
@@ -234,11 +237,14 @@ async function estimateDomainTokensWithBrowser(params: {
   let pagesCounted = 0;
   let totalTokens = 0;
 
+  const requestQueue = await RequestQueue.open(`estimate-${crypto.randomUUID()}`);
+
   const crawler = new PlaywrightCrawler({
     maxRequestsPerCrawl: config.crawl.maxPages,
     maxConcurrency: config.crawl.concurrency,
     respectRobotsTxtFile: config.crawl.respectRobotsTxt,
     useSessionPool: true,
+    requestQueue,
 
     async requestHandler({ request, page, enqueueLinks, log }) {
       const depth: number = (request.userData.depth as number) ?? 0;
@@ -285,6 +291,7 @@ async function estimateDomainTokensWithBrowser(params: {
             try {
               const u = new URL(reqOpts.url);
               if (u.hostname !== host) return null;
+              if (shouldSkipCrawlUrl(u.toString())) return null;
 
               const norm = normalizeUrlForEstimate(u.toString());
               if (!norm) return null;

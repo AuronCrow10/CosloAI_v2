@@ -107,6 +107,9 @@ export async function fetchSitemapUrls(
 
   const robotsSitemaps = await fetchRobotsSitemaps(startUrl, domain);
   const candidates = buildSitemapCandidates(startUrl, robotsSitemaps);
+  logger.info(
+    `Sitemap discovery candidates: ${candidates.length} (robots=${robotsSitemaps.length})`,
+  );
   const queue = [...new Set(candidates)];
   const seenSitemaps = new Set<string>();
   const pageUrls = new Set<string>();
@@ -149,7 +152,9 @@ export async function fetchSitemapUrls(
   }
 
   if (pageUrls.size > 0) {
-    logger.info(`Parsed ${pageUrls.size} URLs from sitemap discovery`);
+    logger.info(
+      `Parsed ${pageUrls.size} URLs from sitemap discovery (sitemapsFetched=${seenSitemaps.size})`,
+    );
   }
 
   return Array.from(pageUrls);
