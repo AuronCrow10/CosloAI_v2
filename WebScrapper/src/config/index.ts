@@ -55,6 +55,7 @@ export function loadConfig(): AppConfig {
     contentWaitSelector: process.env.CRAWL_CONTENT_WAIT_SELECTOR || undefined,
     minChars: intEnv('CRAWL_MIN_CHARS', 500),
     enableSitemap: boolEnv('ENABLE_SITEMAP', true),
+    respectRobotsTxt: boolEnv('CRAWL_RESPECT_ROBOTS', true),
   };
 
   const chunking: ChunkingConfig = {

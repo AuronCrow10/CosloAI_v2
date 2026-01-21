@@ -9,6 +9,7 @@ import { Database } from './db/index.js';
 import { EmbeddingService } from './embeddings/index.js';
 import { searchClientContent } from './search/service.js';
 import { crawlDomain, normalizeDomainToStartUrl, extractDomain } from './crawler/index.js';
+import { fetchSitemapUrls } from './crawler/sitemaps.js';
 
 import { extractTextFromBuffer } from './documents/extract.js';
 import { ingestTextForClient } from './ingestion/ingestText.js';
@@ -236,7 +237,7 @@ async function estimateDomainTokensWithBrowser(params: {
   const crawler = new PlaywrightCrawler({
     maxRequestsPerCrawl: config.crawl.maxPages,
     maxConcurrency: config.crawl.concurrency,
-    respectRobotsTxtFile: true,
+    respectRobotsTxtFile: config.crawl.respectRobotsTxt,
     useSessionPool: true,
 
     async requestHandler({ request, page, enqueueLinks, log }) {
@@ -478,33 +479,7 @@ app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
     const startUrl = normalizeDomainToStartUrl(domain);
     const host = extractDomain(domain);
 
-    let urls: string[] = [];
-    try {
-      const sitemapUrl = new URL(startUrl);
-      sitemapUrl.pathname = '/sitemap.xml';
-      const r = await fetch(sitemapUrl.toString());
-      if (r.ok) {
-        const xml = await r.text();
-        const $ = (await import('cheerio')).load(xml, { xmlMode: true });
-        const found: string[] = [];
-        $('url > loc, loc').each((_, el) => {
-          const raw = $(el).text().trim();
-          if (raw) found.push(raw);
-        });
-        urls = found
-          .map((u) => {
-            try {
-              const x = new URL(u);
-              return x.hostname === host ? x.toString() : null;
-            } catch {
-              return null;
-            }
-          })
-          .filter(Boolean) as string[];
-      }
-    } catch {
-      // ignore
-    }
+    const urls = await fetchSitemapUrls(startUrl, host, config.crawl.enableSitemap);
 
     const { pagesEstimated, pagesCounted, totalTokens } =
       await estimateDomainTokensWithBrowser({

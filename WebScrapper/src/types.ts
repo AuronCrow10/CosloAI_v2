@@ -7,6 +7,7 @@ export interface CrawlConfig {
   contentWaitSelector?: string;
   minChars: number;
   enableSitemap: boolean;
+  respectRobotsTxt: boolean;
 }
 
 export interface ChunkingConfig {

@@ -1,11 +1,11 @@
 import { PlaywrightCrawler, RequestOptions } from '@crawlee/playwright';
-import { load as cheerioLoad } from 'cheerio';
 import { AppConfig, ParsedPage, Client } from '../types.js';
 import { Database } from '../db/index.js';
 import { EmbeddingService } from '../embeddings/index.js';
 import { parseHtmlToText } from '../parser/index.js';
 import { logger } from '../logger.js';
 import { ingestTextForClient } from '../ingestion/ingestText.js';
+import { fetchSitemapUrls } from './sitemaps.js';
 
 interface CrawlDependencies {
   config: AppConfig;
@@ -105,58 +105,6 @@ function normalizeUrlForDedup(raw: string): string | null {
   }
 }
 
-async function tryFetchSitemapUrls(
-  startUrl: string,
-  domain: string,
-  enableSitemap: boolean,
-): Promise<string[]> {
-  if (!enableSitemap) {
-    logger.info('Sitemap support disabled via config.');
-    return [];
-  }
-
-  const sitemapUrl = new URL(startUrl);
-  sitemapUrl.pathname = '/sitemap.xml';
-  sitemapUrl.search = '';
-  sitemapUrl.hash = '';
-
-  logger.info(`Attempting to fetch sitemap from ${sitemapUrl.toString()}`);
-
-  try {
-    const res = await fetch(sitemapUrl.toString());
-    if (!res.ok) {
-      logger.warn(
-        `Sitemap fetch failed with status ${res.status}. Falling back to smart-discovery crawl.`,
-      );
-      return [];
-    }
-
-    const xml = await res.text();
-    const $ = cheerioLoad(xml, { xmlMode: true });
-
-    const urls: string[] = [];
-    $('url > loc, loc').each((_, el) => {
-      const raw = $(el).text().trim();
-      if (!raw) return;
-
-      try {
-        const u = new URL(raw);
-        if (u.hostname === domain) {
-          urls.push(u.toString());
-        }
-      } catch {
-        // ignore invalid URL
-      }
-    });
-
-    logger.info(`Parsed ${urls.length} URLs from sitemap.xml`);
-    return urls;
-  } catch (err) {
-    logger.warn(`Error while fetching/parsing sitemap (${sitemapUrl.toString()}):`, err);
-    return [];
-  }
-}
-
 export async function crawlDomain(
   domainInput: string,
   clientInfo: Client,
@@ -177,7 +125,7 @@ export async function crawlDomain(
   let pagesStored = 0;
   let chunksStored = 0;
 
-  const sitemapUrls = await tryFetchSitemapUrls(startUrl, domain, config.crawl.enableSitemap);
+  const sitemapUrls = await fetchSitemapUrls(startUrl, domain, config.crawl.enableSitemap);
 
   const startRequests =
     sitemapUrls.length > 0
@@ -240,7 +188,7 @@ export async function crawlDomain(
   const crawler = new PlaywrightCrawler({
     maxRequestsPerCrawl: config.crawl.maxPages,
     maxConcurrency: config.crawl.concurrency,
-    respectRobotsTxtFile: true,
+    respectRobotsTxtFile: config.crawl.respectRobotsTxt,
     useSessionPool: true,
 
     async requestHandler({ request, page, enqueueLinks, log }) {
