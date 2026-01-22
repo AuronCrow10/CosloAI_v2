@@ -7,6 +7,7 @@ import {
   signAccessToken,
   createRefreshToken,
   revokeRefreshToken,
+  revokeAllRefreshTokensForUser,
   sendVerificationEmail,
   googleClient,
   signMfaToken,
@@ -14,6 +15,9 @@ import {
 } from "../services/authService";
 import { config } from "../config";
 import { authenticator } from "otplib";
+import { randomInt } from "crypto";
+import { addSeconds } from "date-fns";
+import { sendMail } from "../services/mailer";
 
 const router = Router();
 
@@ -114,6 +118,118 @@ router.post("/verify-email", async (req: Request, res: Response) => {
   ]);
 
   return res.json({ message: "Email verified" });
+});
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email()
+});
+
+router.post("/forgot-password", async (req: Request, res: Response) => {
+  const parsed = forgotPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { email } = parsed.data;
+  const user = await prisma.user.findUnique({ where: { email } });
+
+  // Always respond with a generic message to avoid account enumeration.
+  const safeResponse = {
+    message:
+      "If an account exists for this email, you will receive a reset code shortly."
+  };
+
+  if (!user || !user.passwordHash) {
+    return res.json(safeResponse);
+  }
+
+  const code = String(randomInt(0, 1000000)).padStart(6, "0");
+  const codeHash = await hashPassword(code);
+  const expiresAt = addSeconds(new Date(), 60 * 10); // 10 minutes
+
+  await prisma.passwordResetToken.deleteMany({
+    where: { userId: user.id }
+  });
+
+  await prisma.passwordResetToken.create({
+    data: {
+      userId: user.id,
+      codeHash,
+      expiresAt
+    }
+  });
+
+  await sendMail({
+    to: email,
+    subject: "Your Coslo password reset code",
+    text:
+      `Your password reset code is ${code}. ` +
+      "It expires in 10 minutes. If you didn't request this, you can ignore this email.",
+    html:
+      `<p>Your password reset code is <strong>${code}</strong>.</p>` +
+      "<p>This code expires in 10 minutes.</p>" +
+      "<p>If you didn't request this, you can ignore this email.</p>"
+  });
+
+  return res.json(safeResponse);
+});
+
+const resetPasswordSchema = z.object({
+  email: z.string().email(),
+  code: z.string().regex(/^\d{6}$/),
+  newPassword: passwordSchema
+});
+
+router.post("/reset-password", async (req: Request, res: Response) => {
+  const parsed = resetPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { email, code, newPassword } = parsed.data;
+  const user = await prisma.user.findUnique({ where: { email } });
+
+  if (!user || !user.passwordHash) {
+    return res.status(400).json({ error: "Invalid or expired code." });
+  }
+
+  const token = await prisma.passwordResetToken.findFirst({
+    where: {
+      userId: user.id,
+      usedAt: null,
+      expiresAt: { gt: new Date() }
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  if (!token) {
+    return res.status(400).json({ error: "Invalid or expired code." });
+  }
+
+  const ok = await verifyPassword(code, token.codeHash);
+  if (!ok) {
+    return res.status(400).json({ error: "Invalid or expired code." });
+  }
+
+  const newHash = await hashPassword(newPassword);
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: newHash }
+    }),
+    prisma.passwordResetToken.update({
+      where: { id: token.id },
+      data: { usedAt: new Date() }
+    }),
+    prisma.passwordResetToken.deleteMany({
+      where: { userId: user.id, usedAt: null }
+    })
+  ]);
+
+  await revokeAllRefreshTokensForUser(user.id);
+
+  return res.json({ message: "Password updated successfully." });
 });
 
 const loginSchema = z.object({

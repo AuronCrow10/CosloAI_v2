@@ -36,8 +36,11 @@ model User {
   bots             Bot[]
   refreshTokens    RefreshToken[]
   emailTokens      EmailVerificationToken[]
+  passwordResetTokens PasswordResetToken[]
   metaSessions     MetaConnectSession[]
   whatsappSessions WhatsappConnectSession[]
+  googleCalendarConnectSessions GoogleCalendarConnectSession[]
+  googleCalendarConnections     GoogleCalendarConnection[]
 
   openaiUsages OpenAIUsage[]
 
@@ -109,6 +112,8 @@ model Bot {
   payments         Payment[]
   metaSessions     MetaConnectSession[]
   whatsappSessions WhatsappConnectSession[]
+  googleCalendarConnectSessions GoogleCalendarConnectSession[]
+  googleCalendarConnection      GoogleCalendarConnection?
 
   openaiUsages OpenAIUsage[]
 
@@ -341,6 +346,18 @@ model EmailVerificationToken {
   @@index([userId])
 }
 
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
 //
 // DB-driven feature pricing (LEGACY – still there, but we’ll move to plans)
 //
@@ -464,6 +481,53 @@ model WhatsappConnectSession {
   @@index([botId])
   @@index([userId])
   @@index([createdAt])
+}
+
+model GoogleCalendarConnectSession {
+  id String @id @default(uuid())
+
+  botId  String
+  bot    Bot    @relation(fields: [botId], references: [id])
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  accessToken  String
+  refreshToken String?
+  scope        String?
+  tokenType    String?
+  expiryDate   DateTime?
+
+  calendarsJson Json
+
+  createdAt DateTime @default(now())
+
+  @@index([botId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model GoogleCalendarConnection {
+  id String @id @default(uuid())
+
+  botId  String @unique
+  bot    Bot    @relation(fields: [botId], references: [id])
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  accessToken  String
+  refreshToken String?
+  scope        String?
+  tokenType    String?
+  expiryDate   DateTime?
+
+  calendarId       String
+  calendarSummary  String?
+  calendarTimeZone String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model OpenAIUsage {
@@ -783,4 +847,3 @@ model PlanUsageAlert {
   @@index([botId])
   @@unique([botId, year, month, threshold], name: "bot_month_threshold_unique")
 }
-
