@@ -19,7 +19,7 @@ export interface KnowledgeSearchResponse {
 
 const client = axios.create({
   baseURL: config.knowledgeBaseUrl,
-  timeout: 600000,
+  timeout: 120000,
   headers: {
     "X-Internal-Token": config.knowledgeInternalToken
   }
@@ -74,10 +74,12 @@ export async function createKnowledgeClient(params: {
 export async function crawlDomain(params: {
   clientId: string;
   domain: string;
+  estimateId?: string;
 }): Promise<{ status: string; jobId: string; clientId: string; domain: string }> {
   const res = await client.post("/crawl", {
     clientId: params.clientId,
-    domain: params.domain
+    domain: params.domain,
+    estimateId: params.estimateId
   });
   return res.data;
 }

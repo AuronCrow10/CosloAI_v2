@@ -25,11 +25,17 @@ export interface DbConfig {
   connectionString: string;
 }
 
+export interface CacheConfig {
+  redisUrl?: string;
+  estimateTtlSeconds: number;
+}
+
 export interface AppConfig {
   db: DbConfig;
   embeddings: EmbeddingsConfig;
   crawl: CrawlConfig;
   chunking: ChunkingConfig;
+  cache: CacheConfig;
 }
 
 export interface ParsedPage {

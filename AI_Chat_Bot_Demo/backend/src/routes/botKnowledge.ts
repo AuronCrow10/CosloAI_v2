@@ -85,6 +85,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
     const userId = req.user!.id;
     const overrideDomain: string | undefined = req.body?.domain;
     const confirmed: boolean = req.body?.confirm === true;
+    const estimateId: string | undefined = req.body?.estimateId;
 
     const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
 
@@ -99,9 +100,11 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
     }
 
     let estimate: any = null;
+    let estimateKey: string | null = null;
     try {
       const estimateResp = await estimateCrawl(domainToUse);
       estimate = estimateResp?.estimate ?? null;
+      estimateKey = estimateResp?.estimateId ?? null;
     } catch (err) {
       console.error("Error in pre-crawl estimate", err);
     }
@@ -135,6 +138,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
         status: "estimate",
         canProceed: true,
         estimate,
+        estimateId: estimateKey,
         limit,
         usedTokens,
         remainingTokens,
@@ -144,7 +148,8 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
 
     const resp = await crawlDomain({
       clientId: knowledgeClientId,
-      domain: domainToUse
+      domain: domainToUse,
+      estimateId: estimateId || estimateKey || undefined
     });
 
     // Persist last crawl info (optional: useful elsewhere)
@@ -163,7 +168,8 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
       jobId: resp.jobId,
       knowledgeClientId,
       domain: resp.domain,
-      estimate
+      estimate,
+      estimateId: estimateKey
     });
   } catch (err: any) {
     console.error("Error in crawl-domain", err);

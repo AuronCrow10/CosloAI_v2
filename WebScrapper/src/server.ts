@@ -19,6 +19,14 @@ import { chunkText } from './chunker/index.js';
 import { tokenize } from './tokenizer/index.js';
 
 import { logger } from './logger.js';
+import {
+  buildEstimateSignature,
+  getCachedEstimateBySignature,
+  setCachedEstimate,
+  getCachedEstimateById,
+  deleteCachedEstimateById,
+  type CachedPage,
+} from './cache/estimateCache.js';
 import type {
   CrawlJobPublicView,
   DocsEstimate,
@@ -216,6 +224,7 @@ async function estimateDomainTokensWithBrowser(params: {
   pagesVisited: number;
   pagesCounted: number;
   totalTokens: number;
+  pages: CachedPage[];
 }> {
   const { startUrl, host, sitemapUrls } = params;
 
@@ -242,6 +251,7 @@ async function estimateDomainTokensWithBrowser(params: {
   let pagesVisited = 0;
   let pagesCounted = 0;
   let totalTokens = 0;
+  const pages: CachedPage[] = [];
 
   const requestQueue = await RequestQueue.open(`estimate-${crypto.randomUUID()}`);
 
@@ -288,6 +298,12 @@ async function estimateDomainTokensWithBrowser(params: {
         const chunks = chunkText(parsed.cleanedText, request.url, host, config.chunking);
         for (const c of chunks) totalTokens += tokenize(c.text).length;
         pagesCounted += 1;
+        pages.push({
+          url: parsed.url,
+          domain: parsed.domain,
+          cleanedText: parsed.cleanedText,
+          title: parsed.title,
+        });
       }
 
       if (depth < config.crawl.maxDepth) {
@@ -323,7 +339,64 @@ async function estimateDomainTokensWithBrowser(params: {
 
   const pagesEstimated = Math.min(config.crawl.maxPages, discoveredUrls.size);
 
-  return { pagesEstimated, pagesVisited, pagesCounted, totalTokens };
+  return { pagesEstimated, pagesVisited, pagesCounted, totalTokens, pages };
+}
+
+async function ingestCachedPages(params: {
+  pages: CachedPage[];
+  client: NonNullable<Awaited<ReturnType<typeof db.getClientById>>>;
+  deps: { config: typeof config; db: typeof db; embeddings: typeof embeddings };
+  job?: {
+    id: string;
+    onTotalsKnown?: (totalPagesEstimated: number | null) => Promise<void>;
+    onProgress?: (p: {
+      pagesVisited: number;
+      pagesStored: number;
+      chunksStored: number;
+    }) => Promise<void>;
+  };
+}): Promise<{ pagesVisited: number; pagesStored: number; chunksStored: number }> {
+  const { pages, client, deps, job } = params;
+  const { config, db, embeddings } = deps;
+
+  let pagesVisited = 0;
+  let pagesStored = 0;
+  let chunksStored = 0;
+
+  if (job?.onTotalsKnown) {
+    await job.onTotalsKnown(pages.length);
+  }
+
+  for (const page of pages) {
+    pagesVisited += 1;
+
+    if (!page.cleanedText || page.cleanedText.length < config.crawl.minChars) {
+      continue;
+    }
+
+    try {
+      const { chunksCreated, chunksStored: storedNow } = await ingestTextForClient({
+        text: page.cleanedText,
+        url: page.url,
+        domain: page.domain,
+        client,
+        deps: { config, db, embeddings },
+      });
+
+      if (chunksCreated > 0) {
+        pagesStored += 1;
+        chunksStored += storedNow;
+      }
+    } catch (err) {
+      logger.error(`Ingestion failed for cached URL ${page.url}`, { err });
+    }
+
+    if (job?.onProgress) {
+      await job.onProgress({ pagesVisited, pagesStored, chunksStored });
+    }
+  }
+
+  return { pagesVisited, pagesStored, chunksStored };
 }
 
 // --- Clients ---
@@ -374,7 +447,11 @@ app.delete('/clients/:id', requireInternalAuth, async (req, res) => {
 // --- Crawl: create job + run async ---
 app.post('/crawl', requireInternalAuth, async (req, res) => {
   try {
-    const { clientId, domain } = req.body as { clientId?: string; domain?: string };
+    const { clientId, domain, estimateId } = req.body as {
+      clientId?: string;
+      domain?: string;
+      estimateId?: string;
+    };
 
     if (!clientId || !domain) {
       return res.status(400).json({ error: 'clientId and domain are required' });
@@ -385,37 +462,69 @@ app.post('/crawl', requireInternalAuth, async (req, res) => {
 
     const startUrl = normalizeDomainToStartUrl(domain);
     const host = extractDomain(domain);
+    const signature = buildEstimateSignature(host, config);
+    const cached = estimateId ? await getCachedEstimateById(estimateId, config) : null;
+    const cacheUsable =
+      cached && cached.meta.domain === host && cached.meta.signature === signature;
+    if (estimateId && !cacheUsable) {
+      logger.warn(
+        `[KB] Estimate cache miss or mismatch for estimateId=${estimateId} domain=${host}`,
+      );
+    }
 
     const job = await db.createCrawlJob({
       clientId,
       domain: domain,
       startUrl,
-      totalPagesEstimated: null,
+      totalPagesEstimated: cacheUsable ? cached.meta.pagesEstimated : null,
     });
 
     (async () => {
       try {
         await db.markCrawlJobRunning(job.id);
 
-        await crawlDomain(domain, client, {
-          config,
-          db,
-          embeddings,
-          job: {
-            id: job.id,
-            onTotalsKnown: async (totalPagesEstimated) => {
-              await db.updateCrawlJobTotals(job.id, totalPagesEstimated ?? null);
-            },
-            onProgress: async ({ pagesVisited, pagesStored, chunksStored }) => {
-              await db.updateCrawlJobProgress({
-                jobId: job.id,
-                pagesVisited,
-                pagesStored,
-                chunksStored,
-              });
-            },
+        const jobHooks = {
+          id: job.id,
+          onTotalsKnown: async (totalPagesEstimated: number | null) => {
+            await db.updateCrawlJobTotals(job.id, totalPagesEstimated ?? null);
           },
-        });
+          onProgress: async ({
+            pagesVisited,
+            pagesStored,
+            chunksStored,
+          }: {
+            pagesVisited: number;
+            pagesStored: number;
+            chunksStored: number;
+          }) => {
+            await db.updateCrawlJobProgress({
+              jobId: job.id,
+              pagesVisited,
+              pagesStored,
+              chunksStored,
+            });
+          },
+        };
+
+        if (cacheUsable && cached) {
+          logger.info(
+            `[KB] Using cached estimate ${cached.meta.estimateId} for domain=${host}`,
+          );
+          await ingestCachedPages({
+            pages: cached.pages,
+            client,
+            deps: { config, db, embeddings },
+            job: jobHooks,
+          });
+          await deleteCachedEstimateById(cached.meta.estimateId, config, cached.meta.signature);
+        } else {
+          await crawlDomain(domain, client, {
+            config,
+            db,
+            embeddings,
+            job: jobHooks,
+          });
+        }
 
         await db.markCrawlJobCompleted(job.id);
         logger.info(`[KB] Crawl completed job=${job.id} client=${clientId} domain=${domain}`);
@@ -491,10 +600,32 @@ app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
 
     const startUrl = normalizeDomainToStartUrl(domain);
     const host = extractDomain(domain);
+    const signature = buildEstimateSignature(host, config);
+
+    const cached = await getCachedEstimateBySignature(signature, config);
+    if (cached) {
+      const estimate: CrawlEstimate = {
+        domain: cached.meta.domain,
+        pagesEstimated: cached.meta.pagesEstimated,
+        samplePages: cached.meta.pagesCounted,
+        avgEmbeddingTokensPerPage:
+          cached.meta.pagesCounted > 0
+            ? Math.round(cached.meta.tokensEstimated / cached.meta.pagesCounted)
+            : 0,
+        tokensEstimated: cached.meta.tokensEstimated,
+        tokensLow: cached.meta.tokensEstimated,
+        tokensHigh: cached.meta.tokensEstimated,
+      };
+
+      logger.info(
+        `Estimate cache hit for domain=${host} estimateId=${cached.meta.estimateId}`,
+      );
+      return res.json({ estimate, estimateId: cached.meta.estimateId, cached: true });
+    }
 
     const urls = await fetchSitemapUrls(startUrl, host, config.crawl.enableSitemap);
 
-    const { pagesEstimated, pagesVisited, pagesCounted, totalTokens } =
+    const { pagesEstimated, pagesVisited, pagesCounted, totalTokens, pages } =
       await estimateDomainTokensWithBrowser({
         startUrl,
         host,
@@ -517,8 +648,31 @@ app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
       tokensLow: tokensEstimated,
       tokensHigh: tokensEstimated,
     };
+    const estimateId = crypto.randomUUID();
+    await setCachedEstimate(
+      {
+        meta: {
+          estimateId,
+          signature,
+          domain: host,
+          startUrl,
+          createdAt: new Date().toISOString(),
+          pagesEstimated,
+          pagesVisited,
+          pagesCounted,
+          tokensEstimated,
+          schemaVersion: 1,
+        },
+        pages,
+      },
+      config,
+    );
 
-    return res.json({ estimate });
+    logger.info(
+      `Estimate cache stored for domain=${host} estimateId=${estimateId} pagesCounted=${pagesCounted}`,
+    );
+
+    return res.json({ estimate, estimateId });
   } catch (err) {
     logger.error('Error in POST /estimate/crawl', err);
     return res.status(500).json({ error: 'Internal error' });

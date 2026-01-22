@@ -5,6 +5,7 @@ import {
   ChunkingConfig,
   EmbeddingsConfig,
   DbConfig,
+  CacheConfig,
 } from '../types.js';
 import { logger } from '../logger.js';
 
@@ -63,5 +64,10 @@ export function loadConfig(): AppConfig {
     chunkOverlapTokens: intEnv('CHUNK_OVERLAP_TOKENS', 150),
   };
 
-  return { db, embeddings, crawl, chunking };
+  const cache: CacheConfig = {
+    redisUrl: process.env.REDIS_URL || undefined,
+    estimateTtlSeconds: intEnv('ESTIMATE_CACHE_TTL_SECONDS', 1800),
+  };
+
+  return { db, embeddings, crawl, chunking, cache };
 }
