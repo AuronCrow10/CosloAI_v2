@@ -111,10 +111,52 @@ app.use(cookieParser());
 app.disable("x-powered-by");
 
 // Security headers (CSP disabled here to avoid breaking existing UI)
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  baseUri: ["'self'"],
+  objectSrc: ["'none'"],
+  frameAncestors: ["'self'"],
+  formAction: ["'self'"],
+  imgSrc: ["'self'", "data:", "https:"],
+  fontSrc: ["'self'", "data:", "https:"],
+  styleSrc: ["'self'", "'unsafe-inline'", "https:"],
+  scriptSrc: [
+    "'self'",
+    "https://accounts.google.com",
+    "https://connect.facebook.net",
+    "https://coslo.it"
+  ],
+  frameSrc: [
+    "'self'",
+    "https://accounts.google.com",
+    "https://*.google.com",
+    "https://www.facebook.com"
+  ],
+  connectSrc: [
+    "'self'",
+    "https://accounts.google.com",
+    "https://oauth2.googleapis.com",
+    "https://www.googleapis.com",
+    "https://graph.facebook.com",
+    "https://*.facebook.com",
+    "wss:"
+  ]
+};
+
+const cspReportOnly = process.env.CSP_REPORT_ONLY === "1";
+const isProd = process.env.NODE_ENV === "production";
+if (isProd) {
+  (cspDirectives as any).upgradeInsecureRequests = [];
+}
+
 app.use(
   helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: cspDirectives,
+      reportOnly: cspReportOnly
+    }
   })
 );
 
