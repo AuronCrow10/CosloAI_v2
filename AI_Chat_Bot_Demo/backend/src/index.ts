@@ -122,6 +122,7 @@ const cspDirectives = {
   styleSrc: ["'self'", "'unsafe-inline'", "https:"],
   scriptSrc: [
     "'self'",
+    "'wasm-unsafe-eval'",
     "https://accounts.google.com",
     "https://connect.facebook.net",
     "https://coslo.it"
