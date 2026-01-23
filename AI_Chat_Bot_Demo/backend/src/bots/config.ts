@@ -3,6 +3,32 @@
 import { prisma } from "../prisma/prisma";
 import { Bot as DbBot, BotChannel, ChannelType } from "@prisma/client";
 
+type WeekdayKey =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+type BookingTimeWindow = {
+  start: string; // "HH:MM"
+  end: string; // "HH:MM"
+};
+
+export type BookingWeeklySchedule = Partial<Record<WeekdayKey, BookingTimeWindow[]>>;
+
+export type BookingServiceConfig = {
+  key: string;
+  name: string;
+  aliases?: string[];
+  calendarId: string;
+  durationMinutes: number;
+  maxSimultaneousBookings?: number | null;
+  weeklySchedule?: BookingWeeklySchedule | null;
+};
+
 // Base booking config, extended with optional advanced fields.
 // Static demo bots can omit advanced fields; DB bots will have them filled.
 export type BookingConfig =
@@ -10,9 +36,9 @@ export type BookingConfig =
   | {
       enabled: true;
       provider: "google_calendar";
-      calendarId: string;
       timeZone: string;
-      defaultDurationMinutes: number;
+      calendarId?: string; // legacy single-calendar fallback
+      defaultDurationMinutes?: number; // legacy single-calendar fallback
 
       // Advanced booking rules (optional, normalized downstream)
       minLeadHours?: number | null;
@@ -41,6 +67,7 @@ export type BookingConfig =
       // Booking fields for this bot
       requiredFields?: string[];
       customFields?: string[];
+      services?: BookingServiceConfig[];
     };
 
 // Channels config
@@ -189,11 +216,13 @@ function buildChannelsFromDb(
   return Object.keys(channels).length > 0 ? channels : undefined;
 }
 
-function buildBookingFromDb(dbBot: DbBot): BookingConfig | undefined {
+function buildBookingFromDb(
+  dbBot: DbBot & { bookingServices?: any[] }
+): BookingConfig | undefined {
   if (!dbBot.useCalendar) return { enabled: false };
 
-  if (!dbBot.calendarId || !dbBot.timeZone || !dbBot.defaultDurationMinutes) {
-    // Calendar feature flagged on but config incomplete → treat as disabled for safety
+  if (!dbBot.timeZone) {
+    // Calendar feature flagged on but config incomplete ? treat as disabled for safety
     return { enabled: false };
   }
 
@@ -202,12 +231,50 @@ function buildBookingFromDb(dbBot: DbBot): BookingConfig | undefined {
     (dbBot as any).bookingRequiredFields ?? undefined
   );
 
+  const services =
+    Array.isArray((dbBot as any).bookingServices) &&
+    (dbBot as any).bookingServices.length > 0
+      ? (dbBot as any).bookingServices.map((s: any) => ({
+          key: s.key,
+          name: s.name,
+          aliases: Array.isArray(s.aliases) ? s.aliases : [],
+          calendarId: s.calendarId,
+          durationMinutes: s.durationMinutes,
+          maxSimultaneousBookings:
+            typeof s.maxSimultaneousBookings === "number"
+              ? s.maxSimultaneousBookings
+              : null,
+          weeklySchedule: (s.weeklySchedule as BookingWeeklySchedule) ?? null
+        }))
+      : null;
+
+  const hasLegacyCalendar =
+    !!dbBot.calendarId && !!dbBot.defaultDurationMinutes;
+
+  const legacyService: BookingServiceConfig | null =
+    !services && hasLegacyCalendar
+      ? {
+          key: "general",
+          name: "General",
+          aliases: [],
+          calendarId: dbBot.calendarId as string,
+          durationMinutes: dbBot.defaultDurationMinutes as number,
+          maxSimultaneousBookings:
+            typeof (dbBot as any).bookingMaxSimultaneousBookings === "number"
+              ? (dbBot as any).bookingMaxSimultaneousBookings
+              : null,
+          weeklySchedule:
+            ((dbBot as any).bookingWeeklySchedule as BookingWeeklySchedule) ??
+            null
+        }
+      : null;
+
   return {
     enabled: true,
     provider: "google_calendar",
-    calendarId: dbBot.calendarId,
     timeZone: dbBot.timeZone,
-    defaultDurationMinutes: dbBot.defaultDurationMinutes,
+    calendarId: dbBot.calendarId ?? undefined,
+    defaultDurationMinutes: dbBot.defaultDurationMinutes ?? undefined,
 
     // Advanced rules (may be null in DB, normalized downstream)
     minLeadHours: (dbBot as any).bookingMinLeadHours ?? null,
@@ -246,12 +313,13 @@ function buildBookingFromDb(dbBot: DbBot): BookingConfig | undefined {
       (dbBot as any).bookingCancellationBodyHtmlTemplate ?? null,
 
     requiredFields: required,
-    customFields: custom
+    customFields: custom,
+    services: services ?? (legacyService ? [legacyService] : undefined)
   };
 }
 
 function mapDbBotToDemoConfig(
-  dbBot: DbBot & { channels: BotChannel[] }
+  dbBot: DbBot & { channels: BotChannel[]; bookingServices?: any[] }
 ): DemoBotConfig {
   return {
     id: dbBot.id,
@@ -278,7 +346,7 @@ export async function getBotConfigBySlug(
   // 1) DB first
   const dbBot = await prisma.bot.findUnique({
     where: { slug },
-    include: { channels: true }
+    include: { channels: true, bookingServices: true }
   });
 
   if (dbBot) {

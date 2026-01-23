@@ -125,6 +125,7 @@ model Bot {
 
   // NEW: Booking records
   bookings Booking[]
+  bookingServices BookingService[]
 
   // =========================
   // BOOKING CONFIG (NEW)
@@ -188,6 +189,27 @@ model Bot {
   metaLeads           MetaLead[]
   planUsageAlerts PlanUsageAlert[]
 
+}
+
+model BookingService {
+  id        String @id @default(uuid())
+  botId     String
+  bot       Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  key       String
+  name      String
+  aliases   String[] @default([])
+
+  calendarId          String
+  durationMinutes     Int
+  maxSimultaneousBookings Int?
+  weeklySchedule      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([botId, key])
+  @@index([botId])
 }
 
 enum BotStatus {

@@ -16,11 +16,14 @@ declare global {
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
+  const cookieToken = (req as any).cookies?.accessToken as string | undefined;
+  const token =
+    header && header.startsWith("Bearer ")
+      ? header.substring("Bearer ".length)
+      : cookieToken;
+  if (!token) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-
-  const token = header.substring("Bearer ".length);
   let payload: JwtPayload;
   try {
     payload = verifyAccessToken(token);

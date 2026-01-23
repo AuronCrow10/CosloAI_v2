@@ -1,6 +1,7 @@
 // server.ts
 import express from 'express';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import multer from 'multer';
 
 import { PlaywrightCrawler, RequestOptions } from '@crawlee/playwright';
@@ -38,9 +39,25 @@ import type {
 const app = express();
 app.use(express.json());
 
+const allowedMimeTypes = new Set([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
+]);
+
+const allowedExtensions = new Set(['.pdf', '.docx', '.txt']);
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const ok = allowedMimeTypes.has(file.mimetype) && allowedExtensions.has(ext);
+    if (!ok) {
+      return cb(new Error('Unsupported file type'));
+    }
+    return cb(null, true);
+  },
 });
 
 const INTERNAL_TOKEN = process.env.KNOWLEDGE_INTERNAL_TOKEN;

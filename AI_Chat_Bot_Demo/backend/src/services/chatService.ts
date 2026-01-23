@@ -53,6 +53,7 @@ type BotBookingConfig = {
   customFields: string[];
   minLeadHours: number | null;
   maxAdvanceDays: number | null;
+  services: Array<{ name: string; aliases?: string[] }>;
 };
 
 function normalizeBookingConfigForChat(
@@ -95,7 +96,14 @@ function normalizeBookingConfigForChat(
     requiredFields,
     customFields,
     minLeadHours,
-    maxAdvanceDays
+    maxAdvanceDays,
+    services:
+      Array.isArray(booking.services) && booking.services.length > 0
+        ? booking.services.map((s) => ({
+            name: s.name,
+            aliases: s.aliases
+          }))
+        : []
   };
 }
 
@@ -118,7 +126,7 @@ function buildBookingTool(bookingCfg: BotBookingConfig): ChatTool {
     service: {
       type: "string",
       description:
-        "Requested service or treatment (e.g. haircut, dinner for 2, etc.)"
+        "Requested service or treatment (must match one of the configured services; ask if unsure)."
     },
     datetime: {
       type: "string",
@@ -278,6 +286,10 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
     bookingCfg.customFields.length > 0
       ? bookingCfg.customFields.join(", ")
       : "none";
+  const serviceList =
+    bookingCfg.services.length > 0
+      ? bookingCfg.services.map((s) => s.name).join(", ")
+      : "none";
 
   // Preferred step-by-step order: base fields (that are required) first, then custom fields
   const orderedFields: string[] = [];
@@ -301,6 +313,7 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
     "BOOKING CONFIG:\n" +
     `- Required fields: ${requiredList}.\n` +
     `- Custom fields: ${customList}.\n` +
+    `- Available services: ${serviceList}.\n` +
     "- Never enforce time rules yourself (past / lead time / max days / opening hours). Always send the user's requested datetime to the booking tools and let the backend validate.\n\n" +
 
     "STEP-BY-STEP COLLECTION:\n" +
@@ -334,6 +347,7 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
     "- confirmationEmailSent (boolean | undefined)\n" +
     "- confirmationEmailError (string | undefined)\n" +
     "- possibly suggestedSlots: an array of alternative datetimes in ISO 8601, sorted by closeness to the requested time (this is OPTIONAL and may be missing).\n\n" +
+    "- possibly suggestedServices: an array of service names when the service is unclear or not matched (OPTIONAL).\n\n" +
     "After receiving the booking tool result:\n" +
     "- You may include a short recap of the final booking details (name, service, date/time) in the confirmation message.\n" +
     "- If success is true AND confirmationEmailSent is true: confirm that the booking/update/cancellation is complete and that a confirmation email has been sent.\n" +
@@ -343,6 +357,7 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
     "  • Never invent new times; only use the suggestedSlots data.\n" +
     "  • Propose up to two alternatives, giving priority to one just before and one just after the requested time if such options exist.\n" +
     "  • If there is no suitable option before, propose the first two options after the requested time.\n" +
+    "- If success is false AND suggestedServices is present: ask the user to pick one of those services.\n" +
     "- Do NOT tell the user to wait while you \"process\" or \"book\"; silently use tools and then respond with the final result.\n"
   );
 }
@@ -436,6 +451,39 @@ function hasAnyBookingDraftData(draft: BookingDraft | null | undefined): boolean
     }
   }
   return false;
+}
+
+function hasAllRequiredBookingFields(
+  draft: BookingDraft | null | undefined,
+  bookingCfg: BotBookingConfig
+): boolean {
+  if (!draft) return false;
+
+  const draftAny: any = draft;
+
+  for (const field of bookingCfg.requiredFields) {
+    let value: unknown;
+
+    // First look for a core field on the draft object
+    if (field in draftAny) {
+      value = draftAny[field];
+    }
+
+    // If not found, look inside customFields
+    if (value == null && draft.customFields) {
+      value = (draft.customFields as any)[field];
+    }
+
+    if (value == null) {
+      return false;
+    }
+
+    if (typeof value === "string" && value.trim().length === 0) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function formatBookingDraftSystemMessage(draft: BookingDraft): string {
@@ -764,6 +812,83 @@ export async function generateBotReplyForSlug(
   // If there was no booking tool call (only update_booking_draft, etc.),
   // we must NOT send an assistant message with tool_calls again without tool messages.
   if (!bookingCall) {
+    // 🔄 NEW: after processing update_booking_draft calls, see if the draft now has ALL required fields.
+    if (
+      bookingEnabled &&
+      botBookingCfg &&
+      options.conversationId
+    ) {
+      try {
+        const latestDraft = await loadBookingDraft(options.conversationId);
+
+        if (hasAllRequiredBookingFields(latestDraft, botBookingCfg)) {
+          const draftAny: any = latestDraft;
+
+          // Build BookAppointmentArgs from the completed draft
+          const draftArgs: BookAppointmentArgs = {
+            name: String(draftAny.name ?? ""),
+            email: String(draftAny.email ?? ""),
+            phone: String(draftAny.phone ?? ""),
+            service: String(draftAny.service ?? ""),
+            datetime: String(draftAny.datetime ?? "")
+          };
+
+          // Include any custom fields from the draft
+          if (latestDraft?.customFields) {
+            for (const [key, value] of Object.entries(latestDraft.customFields)) {
+              if (
+                typeof value === "string" &&
+                value.trim().length > 0 &&
+                !(key in draftArgs)
+              ) {
+                (draftArgs as any)[key] = value;
+              }
+            }
+          }
+
+          console.log("📅 [Booking] Auto-booking from completed draft", {
+            slug,
+            conversationId: options.conversationId,
+            draftArgs
+          });
+
+          const autoResult = await handleBookAppointment(slug, draftArgs);
+
+          if (botConfig.botId) {
+            void maybeSendUsageAlertsForBot(botConfig.botId);
+          }
+
+          if (autoResult.success) {
+            // Simple, backend-crafted confirmation (no extra model call)
+            const emailNotice =
+              autoResult.confirmationEmailSent === false
+                ? " However, there was a problem sending the confirmation email, so please note the date and time."
+                : " You will receive a confirmation email shortly.";
+
+            return (
+              `Your booking has been created successfully for ${draftArgs.service} ` +
+              `on ${draftArgs.datetime} for ${draftArgs.name}.` +
+              emailNotice
+            );
+          } else {
+            // Bubble up backend error in a user-friendly way
+            return (
+              autoResult.errorMessage ||
+              "Sorry, I couldn't process your booking. Please try another time or check your details."
+            );
+          }
+        }
+      } catch (err) {
+        console.error(
+          "📅 [Booking] Error while attempting auto-book from draft",
+          { slug, error: err }
+        );
+        // On error, fall back to the normal behaviour below
+      }
+    }
+
+    // ⬇️ FALLBACK: behaviour when we're NOT ready to book (draft incomplete)
+
     const primaryContent = firstMessage.content;
 
     // If the model already replied in natural language, just use that.
@@ -801,49 +926,87 @@ export async function generateBotReplyForSlug(
     return secondContent;
   }
 
-  const functionName = bookingCall.function?.name || "unknown";
+const functionName = bookingCall.function?.name || "unknown";
 
-  // Parse booking tool arguments and execute
-  let bookingResult: BookingResult;
-  try {
-    const rawArgs = bookingCall.function.arguments || "{}";
-    const parsed = JSON.parse(rawArgs);
+// Parse booking tool arguments and execute
+let bookingResult: BookingResult;
+try {
+  const rawArgs = bookingCall.function?.arguments || "{}";
+  const parsed = JSON.parse(rawArgs);
 
-    console.log("🔧 [Booking Tool] call", {
-      slug,
-      tool: functionName,
-      args: parsed
-    });
+  console.log("🔧 [Booking Tool] call", {
+    slug,
+    tool: functionName,
+    args: parsed
+  });
 
-    if (functionName === "book_appointment") {
-      bookingResult = await handleBookAppointment(
-        slug,
-        parsed as BookAppointmentArgs
-      );
-    } else if (functionName === "update_appointment") {
-      bookingResult = await handleUpdateAppointment(
-        slug,
-        parsed as UpdateAppointmentArgs
-      );
-    } else if (functionName === "cancel_appointment") {
-      bookingResult = await handleCancelAppointment(
-        slug,
-        parsed as CancelAppointmentArgs
-      );
-    } else {
-      bookingResult = {
-        success: false,
-        errorMessage:
-          "Unknown booking operation. Please try again or contact support."
-      };
+  if (functionName === "book_appointment") {
+    // --- NEW: merge bookingDraft into the tool args so we don't "forget" fields ---
+    let finalArgs = parsed as BookAppointmentArgs;
+
+    if (bookingDraft) {
+      const fromDraft: Record<string, any> = {};
+
+      // Core fields: use draft as default, tool args win if present
+      if (!finalArgs.name && bookingDraft.name) {
+        fromDraft.name = bookingDraft.name;
+      }
+      if (!finalArgs.email && bookingDraft.email) {
+        fromDraft.email = bookingDraft.email;
+      }
+      if (!finalArgs.phone && bookingDraft.phone) {
+        fromDraft.phone = bookingDraft.phone;
+      }
+      if (!finalArgs.service && bookingDraft.service) {
+        fromDraft.service = bookingDraft.service;
+      }
+      if (!finalArgs.datetime && bookingDraft.datetime) {
+        fromDraft.datetime = bookingDraft.datetime;
+      }
+
+      // Custom fields from the draft
+      if (bookingDraft.customFields) {
+        for (const [key, value] of Object.entries(bookingDraft.customFields)) {
+          if (
+            typeof value === "string" &&
+            value.trim().length > 0 &&
+            (finalArgs as any)[key] == null
+          ) {
+            (fromDraft as any)[key] = value;
+          }
+        }
+      }
+
+      // Draft values = defaults, explicit tool args from this turn always win.
+      finalArgs = { ...fromDraft, ...finalArgs };
     }
-  } catch (err) {
-    console.error("Failed to parse booking tool arguments:", err);
-    const fallbackResult: BookingResult = {
+    // ---------------------------------------------------------------------------
+
+    bookingResult = await handleBookAppointment(slug, finalArgs);
+  } else if (functionName === "update_appointment") {
+    bookingResult = await handleUpdateAppointment(
+      slug,
+      parsed as UpdateAppointmentArgs
+    );
+  } else if (functionName === "cancel_appointment") {
+    bookingResult = await handleCancelAppointment(
+      slug,
+      parsed as CancelAppointmentArgs
+    );
+  } else {
+    bookingResult = {
       success: false,
       errorMessage:
-        "Invalid booking data. Please provide your name, email, phone, service and desired date/time (or the booking you want to change) clearly."
+        "Unknown booking operation. Please try again or contact support."
     };
+  }
+} catch (err) {
+  console.error("Failed to parse booking tool arguments:", err);
+  const fallbackResult: BookingResult = {
+    success: false,
+    errorMessage:
+      "Invalid booking data. Please provide your name, email, phone, service and desired date/time (or the booking you want to change) clearly."
+  };
 
     // IMPORTANT: sanitize assistant message so it only contains the booking tool_call,
     // not the update_booking_draft tool calls that we already handled.

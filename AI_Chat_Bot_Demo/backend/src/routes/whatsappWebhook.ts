@@ -106,6 +106,31 @@ function getRequestId(req: Request) {
   return existing || crypto.randomUUID();
 }
 
+function verifyWhatsAppSignature(req: Request): boolean {
+  const secret = config.metaAppSecret;
+  if (!secret) return false;
+
+  const signature = req.header("x-hub-signature-256");
+  if (!signature || !signature.startsWith("sha256=")) return false;
+
+  const rawBody = (req as any).rawBody as Buffer | undefined;
+  if (!rawBody || rawBody.length === 0) return false;
+
+  const expected = `sha256=${crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest("hex")}`;
+
+  try {
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeAxiosError(err: unknown) {
   if (!axios.isAxiosError(err)) return { status: undefined, data: err };
   return { status: err.response?.status, data: err.response?.data ?? err.message };
@@ -162,6 +187,16 @@ router.get("/", (req: Request, res: Response) => {
 router.post("/", async (req: Request, res: Response) => {
   const requestId = getRequestId(req);
   const startedAt = Date.now();
+
+  if (!config.metaAppSecret) {
+    logLine("ERROR", "WA", "missing app secret", { req: requestId });
+    return res.sendStatus(500);
+  }
+
+  if (!verifyWhatsAppSignature(req)) {
+    logLine("WARN", "WA", "invalid signature", { req: requestId });
+    return res.sendStatus(401);
+  }
 
   const body: unknown = req.body;
   const entryCount = Array.isArray((body as any)?.entry) ? (body as any).entry.length : 0;

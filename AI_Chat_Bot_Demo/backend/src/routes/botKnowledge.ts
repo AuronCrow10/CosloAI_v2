@@ -1,6 +1,7 @@
 // routes/botKnowledge.ts
 import { Router, Request, Response } from "express";
 import multer from "multer";
+import path from "path";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
 import {
@@ -20,9 +21,25 @@ import { getPlanUsageForBot } from "../services/planUsageService";
 
 const router = Router();
 
+const allowedMimeTypes = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "text/plain"
+]);
+
+const allowedExtensions = new Set([".pdf", ".docx", ".txt"]);
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const ok = allowedMimeTypes.has(file.mimetype) && allowedExtensions.has(ext);
+    if (!ok) {
+      return cb(new Error("Unsupported file type"));
+    }
+    return cb(null, true);
+  }
 });
 
 // -----------------------------

@@ -24,12 +24,15 @@ const router = Router();
 // Helper to get authenticated user from Bearer token
 async function getAuthenticatedUser(req: Request, res: Response) {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Missing Authorization header" });
+  const cookieToken = (req as any).cookies?.accessToken as string | undefined;
+  const token =
+    authHeader && authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : cookieToken;
+  if (!token) {
+    res.status(401).json({ error: "Missing access token" });
     return null;
   }
-
-  const token = authHeader.slice("Bearer ".length).trim();
   let payload: JwtPayload;
   try {
     payload = verifyAccessToken(token);

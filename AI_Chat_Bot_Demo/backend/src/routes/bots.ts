@@ -12,6 +12,42 @@ const router = Router();
 const DEFAULT_SYSTEM_PROMPT =
   "You are a helpful AI assistant for this business. Answer using only the provided context from the website and documents.";
 
+const bookingWeeklyScheduleSchema = z
+  .record(
+    z.enum([
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday",
+      "saturday",
+      "sunday"
+    ]),
+    z.array(
+      z.object({
+        // "HH:MM" 24h format, e.g. "09:00"
+        start: z
+          .string()
+          .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format"),
+        end: z
+          .string()
+          .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format")
+      })
+    )
+  )
+  .optional()
+  .nullable();
+
+const bookingServiceSchema = z.object({
+  key: z.string().min(1).optional(),
+  name: z.string().min(1),
+  aliases: z.array(z.string()).optional(),
+  calendarId: z.string().min(1),
+  durationMinutes: z.number().int().positive(),
+  maxSimultaneousBookings: z.number().int().positive().nullable().optional(),
+  weeklySchedule: bookingWeeklyScheduleSchema
+});
+
 /**
  * CREATE schema
  * - All new booking-related fields are included.
@@ -82,31 +118,9 @@ const botCreateSchema = z.object({
   // IMPORTANT: not nullable → matches Prisma String[].
   bookingRequiredFields: z.array(z.string()).optional(),
 
-  bookingWeeklySchedule: z
-    .record(
-      z.enum([
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday"
-      ]),
-      z.array(
-        z.object({
-          // "HH:MM" 24h format, e.g. "09:00"
-          start: z
-            .string()
-            .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format"),
-          end: z
-            .string()
-            .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format")
-        })
-      )
-    )
-    .optional()
-    .nullable(),
+  bookingWeeklySchedule: bookingWeeklyScheduleSchema,
+
+  bookingServices: z.array(bookingServiceSchema).optional(),
 
   leadWhatsappMessages200: z.boolean().optional().default(false),
   leadWhatsappMessages500: z.boolean().optional().default(false),
@@ -123,6 +137,52 @@ const metaLeadAutomationSchema = z.object({
   templateName: z.string().min(1),
   templateLanguage: z.string().min(1)
 });
+
+function slugifyServiceKey(input: string): string {
+  const cleaned = input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "service";
+}
+
+function normalizeBookingServices(
+  services: Array<z.infer<typeof bookingServiceSchema>>
+): Array<{
+  key: string;
+  name: string;
+  aliases: string[];
+  calendarId: string;
+  durationMinutes: number;
+  maxSimultaneousBookings: number | null;
+  weeklySchedule: any | null;
+}> {
+  const keyCounts = new Map<string, number>();
+
+  return services.map((raw) => {
+    const name = raw.name.trim();
+    const aliases =
+      raw.aliases?.map((a) => a.trim()).filter((a) => a.length > 0) || [];
+    const baseKey = slugifyServiceKey(raw.key?.trim() || name);
+    const count = (keyCounts.get(baseKey) || 0) + 1;
+    keyCounts.set(baseKey, count);
+    const key = count === 1 ? baseKey : `${baseKey}-${count}`;
+
+    return {
+      key,
+      name,
+      aliases,
+      calendarId: raw.calendarId.trim(),
+      durationMinutes: raw.durationMinutes,
+      maxSimultaneousBookings:
+        typeof raw.maxSimultaneousBookings === "number"
+          ? raw.maxSimultaneousBookings
+          : null,
+      weeklySchedule: raw.weeklySchedule ?? null
+    };
+  });
+}
 
 // public info for a bot by slug (for widget/demo)
 router.get("/bots/live/:slug", async (req, res) => {
@@ -256,6 +316,22 @@ if (selectedCount > 1) {
       leadWhatsappMessages1000: lead1000,
     }
   });
+
+  if (data.bookingServices && data.bookingServices.length > 0) {
+    const normalized = normalizeBookingServices(data.bookingServices);
+    await prisma.bookingService.createMany({
+      data: normalized.map((s) => ({
+        botId: bot.id,
+        key: s.key,
+        name: s.name,
+        aliases: s.aliases,
+        calendarId: s.calendarId,
+        durationMinutes: s.durationMinutes,
+        maxSimultaneousBookings: s.maxSimultaneousBookings,
+        weeklySchedule: s.weeklySchedule
+      }))
+    });
+  }
 
   res.status(201).json(bot);
 });
@@ -401,13 +477,47 @@ if (selectedCount > 1) {
     leadWhatsappMessages1000: lead1000
   };
 
+  const bookingServicesPayload = Array.isArray(
+    (data as any).bookingServices
+  )
+    ? (data as any).bookingServices
+    : undefined;
+
+  delete updateData.bookingServices;
+
   // If client explicitly *omits* bookingRequiredFields, Prisma won't touch it.
   // If they provide [], we store [] (clears extra required fields).
   // No special null handling needed since Zod no longer allows null here.
 
-  const updated = await prisma.bot.update({
+  await prisma.$transaction(async (tx) => {
+    if (bookingServicesPayload) {
+      const normalized = normalizeBookingServices(bookingServicesPayload);
+      await tx.bookingService.deleteMany({ where: { botId: bot.id } });
+      if (normalized.length > 0) {
+        await tx.bookingService.createMany({
+          data: normalized.map((s) => ({
+            botId: bot.id,
+            key: s.key,
+            name: s.name,
+            aliases: s.aliases,
+            calendarId: s.calendarId,
+            durationMinutes: s.durationMinutes,
+            maxSimultaneousBookings: s.maxSimultaneousBookings,
+            weeklySchedule: s.weeklySchedule
+          }))
+        });
+      }
+    }
+
+    await tx.bot.update({
+      where: { id: bot.id },
+      data: updateData
+    });
+  });
+
+  const updated = await prisma.bot.findUnique({
     where: { id: bot.id },
-    data: updateData
+    include: { bookingServices: true }
   });
 
   res.json(updated);
@@ -416,7 +526,8 @@ if (selectedCount > 1) {
 // Get bot
 router.get("/bots/:id", async (req: Request, res: Response) => {
   const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
+    where: { id: req.params.id, userId: req.user!.id },
+    include: { bookingServices: true }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
   res.json(bot);
@@ -480,6 +591,9 @@ router.delete("/bots/:id", async (req: Request, res: Response) => {
 
     // Email usage
     await tx.emailUsage.deleteMany({ where: { botId: bot.id } });
+
+    // Booking services
+    await tx.bookingService.deleteMany({ where: { botId: bot.id } });
 
     // Finally the bot itself
     await tx.bot.delete({ where: { id: bot.id } });

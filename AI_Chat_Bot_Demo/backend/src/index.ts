@@ -4,6 +4,7 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
+import helmet from "helmet";
 
 import http from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -98,8 +99,24 @@ app.post(
   stripeWebhookHandler
 );
 
-app.use(express.json());
+// Capture raw body for webhook signature verification while still parsing JSON
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as any).rawBody = buf;
+    }
+  })
+);
 app.use(cookieParser());
+app.disable("x-powered-by");
+
+// Security headers (CSP disabled here to avoid breaking existing UI)
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false
+  })
+);
 
 /**
  * Fix OAuth / postMessage console warning:

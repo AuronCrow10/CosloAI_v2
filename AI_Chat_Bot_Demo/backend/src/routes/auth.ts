@@ -21,6 +21,118 @@ import { sendMail } from "../services/mailer";
 
 const router = Router();
 
+type RateLimitOptions = {
+  windowMs: number;
+  max: number;
+  keyFn: (req: Request) => string | null;
+  message?: string;
+};
+
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function rateLimit(options: RateLimitOptions) {
+  return (req: Request, res: Response, next: () => void) => {
+    const key = options.keyFn(req);
+    if (!key) return next();
+
+    const now = Date.now();
+    const entry = rateBuckets.get(key);
+
+    if (!entry || entry.resetAt <= now) {
+      rateBuckets.set(key, { count: 1, resetAt: now + options.windowMs });
+      return next();
+    }
+
+    if (entry.count >= options.max) {
+      return res.status(429).json({
+        error: options.message || "Too many requests. Please try again later."
+      });
+    }
+
+    entry.count += 1;
+    return next();
+  };
+}
+
+const ipKey = (req: Request) => req.ip || req.socket.remoteAddress || null;
+const emailKey = (req: Request) => {
+  const email = (req.body?.email as string | undefined)?.toLowerCase().trim();
+  return email ? `email:${email}` : null;
+};
+
+const loginIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => (ipKey(req) ? `login:${ipKey(req)}` : null),
+  message: "Too many login attempts. Please try again later."
+});
+
+const loginEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyFn: (req) => (emailKey(req) ? `login:${emailKey(req)}` : null)
+});
+
+const resetIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyFn: (req) => (ipKey(req) ? `reset:${ipKey(req)}` : null),
+  message: "Too many reset attempts. Please try again later."
+});
+
+const resetEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 3,
+  keyFn: (req) => (emailKey(req) ? `reset:${emailKey(req)}` : null)
+});
+
+const mfaIpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => (ipKey(req) ? `mfa:${ipKey(req)}` : null)
+});
+
+const isProd = process.env.NODE_ENV === "production";
+const cookieSameSite =
+  (process.env.COOKIE_SAMESITE as "lax" | "strict" | "none" | undefined) ||
+  (process.env.FRONTEND_ORIGIN && !process.env.FRONTEND_ORIGIN.includes("localhost")
+    ? "none"
+    : "lax");
+const cookieDomain = process.env.COOKIE_DOMAIN || undefined;
+
+function setAuthCookies(res: Response, accessToken: string, refreshToken: string) {
+  res.cookie("accessToken", accessToken, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: cookieSameSite,
+    domain: cookieDomain,
+    maxAge: config.jwtAccessExpiresIn * 1000
+  });
+
+  res.cookie("refreshToken", refreshToken, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: cookieSameSite,
+    domain: cookieDomain,
+    maxAge: config.jwtRefreshExpiresIn * 1000
+  });
+}
+
+function clearAuthCookies(res: Response) {
+  res.clearCookie("accessToken", {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: cookieSameSite,
+    domain: cookieDomain
+  });
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: cookieSameSite,
+    domain: cookieDomain
+  });
+}
+
 export const passwordSchema = z
   .string()
   .min(8, "La password deve avere almeno 8 caratteri")
@@ -124,7 +236,7 @@ const forgotPasswordSchema = z.object({
   email: z.string().email()
 });
 
-router.post("/forgot-password", async (req: Request, res: Response) => {
+router.post("/forgot-password", resetIpLimiter, resetEmailLimiter, async (req: Request, res: Response) => {
   const parsed = forgotPasswordSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -180,7 +292,7 @@ const resetPasswordSchema = z.object({
   newPassword: passwordSchema
 });
 
-router.post("/reset-password", async (req: Request, res: Response) => {
+router.post("/reset-password", resetIpLimiter, resetEmailLimiter, async (req: Request, res: Response) => {
   const parsed = resetPasswordSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -237,7 +349,7 @@ const loginSchema = z.object({
   password: z.string()
 });
 
-router.post("/login", async (req: Request, res: Response) => {
+router.post("/login", loginIpLimiter, loginEmailLimiter, async (req: Request, res: Response) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -268,6 +380,8 @@ router.post("/login", async (req: Request, res: Response) => {
 
   await markLegalAcceptanceIfMissing(user.id);
 
+  setAuthCookies(res, accessToken, refreshToken);
+
   return res.json({
     accessToken,
     refreshToken,
@@ -281,7 +395,7 @@ router.post("/login", async (req: Request, res: Response) => {
 });
 
 const refreshSchema = z.object({
-  refreshToken: z.string()
+  refreshToken: z.string().optional()
 });
 
 /**
@@ -297,7 +411,11 @@ router.post("/refresh", async (req: Request, res: Response) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const { refreshToken } = parsed.data;
+  const refreshToken =
+    parsed.data.refreshToken || ((req as any).cookies?.refreshToken as string | undefined);
+  if (!refreshToken) {
+    return res.status(401).json({ error: "Invalid refresh token" });
+  }
 
   const dbToken = await prisma.refreshToken.findUnique({
     where: { token: refreshToken }
@@ -318,6 +436,8 @@ router.post("/refresh", async (req: Request, res: Response) => {
   await revokeRefreshToken(refreshToken);
   const newRefreshToken = await createRefreshToken(user.id);
 
+  setAuthCookies(res, accessToken, newRefreshToken);
+
   return res.json({
     accessToken,
     refreshToken: newRefreshToken,
@@ -331,7 +451,7 @@ router.post("/refresh", async (req: Request, res: Response) => {
 });
 
 const logoutSchema = z.object({
-  refreshToken: z.string().nullable()
+  refreshToken: z.string().nullable().optional()
 });
 
 router.post("/logout", async (req: Request, res: Response) => {
@@ -340,10 +460,14 @@ router.post("/logout", async (req: Request, res: Response) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const { refreshToken } = parsed.data;
+  const refreshToken =
+    parsed.data.refreshToken ||
+    ((req as any).cookies?.refreshToken as string | undefined);
   if (refreshToken) {
     await revokeRefreshToken(refreshToken);
   }
+
+  clearAuthCookies(res);
 
   return res.json({ message: "Logged out" });
 });
@@ -419,6 +543,8 @@ router.post("/google", async (req: Request, res: Response) => {
 
   await markLegalAcceptanceIfMissing(user.id);
 
+  setAuthCookies(res, accessToken, refreshToken);
+
   return res.json({
     accessToken,
     refreshToken,
@@ -440,7 +566,7 @@ const mfaTotpVerifySchema = z.object({
     .regex(/^\d{6}$/, "Invalid code format. It should be a 6-digit code.")
 });
 
-router.post("/mfa/totp/verify", async (req: Request, res: Response) => {
+router.post("/mfa/totp/verify", mfaIpLimiter, async (req: Request, res: Response) => {
   const parsed = mfaTotpVerifySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -479,6 +605,8 @@ router.post("/mfa/totp/verify", async (req: Request, res: Response) => {
   const refreshToken = await createRefreshToken(user.id);
 
   await markLegalAcceptanceIfMissing(user.id);
+
+  setAuthCookies(res, accessToken, refreshToken);
 
   return res.json({
     accessToken,
