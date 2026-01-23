@@ -110,8 +110,7 @@ app.use(
 app.use(cookieParser());
 app.disable("x-powered-by");
 
-// Security headers (CSP disabled here to avoid breaking existing UI)
-const cspDirectives = {
+const mainCspDirectives = {
   defaultSrc: ["'self'"],
   baseUri: ["'self'"],
   objectSrc: ["'none'"],
@@ -147,19 +146,63 @@ const cspDirectives = {
 const cspReportOnly = process.env.CSP_REPORT_ONLY === "1";
 const isProd = process.env.NODE_ENV === "production";
 if (isProd) {
-  (cspDirectives as any).upgradeInsecureRequests = [];
+  (mainCspDirectives as any).upgradeInsecureRequests = [];
 }
 
+const widgetFrameAncestors = (process.env.WIDGET_FRAME_ANCESTORS || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const widgetCspDirectives = {
+  ...mainCspDirectives,
+  frameAncestors: widgetFrameAncestors.length ? widgetFrameAncestors : ["*"]
+};
+
+// Base security headers; CSP + frameguard handled per-route below
 app.use(
   helmet({
     crossOriginEmbedderPolicy: false,
-    contentSecurityPolicy: {
-      useDefaults: false,
-      directives: cspDirectives,
-      reportOnly: cspReportOnly
-    }
+    contentSecurityPolicy: false,
+    frameguard: false,
+    crossOriginResourcePolicy: false
   })
 );
+
+const mainCsp = helmet.contentSecurityPolicy({
+  useDefaults: false,
+  directives: mainCspDirectives,
+  reportOnly: cspReportOnly
+});
+
+const widgetCsp = helmet.contentSecurityPolicy({
+  useDefaults: false,
+  directives: widgetCspDirectives,
+  reportOnly: cspReportOnly
+});
+
+app.use((req, res, next) => {
+  if (req.path.startsWith("/widget")) {
+    return widgetCsp(req, res, next);
+  }
+  return mainCsp(req, res, next);
+});
+
+app.use((req, res, next) => {
+  if (req.path === "/embed.js") {
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  } else {
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  }
+  next();
+});
+
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/widget")) {
+    res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  }
+  next();
+});
 
 /**
  * Fix OAuth / postMessage console warning:
