@@ -97,6 +97,8 @@ export async function handleFacebookMessageEvent(params: {
     channel: "FACEBOOK",
     externalUserId: userId
   });
+  const draftConversationId =
+    conversationId ?? `meta:${botSlug}:facebook:${userId}`;
 
   // --- Rate limiting (shared across all channels via rateLimitService) ---
   let isLimited = false;
@@ -168,7 +170,7 @@ export async function handleFacebookMessageEvent(params: {
     });
 
     const reply = await generateBotReplyForSlug(botSlug, trimmedText, {
-      conversationId: conversationId ?? undefined
+      conversationId: draftConversationId
     });
 
     // Log the conversation if we have a DB conversation
@@ -260,6 +262,8 @@ export async function handleInstagramMessageEvent(params: {
     channel: "INSTAGRAM",
     externalUserId: userId
   });
+  const draftConversationId =
+    conversationId ?? `meta:${botSlug}:instagram:${userId}`;
 
   // --- Rate limiting (shared across all channels via rateLimitService) ---
   let isLimited = false;
@@ -329,7 +333,7 @@ export async function handleInstagramMessageEvent(params: {
     });
 
     const reply = await generateBotReplyForSlug(botSlug, trimmedText, {
-      conversationId: conversationId ?? undefined
+      conversationId: draftConversationId
     });
 
     if (conversationId) {

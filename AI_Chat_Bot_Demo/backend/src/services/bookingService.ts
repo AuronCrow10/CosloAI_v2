@@ -317,79 +317,106 @@ async function computeSuggestedSlots(options: {
   const duration = durationMinutes || 30;
   if (duration <= 0) return [];
 
-  // Search window around the requested time (±4 hours)
-  const SEARCH_HOURS = 4;
-  const windowStart = requestedStart.minus({ hours: SEARCH_HOURS });
-  const windowEnd = requestedStart.plus({ hours: SEARCH_HOURS });
+  // Search window around the requested time, expanding until we find options
+  const INITIAL_SEARCH_HOURS = 4;
+  const MIN_STEP_HOURS = 4;
+  const MAX_SEARCH_HOURS =
+    maxAdvanceDays !== null && maxAdvanceDays > 0
+      ? Math.max(INITIAL_SEARCH_HOURS, maxAdvanceDays * 24)
+      : 48;
 
-  // Preload overlapping bookings in this window for capacity checks
-  let existing: { start: Date; end: Date }[] = [];
-  if (botId && maxSimultaneousBookings > 0) {
-    existing = await prisma.booking.findMany({
-      where: {
-        botId,
-        calendarId,
-        status: "ACTIVE",
-        start: { lt: windowEnd.toJSDate() },
-        end: { gt: windowStart.toJSDate() }
-      },
-      select: { start: true, end: true }
-    });
-  }
+  const candidateMap = new Map<string, DateTime>();
+  let searchHours = INITIAL_SEARCH_HOURS;
 
-  const candidates: DateTime[] = [];
-  let cursor = windowStart;
+  while (true) {
+    const windowStart = requestedStart.minus({ hours: searchHours });
+    const windowEnd = requestedStart.plus({ hours: searchHours });
 
-  const maxIterations =
-    Math.ceil(((SEARCH_HOURS * 2 * 60) / duration)) + 2;
-
-  for (let i = 0; i < maxIterations && cursor <= windowEnd; i++) {
-    const candidateStart = cursor;
-    cursor = cursor.plus({ minutes: duration });
-
-    // Skip the original requested time (we already know it's not usable)
-    if (candidateStart.toMillis() === requestedStart.toMillis()) continue;
-
-    const candidateEnd = candidateStart.plus({ minutes: duration });
-
-    // Basic constraints: future only
-    if (candidateStart < now) continue;
-
-    if (minLeadHours !== null && minLeadHours > 0) {
-      const minAllowed = now.plus({ hours: minLeadHours });
-      if (candidateStart < minAllowed) continue;
-    }
-
-    if (maxAdvanceDays !== null && maxAdvanceDays > 0) {
-      const maxAllowed = now.plus({ days: maxAdvanceDays });
-      if (candidateStart > maxAllowed) continue;
-    }
-
-    if (
-      !isWithinWeeklySchedule(
-        candidateStart,
-        duration,
-        weeklySchedule
-      )
-    ) {
-      continue;
-    }
-
+    // Preload overlapping bookings in this window for capacity checks
+    let existing: { start: Date; end: Date }[] = [];
     if (botId && maxSimultaneousBookings > 0) {
-      const overlappingCount = existing.filter((b) => {
-        const bStart = DateTime.fromJSDate(b.start);
-        const bEnd = DateTime.fromJSDate(b.end);
-        return bStart < candidateEnd && bEnd > candidateStart;
-      }).length;
+      existing = await prisma.booking.findMany({
+        where: {
+          botId,
+          calendarId,
+          status: "ACTIVE",
+          start: { lt: windowEnd.toJSDate() },
+          end: { gt: windowStart.toJSDate() }
+        },
+        select: { start: true, end: true }
+      });
+    }
 
-      if (overlappingCount >= maxSimultaneousBookings) {
+    let cursor = windowStart;
+    const maxIterations =
+      Math.ceil(((searchHours * 2 * 60) / duration)) + 2;
+
+    for (let i = 0; i < maxIterations && cursor <= windowEnd; i++) {
+      const candidateStart = cursor;
+      cursor = cursor.plus({ minutes: duration });
+
+      // Skip the original requested time (we already know it's not usable)
+      if (candidateStart.toMillis() === requestedStart.toMillis()) continue;
+
+      const candidateEnd = candidateStart.plus({ minutes: duration });
+
+      // Basic constraints: future only
+      if (candidateStart < now) continue;
+
+      if (minLeadHours !== null && minLeadHours > 0) {
+        const minAllowed = now.plus({ hours: minLeadHours });
+        if (candidateStart < minAllowed) continue;
+      }
+
+      if (maxAdvanceDays !== null && maxAdvanceDays > 0) {
+        const maxAllowed = now.plus({ days: maxAdvanceDays });
+        if (candidateStart > maxAllowed) continue;
+      }
+
+      if (
+        !isWithinWeeklySchedule(
+          candidateStart,
+          duration,
+          weeklySchedule
+        )
+      ) {
         continue;
+      }
+
+      if (botId && maxSimultaneousBookings > 0) {
+        const overlappingCount = existing.filter((b) => {
+          const bStart = DateTime.fromJSDate(b.start);
+          const bEnd = DateTime.fromJSDate(b.end);
+          return bStart < candidateEnd && bEnd > candidateStart;
+        }).length;
+
+        if (overlappingCount >= maxSimultaneousBookings) {
+          continue;
+        }
+      }
+
+      const key = candidateStart.toISO() || candidateStart.toMillis().toString();
+      if (!candidateMap.has(key)) {
+        candidateMap.set(key, candidateStart);
       }
     }
 
-    candidates.push(candidateStart);
+    const candidatesSoFar = Array.from(candidateMap.values());
+    const hasBefore = candidatesSoFar.some((dt) => dt < requestedStart);
+    const hasAfter = candidatesSoFar.some((dt) => dt >= requestedStart);
+
+    if (hasBefore && hasAfter) break;
+    if (searchHours >= MAX_SEARCH_HOURS) break;
+
+    const nextHours = Math.min(
+      MAX_SEARCH_HOURS,
+      Math.max(searchHours + MIN_STEP_HOURS, searchHours * 2)
+    );
+    if (nextHours === searchHours) break;
+    searchHours = nextHours;
   }
 
+  const candidates = Array.from(candidateMap.values());
   if (candidates.length === 0) {
     return [];
   }
@@ -450,8 +477,8 @@ async function computeSuggestedSlots(options: {
 
   const suggestions: DateTime[] = [];
 
-  const bestBefore = await pickFirstFree([...before].reverse()); // closest before
   const bestAfter = await pickFirstFree(after);                  // closest after
+  const bestBefore = await pickFirstFree([...before].reverse()); // closest before
 
   if (bestBefore) suggestions.push(bestBefore);
   if (bestAfter) suggestions.push(bestAfter);
@@ -1969,3 +1996,5 @@ function escapeHtml(input: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
+
+

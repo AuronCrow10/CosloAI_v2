@@ -29,6 +29,7 @@ import {
   loadBookingDraft,
   updateBookingDraft
 } from "./bookingDraftService";
+import { detectBookingFieldUpdates } from "./bookingFieldCapture";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
@@ -674,6 +675,31 @@ export async function generateBotReplyForSlug(
   let bookingDraft: BookingDraft | null = null;
   if (bookingEnabled && options.conversationId) {
     bookingDraft = await loadBookingDraft(options.conversationId);
+    if (botBookingCfg) {
+      const captureDebug =
+        String(process.env.BOOKING_CAPTURE_DEBUG || "").toLowerCase() === "true";
+
+      const detectedUpdates = detectBookingFieldUpdates({
+        message,
+        bookingCfg: botBookingCfg,
+        existingDraft: bookingDraft,
+        debug: captureDebug,
+        debugContext: {
+          slug,
+          conversationId: options.conversationId
+        }
+      });
+
+      if (Object.keys(detectedUpdates).length > 0) {
+        await updateBookingDraft(
+          options.conversationId,
+          detectedUpdates,
+          botBookingCfg.customFields
+        );
+
+        bookingDraft = await loadBookingDraft(options.conversationId);
+      }
+    }
     if (hasAnyBookingDraftData(bookingDraft)) {
       const snapshotText = formatBookingDraftSystemMessage(bookingDraft!);
       if (snapshotText) {
@@ -933,6 +959,22 @@ let bookingResult: BookingResult;
 try {
   const rawArgs = bookingCall.function?.arguments || "{}";
   const parsed = JSON.parse(rawArgs);
+
+  if (
+    functionName === "book_appointment" &&
+    options.conversationId &&
+    botBookingCfg
+  ) {
+    try {
+      await updateBookingDraft(
+        options.conversationId,
+        parsed,
+        botBookingCfg.customFields
+      );
+    } catch (err) {
+      console.error("Failed to sync booking draft from booking tool:", err);
+    }
+  }
 
   console.log("🔧 [Booking Tool] call", {
     slug,
