@@ -161,6 +161,157 @@ function extractMetaMessageId(data: unknown): string | undefined {
   return d?.message_id || d?.messageId || d?.messages?.[0]?.id || d?.id;
 }
 
+type MetaButton = {
+  type: "web_url";
+  title: string;
+  url: string;
+};
+
+type UiLang = "it" | "es" | "en";
+
+function detectUiLanguage(text: string): UiLang {
+  const lower = text.trim().toLowerCase();
+  if (!lower) return "en";
+
+  const itSignals = ["ciao", "avete", "grazie", "vorrei", "voglio", "carrello"];
+  if (itSignals.some((s) => lower.includes(s))) return "it";
+
+  const esSignals = ["hola", "gracias", "quiero", "carrito", "por favor"];
+  if (esSignals.some((s) => lower.includes(s))) return "es";
+
+  return "en";
+}
+
+function buttonLabel(kind: "view" | "add", lang: UiLang): string {
+  if (lang === "it") {
+    return kind === "view" ? "Vedi prodotto" : "Aggiungi al carrello";
+  }
+  if (lang === "es") {
+    return kind === "view" ? "Ver producto" : "Agregar al carrito";
+  }
+  return kind === "view" ? "View product" : "Add to cart";
+}
+
+function extractUrls(text: string): string[] {
+  const matches = text.match(/https?:\/\/\S+/gi) || [];
+  return matches.map((raw) => raw.replace(/[).,!?]+$/g, ""));
+}
+
+function parseImageSegments(text: string): Array<{
+  caption: string;
+  imageUrl: string;
+  textBefore: string;
+}> {
+  const regex = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/gi;
+  const segments: Array<{
+    caption: string;
+    imageUrl: string;
+    textBefore: string;
+  }> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    const before = text.slice(lastIndex, match.index).trim();
+    const localBlock =
+      before.split(/\n\s*\n/).filter(Boolean).pop() || before;
+    const altText = (match[1] || "").trim();
+    const imageUrl = match[2];
+    const lines = localBlock
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const caption = altText || "Product";
+    segments.push({ caption, imageUrl, textBefore: localBlock });
+    lastIndex = regex.lastIndex;
+  }
+
+  return segments;
+}
+
+function stripImageMarkdown(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function stripMarkdownLinks(text: string): string {
+  return text.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, "$1");
+}
+
+function stripActionLines(text: string): string {
+  const lines = text.split("\n");
+  const cleaned = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^\[.+\]\(https?:\/\/[^)]+\)$/.test(trimmed)) return false;
+    if (/^https?:\/\/\S+$/.test(trimmed)) return false;
+    if (
+      /^(view product|add to cart|vedi prodotto|aggiungi al carrello|ver producto|agregar al carrito)$/i.test(
+        trimmed
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
+  return cleaned.join("\n");
+}
+
+function stripUrls(text: string): string {
+  return text.replace(/https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").trim();
+}
+
+function extractActionUrls(reply: string): {
+  productUrl: string | null;
+  addToCartUrl: string | null;
+} {
+  const urls = extractUrls(reply);
+  const productUrl = urls.find((u) => /\/products\//i.test(u)) || null;
+  const addToCartUrl = urls.find((u) => /\/cart\/add/i.test(u)) || null;
+  return { productUrl, addToCartUrl };
+}
+
+function buildActionButtons(reply: string, lang: UiLang): {
+  buttons: MetaButton[];
+  templateText: string;
+  productUrl: string | null;
+  addToCartUrl: string | null;
+} {
+  const { productUrl, addToCartUrl } = extractActionUrls(reply);
+  if (!productUrl && !addToCartUrl) {
+    return { buttons: [], templateText: reply, productUrl, addToCartUrl };
+  }
+
+  const buttons: MetaButton[] = [];
+  if (productUrl) {
+    buttons.push({
+      type: "web_url",
+      title: buttonLabel("view", lang),
+      url: productUrl
+    });
+  }
+  if (addToCartUrl) {
+    buttons.push({
+      type: "web_url",
+      title: buttonLabel("add", lang),
+      url: addToCartUrl
+    });
+  }
+
+  const fallbackText = stripUrls(stripMarkdownLinks(stripActionLines(reply)));
+  const templateText =
+    (fallbackText || "Open one of the actions below.").slice(0, 600);
+
+  return {
+    buttons: buttons.slice(0, 3),
+    templateText,
+    productUrl,
+    addToCartUrl
+  };
+}
+
 type SendReplyResult =
   | {
       ok: true;
@@ -223,15 +374,117 @@ export async function sendGraphText(
   }
 
   const url = `${config.metaGraphApiBaseUrl}/${graphTargetId}/messages`;
-  const body = {
+  const imageSegments = parseImageSegments(reply);
+  const replySansImagesRaw = stripImageMarkdown(reply);
+  const lang = detectUiLanguage(
+    stripMarkdownLinks(stripActionLines(replySansImagesRaw))
+  );
+  const {
+    buttons,
+    templateText,
+    productUrl: globalProductUrl,
+    addToCartUrl: globalAddToCartUrl
+  } = buildActionButtons(replySansImagesRaw, lang);
+  const replyText =
+    stripUrls(stripMarkdownLinks(stripActionLines(replySansImagesRaw))) ||
+    replySansImagesRaw ||
+    reply;
+  const textBody = {
     messaging_type: "RESPONSE",
     recipient: { id: userId },
-    message: { text: reply }
+    message: { text: replyText }
   };
+
+  const genericTemplateBody =
+    imageSegments.length > 0
+      ? {
+          messaging_type: "RESPONSE",
+          recipient: { id: userId },
+          message: {
+            attachment: {
+              type: "template",
+              payload: {
+                template_type: "generic",
+                elements: imageSegments.slice(0, 10).map((seg) => {
+                  const segTail = seg.textBefore
+                    .split("\n")
+                    .map((l) => l.trim())
+                    .filter(Boolean)
+                    .slice(-4)
+                    .join("\n");
+                  const segUrls = extractActionUrls(segTail);
+                  const productUrl = segUrls.productUrl || globalProductUrl;
+                  const addToCartUrl =
+                    segUrls.addToCartUrl || globalAddToCartUrl;
+
+                  const segTextClean = stripUrls(
+                    stripMarkdownLinks(stripActionLines(segTail))
+                  );
+                  const segLines = segTextClean
+                    .split("\n")
+                    .map((l) => l.trim())
+                    .filter(Boolean);
+                  const title =
+                    segLines.length > 0
+                      ? segLines[segLines.length - 1].slice(0, 80)
+                      : seg.caption.slice(0, 80);
+                  const subtitleSource =
+                    segLines.length > 1
+                      ? segLines.slice(0, segLines.length - 1).join(" ")
+                      : segTextClean;
+                  const subtitle = subtitleSource.slice(0, 80);
+
+                  const elementButtons: MetaButton[] = [];
+                  if (productUrl) {
+                    elementButtons.push({
+                      type: "web_url",
+                      title: buttonLabel("view", lang),
+                      url: productUrl
+                    });
+                  }
+                  if (addToCartUrl) {
+                    elementButtons.push({
+                      type: "web_url",
+                      title: buttonLabel("add", lang),
+                      url: addToCartUrl
+                    });
+                  }
+
+                  return {
+                    title: title || "Product",
+                    subtitle: subtitle || undefined,
+                    image_url: seg.imageUrl,
+                    buttons: elementButtons.slice(0, 3)
+                  };
+                })
+              }
+            }
+          }
+        }
+      : null;
+
+  const buttonBody =
+    buttons.length > 0 && imageSegments.length === 0
+      ? {
+          messaging_type: "RESPONSE",
+          recipient: { id: userId },
+          message: {
+            attachment: {
+              type: "template",
+              payload: {
+                template_type: "button",
+                text: templateText,
+                buttons
+              }
+            }
+          }
+        }
+      : null;
 
   // Attempt 1
   try {
-    const resp = await axios.post(url, body, {
+    const primaryBody = genericTemplateBody || buttonBody || textBody;
+    const resp = await axios.post(url, primaryBody, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json"
@@ -239,13 +492,15 @@ export async function sendGraphText(
       timeout: 10000
     });
 
-    return {
+    const result: SendReplyResult = {
       ok: true,
       attempt: 1,
       refreshedToken: false,
       status: resp.status,
       metaMessageId: extractMetaMessageId(resp.data)
     };
+
+    return result;
   } catch (err: unknown) {
     const n = normalizeAxiosError(err);
 
@@ -263,6 +518,38 @@ export async function sendGraphText(
     });
 
     if (!isMetaTokenErrorNeedingRefresh(err)) {
+      // Button templates can fail for some surfaces; fall back to plain text.
+      if (genericTemplateBody || buttonBody) {
+        try {
+          const respFallback = await axios.post(url, textBody, {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            },
+            timeout: 10000
+          });
+
+          logLine("WARN", "META", "template send failed, fell back to text", {
+            req: requestId,
+            plat: platform,
+            channel: channelId,
+            status: n.status
+          });
+
+          const result: SendReplyResult = {
+            ok: true,
+            attempt: 1,
+            refreshedToken: false,
+            status: respFallback.status,
+            metaMessageId: extractMetaMessageId(respFallback.data)
+          };
+
+          return result;
+        } catch {
+          // ignore and return the original error below
+        }
+      }
+
       return {
         ok: false,
         attempt: 1,
@@ -296,7 +583,8 @@ export async function sendGraphText(
     accessToken = refreshed.accessToken;
 
     try {
-      const resp2 = await axios.post(url, body, {
+      const primaryBody = genericTemplateBody || buttonBody || textBody;
+      const resp2 = await axios.post(url, primaryBody, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json"
@@ -309,15 +597,47 @@ export async function sendGraphText(
         channel: channelId
       });
 
-      return {
+      const result: SendReplyResult = {
         ok: true,
         attempt: 2,
         refreshedToken: true,
         status: resp2.status,
         metaMessageId: extractMetaMessageId(resp2.data)
       };
+
+      return result;
     } catch (err2: unknown) {
       const n2 = normalizeAxiosError(err2);
+      if (genericTemplateBody || buttonBody) {
+        try {
+          const respFallback2 = await axios.post(url, textBody, {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            },
+            timeout: 10000
+          });
+
+          logLine("WARN", "META", "template send failed after refresh, fell back to text", {
+            req: requestId,
+            plat: platform,
+            channel: channelId,
+            status: n2.status
+          });
+
+          const result: SendReplyResult = {
+            ok: true,
+            attempt: 2,
+            refreshedToken: true,
+            status: respFallback2.status,
+            metaMessageId: extractMetaMessageId(respFallback2.data)
+          };
+
+          return result;
+        } catch {
+          // ignore and return the error below
+        }
+      }
       logLine("ERROR", "META", "reply failed after refresh", {
         req: requestId,
         plat: platform,
@@ -678,12 +998,16 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
             conversationId: convo.id
           });
           const chatMs = Date.now() - t0;
+  const replyForLog =
+    stripUrls(stripMarkdownLinks(stripImageMarkdown(reply))) ||
+    stripImageMarkdown(reply) ||
+    reply;
 
           logLine("INFO", "META", "reply generated", {
             req: requestId,
             convo: convo.id,
             ms: chatMs,
-            reply: safeSnippet(reply)
+            reply: safeSnippet(replyForLog)
           });
 
           const io = req.app.get("io") as SocketIOServer | undefined;
@@ -698,7 +1022,7 @@ try {
   const assistantMsg = await logMessage({
     conversationId: convo.id,
     role: "ASSISTANT",
-    content: reply
+    content: replyForLog
   });
 
   emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
@@ -1066,12 +1390,16 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
             conversationId: convo.id
           });
           const chatMs = Date.now() - t0;
+  const replyForLog =
+    stripUrls(stripMarkdownLinks(stripImageMarkdown(reply))) ||
+    stripImageMarkdown(reply) ||
+    reply;
 
           logLine("INFO", "META", "reply generated", {
             req: requestId,
             convo: convo.id,
             ms: chatMs,
-            reply: safeSnippet(reply)
+            reply: safeSnippet(replyForLog)
           });
 
           const io = req.app.get("io") as SocketIOServer | undefined;
@@ -1086,7 +1414,7 @@ try {
   const assistantMsg = await logMessage({
     conversationId: convo.id,
     role: "ASSISTANT",
-    content: reply
+    content: replyForLog
   });
 
   emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);

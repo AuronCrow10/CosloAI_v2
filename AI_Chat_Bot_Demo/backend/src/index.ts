@@ -28,6 +28,9 @@ import usageRouter from "./routes/usage";
 import accountRouter from "./routes/account";
 import dashboardRouter from "./routes/dashboard";
 import whatsappTemplatesRouter from "./routes/whatsappTemplates";
+import shopifyRouter from "./routes/shopify";
+import { prisma } from "./prisma/prisma";
+import { normalizeShopDomain } from "./shopify/shopService";
 
 import referralsRouter from "./routes/referrals";
 import adminUsersRouter from "./routes/adminUsers";
@@ -40,6 +43,7 @@ import adminIntegrationsRouter from "./routes/adminIntegrations";
 import adminPlansRouter from "./routes/adminPlans";
 // NEW: booking reminder scheduler
 import { scheduleBookingReminderJob } from "./services/bookingReminderService";
+import { scheduleShopifyDataCleanupJob } from "./shopify/dataProtectionService";
 import mobileDevicesRouter from "./routes/mobileDevices";
 
 const app = express();
@@ -159,6 +163,19 @@ const widgetCspDirectives = {
   frameAncestors: widgetFrameAncestors.length ? widgetFrameAncestors : ["*"]
 };
 
+const shopifyFrameAncestors = (process.env.SHOPIFY_FRAME_ANCESTORS ||
+  "https://admin.shopify.com,https://*.myshopify.com")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const shopifyCspDirectives = {
+  ...mainCspDirectives,
+  frameAncestors: shopifyFrameAncestors.length
+    ? shopifyFrameAncestors
+    : ["https://admin.shopify.com", "https://*.myshopify.com"]
+};
+
 // Base security headers; CSP + frameguard handled per-route below
 app.use(
   helmet({
@@ -181,9 +198,23 @@ const widgetCsp = helmet.contentSecurityPolicy({
   reportOnly: cspReportOnly
 });
 
+const shopifyCsp = helmet.contentSecurityPolicy({
+  useDefaults: false,
+  directives: shopifyCspDirectives,
+  reportOnly: cspReportOnly
+});
+
+const isShopifyEmbeddedRequest = (req: express.Request): boolean => {
+  const q = req.query as Record<string, unknown>;
+  return q?.embedded === "1" || typeof q?.shop === "string";
+};
+
 app.use((req, res, next) => {
   if (req.path.startsWith("/widget")) {
     return widgetCsp(req, res, next);
+  }
+  if (isShopifyEmbeddedRequest(req)) {
+    return shopifyCsp(req, res, next);
   }
   return mainCsp(req, res, next);
 });
@@ -198,7 +229,7 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-  if (!req.path.startsWith("/widget")) {
+  if (!req.path.startsWith("/widget") && !isShopifyEmbeddedRequest(req)) {
     res.setHeader("X-Frame-Options", "SAMEORIGIN");
   }
   next();
@@ -264,6 +295,7 @@ app.use("/api", usageRouter);
 app.use("/api/account", accountRouter);
 app.use("/api", dashboardRouter);
 app.use("/api", whatsappTemplatesRouter);
+app.use("/api", shopifyRouter);
 
 
 app.use("/api", adminUsersRouter);
@@ -288,6 +320,49 @@ app.use("/api", mobileDevicesRouter);
 
 // If you serve static frontend from this service:
 const publicDir = path.join(__dirname, "..", "public");
+
+app.get("/", async (req, res, next) => {
+  const shop = typeof req.query.shop === "string" ? req.query.shop : "";
+  const embedded = req.query.embedded === "1" || !!shop;
+
+  if (!embedded || !shop) {
+    return next();
+  }
+
+  let shopDomain: string;
+  try {
+    shopDomain = normalizeShopDomain(shop);
+  } catch (err: any) {
+    console.warn("[shopify] invalid shop param on /", { shop });
+    return next();
+  }
+
+  try {
+    const record = await prisma.shopifyShop.findUnique({
+      where: { shopDomain },
+      select: { isActive: true, uninstalledAt: true }
+    });
+
+    const isActive = !!record?.isActive && !record?.uninstalledAt;
+    console.log("[shopify] embedded root hit", {
+      shopDomain,
+      isActive
+    });
+
+    if (!isActive) {
+      const returnTo = `/?embedded=1&shop=${encodeURIComponent(shopDomain)}`;
+      const installUrl =
+        `/api/shopify/install/public?shop=${encodeURIComponent(shopDomain)}` +
+        `&returnTo=${encodeURIComponent(returnTo)}`;
+      return res.redirect(installUrl);
+    }
+  } catch (err) {
+    console.error("[shopify] embedded root check failed", err);
+  }
+
+  return next();
+});
+
 app.use(express.static(publicDir));
 
 // 404 for unknown API
@@ -321,3 +396,6 @@ scheduleMetaTokenRefreshJob();
 
 // NEW: Start booking reminder job
 scheduleBookingReminderJob();
+
+// NEW: Start Shopify data cleanup job
+scheduleShopifyDataCleanupJob();

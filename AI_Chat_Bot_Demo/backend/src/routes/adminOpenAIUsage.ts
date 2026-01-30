@@ -227,7 +227,7 @@ router.get(
     const knowledgeUsageByBot: Record<string, number> = {};
 
     const botsWithKnowledge = bots.filter(
-      (b) => b.knowledgeClientId != null
+      (b) => b.knowledgeClientId != null && (b as any).knowledgeSource !== "SHOPIFY"
     ) as Array<(typeof bots)[number] & { knowledgeClientId: string }>;
 
     if (botsWithKnowledge.length > 0) {

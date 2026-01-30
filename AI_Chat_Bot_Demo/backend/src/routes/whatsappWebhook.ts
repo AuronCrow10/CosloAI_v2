@@ -148,6 +148,50 @@ function extractWaMessageId(data: unknown): string | undefined {
   return d?.messages?.[0]?.id || d?.message_id || d?.id;
 }
 
+function extractImageUrls(text: string): string[] {
+  const urls: string[] = [];
+  const regex = /!\[[^\]]*\]\((https?:\/\/[^)]+)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    urls.push(match[1]);
+  }
+  return urls;
+}
+
+function stripImageMarkdown(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function stripMarkdownLinks(text: string): string {
+  return text.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, "$1");
+}
+
+function stripActionLines(text: string): string {
+  const lines = text.split("\n");
+  const cleaned = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^\[.+\]\(https?:\/\/[^)]+\)$/.test(trimmed)) return false;
+    if (/^https?:\/\/\S+$/.test(trimmed)) return false;
+    if (
+      /^(view product|add to cart|vedi prodotto|aggiungi al carrello|ver producto|agregar al carrito)$/i.test(
+        trimmed
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
+  return cleaned.join("\n");
+}
+
+function stripUrls(text: string): string {
+  return text.replace(/https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").trim();
+}
+
 export async function markWhatsAppNeedsReconnect(requestId: string, channelId: string, context: string) {
   try {
     const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
@@ -577,8 +621,16 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
           }
 
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, { conversationId: convo.id });
+          const replyRaw = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id
+          });
           const chatMs = Date.now() - t0;
+          const imageUrls = extractImageUrls(replyRaw);
+          const replySansImages = stripImageMarkdown(replyRaw);
+          const reply =
+            stripUrls(stripMarkdownLinks(stripActionLines(replySansImages))) ||
+            replySansImages ||
+            replyRaw;
 
           logLine("INFO", "WA", "reply generated", {
             req: requestId,
@@ -627,6 +679,36 @@ try {
               { messaging_product: "whatsapp", to: userWaId, text: { body: reply } },
               { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, timeout: 10000 }
             );
+
+            if (imageUrls.length > 0) {
+              for (const imageUrl of imageUrls) {
+                try {
+                  await axios.post(
+                    url,
+                    {
+                      messaging_product: "whatsapp",
+                      to: userWaId,
+                      type: "image",
+                      image: { link: imageUrl }
+                    },
+                    {
+                      headers: {
+                        Authorization: `Bearer ${accessToken}`,
+                        "Content-Type": "application/json"
+                      },
+                      timeout: 10000
+                    }
+                  );
+                } catch (imgErr: unknown) {
+                  const nImg = normalizeAxiosError(imgErr);
+                  logLine("WARN", "WA", "image send failed", {
+                    req: requestId,
+                    convo: convo.id,
+                    status: nImg.status
+                  });
+                }
+              }
+            }
 
             logLine("INFO", "WA", "reply sent", {
               req: requestId,

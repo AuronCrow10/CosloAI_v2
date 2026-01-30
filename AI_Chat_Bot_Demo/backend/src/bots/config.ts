@@ -100,6 +100,7 @@ export type DemoBotConfig = {
   id: string;
   slug: string;
   name: string;
+  knowledgeSource?: "RAG" | "SHOPIFY";
   knowledgeClientId: string | null;
   domain: string;
   systemPrompt: string;
@@ -119,6 +120,7 @@ const DEMO_BOTS: DemoBotConfig[] = [
     id: "1",
     slug: "cosmin-marica",
     name: "Cosmin Marica Full Stack Developer",
+    knowledgeSource: "RAG",
     knowledgeClientId: "fba15b42-da66-402f-84dc-13aafa6ddc38",
     domain: "cosminmarica.dev",
     systemPrompt:
@@ -325,6 +327,7 @@ function mapDbBotToDemoConfig(
     id: dbBot.id,
     slug: dbBot.slug,
     name: dbBot.name,
+    knowledgeSource: (dbBot as any).knowledgeSource ?? "RAG",
     knowledgeClientId: dbBot.knowledgeClientId,
     domain: dbBot.domain || "",
     systemPrompt: dbBot.systemPrompt,

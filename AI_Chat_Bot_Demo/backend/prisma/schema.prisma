@@ -33,12 +33,12 @@ model User {
   mfaTotpSecret  String?
   mfaBackupCodes MfaBackupCode[]
 
-  bots             Bot[]
-  refreshTokens    RefreshToken[]
-  emailTokens      EmailVerificationToken[]
-  passwordResetTokens PasswordResetToken[]
-  metaSessions     MetaConnectSession[]
-  whatsappSessions WhatsappConnectSession[]
+  bots                          Bot[]
+  refreshTokens                 RefreshToken[]
+  emailTokens                   EmailVerificationToken[]
+  passwordResetTokens           PasswordResetToken[]
+  metaSessions                  MetaConnectSession[]
+  whatsappSessions              WhatsappConnectSession[]
   googleCalendarConnectSessions GoogleCalendarConnectSession[]
   googleCalendarConnections     GoogleCalendarConnection[]
 
@@ -87,6 +87,7 @@ model Bot {
   name                   String
   description            String?
   systemPrompt           String
+  knowledgeSource        KnowledgeSource @default(RAG)
   knowledgeClientId      String?
   domain                 String?
   useDomainCrawler       Boolean   @default(false)
@@ -106,12 +107,12 @@ model Bot {
   // NEW: automatic per-conversation evaluation toggle
   autoEvaluateConversations Boolean @default(false)
 
-  channels         BotChannel[]
-  subscription     Subscription?
-  conversations    Conversation[]
-  payments         Payment[]
-  metaSessions     MetaConnectSession[]
-  whatsappSessions WhatsappConnectSession[]
+  channels                      BotChannel[]
+  subscription                  Subscription?
+  conversations                 Conversation[]
+  payments                      Payment[]
+  metaSessions                  MetaConnectSession[]
+  whatsappSessions              WhatsappConnectSession[]
   googleCalendarConnectSessions GoogleCalendarConnectSession[]
   googleCalendarConnection      GoogleCalendarConnection?
 
@@ -124,7 +125,7 @@ model Bot {
   referralCommissions  ReferralCommission[]
 
   // NEW: Booking records
-  bookings Booking[]
+  bookings        Booking[]
   bookingServices BookingService[]
 
   // =========================
@@ -152,58 +153,58 @@ model Bot {
   bookingReminderEmailEnabled     Boolean @default(true)
 
   // Email templates (optional – fall back to sensible defaults if null)
-  bookingConfirmationSubjectTemplate  String?
-  bookingReminderSubjectTemplate      String?
-  bookingCancellationSubjectTemplate    String?
+  bookingConfirmationSubjectTemplate String?
+  bookingReminderSubjectTemplate     String?
+  bookingCancellationSubjectTemplate String?
 
   bookingConfirmationBodyTextTemplate String?
   bookingReminderBodyTextTemplate     String?
-  bookingCancellationBodyTextTemplate   String?
+  bookingCancellationBodyTextTemplate String?
 
   bookingConfirmationBodyHtmlTemplate String?
   bookingReminderBodyHtmlTemplate     String?
-  bookingCancellationBodyHtmlTemplate   String?
+  bookingCancellationBodyHtmlTemplate String?
 
   // Which fields the bot should collect for bookings.
   // NOTE: the backend always requires at least: name, email, service, datetime.
   bookingRequiredFields String[] @default(["name", "email", "phone", "service", "datetime"])
 
-  bookingWeeklySchedule             Json?
-
+  bookingWeeklySchedule Json?
 
   // NEW: Email usage records (for per-plan email limits)
   emailUsages EmailUsage[]
-
 
   leadWhatsappMessages200  Boolean @default(false)
   leadWhatsappMessages500  Boolean @default(false)
   leadWhatsappMessages1000 Boolean @default(false)
 
-    // Knowledge crawl tracking (latest job)
-  knowledgeLastCrawlJobId     String?
-  knowledgeLastCrawlDomain    String?
-  knowledgeLastCrawlStartedAt DateTime?
+  // Knowledge crawl tracking (latest job)
+  knowledgeLastCrawlJobId      String?
+  knowledgeLastCrawlDomain     String?
+  knowledgeLastCrawlStartedAt  DateTime?
   knowledgeLastCrawlFinishedAt DateTime?
 
   metaLeadAutomations MetaLeadAutomation[]
   metaLeads           MetaLead[]
-  planUsageAlerts PlanUsageAlert[]
+  planUsageAlerts     PlanUsageAlert[]
 
+  // NEW: Shopify integrations
+  shopifyShops ShopifyShop[]
 }
 
 model BookingService {
-  id        String @id @default(uuid())
-  botId     String
-  bot       Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  id    String @id @default(uuid())
+  botId String
+  bot   Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
 
-  key       String
-  name      String
-  aliases   String[] @default([])
+  key     String
+  name    String
+  aliases String[] @default([])
 
-  calendarId          String
-  durationMinutes     Int
+  calendarId              String
+  durationMinutes         Int
   maxSimultaneousBookings Int?
-  weeklySchedule      Json?
+  weeklySchedule          Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -218,6 +219,11 @@ enum BotStatus {
   ACTIVE
   SUSPENDED
   CANCELED
+}
+
+enum KnowledgeSource {
+  RAG
+  SHOPIFY
 }
 
 model BotChannel {
@@ -289,11 +295,11 @@ model Conversation {
   channel        ChannelType
   externalUserId String
 
-  lastMessageAt  DateTime    @default(now())
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  lastMessageAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  mode           ConversationMode @default(AI)
+  mode ConversationMode @default(AI)
 
   memorySummary          String?
   memorySummaryModel     String?
@@ -369,13 +375,13 @@ model EmailVerificationToken {
 }
 
 model PasswordResetToken {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id])
+  user      User      @relation(fields: [userId], references: [id])
   codeHash  String
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId])
 }
@@ -452,10 +458,10 @@ model Payment {
   status      String
 
   // NEW: classify subscription vs top-up
-  kind         PaymentKind @default(SUBSCRIPTION)
+  kind PaymentKind @default(SUBSCRIPTION)
 
   // NEW: for TOP_UP payments, how many extra tokens were purchased
-  topupTokens  Int?
+  topupTokens Int?
 
   billingEmail       String?
   billingName        String?
@@ -591,7 +597,6 @@ enum ReferralPayoutStatus {
   OPEN
   PAID
 }
-
 
 enum BookingStatus {
   ACTIVE
@@ -790,57 +795,54 @@ model EmailUsage {
   @@index([botId, createdAt])
 }
 
-
 model MetaLeadAutomation {
-  id                       String   @id @default(uuid())
-  botId                    String
-  bot                      Bot      @relation(fields: [botId], references: [id])
+  id    String @id @default(uuid())
+  botId String
+  bot   Bot    @relation(fields: [botId], references: [id])
 
-  pageId                   String            // FB page id
-  formId                   String            // Lead form id
-  enabled                  Boolean  @default(true)
+  pageId  String // FB page id
+  formId  String // Lead form id
+  enabled Boolean @default(true)
 
   // How to read the lead:
-  phoneFieldName           String   @default("phone_number") // name in field_data
-  consentFieldName         String?                           // e.g. "whatsapp_opt_in"
-  requiresWhatsappOptIn    Boolean  @default(true)
+  phoneFieldName        String  @default("phone_number") // name in field_data
+  consentFieldName      String? // e.g. "whatsapp_opt_in"
+  requiresWhatsappOptIn Boolean @default(true)
 
   // What to send:
-  whatsappTemplateName     String            // must exist in WABA
-  whatsappTemplateLanguage String            // e.g. "en_US"
+  whatsappTemplateName     String // must exist in WABA
+  whatsappTemplateLanguage String // e.g. "en_US"
 
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([botId, pageId, formId], name: "bot_page_form")
 }
 
 model MetaLead {
-  id            String   @id @default(uuid())
-  botId         String
-  bot           Bot      @relation(fields: [botId], references: [id])
+  id    String @id @default(uuid())
+  botId String
+  bot   Bot    @relation(fields: [botId], references: [id])
 
-  pageId        String
-  leadgenId     String   @unique
-  formId        String?
-  adId          String?
-  campaignId    String?
+  pageId     String
+  leadgenId  String  @unique
+  formId     String?
+  adId       String?
+  campaignId String?
 
   phone         String?
-  whatsappOptIn Boolean  @default(false)
+  whatsappOptIn Boolean @default(false)
 
-  rawPayload    Json
+  rawPayload Json
 
-  whatsappStatus String   @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
+  whatsappStatus String  @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
   whatsappError  String?
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([botId, createdAt])
 }
-
-
 
 model MobileDevice {
   id            String   @id @default(uuid())
@@ -854,18 +856,116 @@ model MobileDevice {
   @@index([expoPushToken])
 }
 
-
 model PlanUsageAlert {
-  id        String   @id @default(uuid())
-  botId     String
-  bot       Bot      @relation(fields: [botId], references: [id])
+  id    String @id @default(uuid())
+  botId String
+  bot   Bot    @relation(fields: [botId], references: [id])
 
-  year      Int      // billing year (UTC)
-  month     Int      // billing month 1-12 (UTC)
-  threshold Int      // 50, 70, 90, 100
+  year      Int // billing year (UTC)
+  month     Int // billing month 1-12 (UTC)
+  threshold Int // 50, 70, 90, 100
 
-  sentAt    DateTime @default(now())
+  sentAt DateTime @default(now())
 
-  @@index([botId])
   @@unique([botId, year, month, threshold], name: "bot_month_threshold_unique")
+  @@index([botId])
+}
+
+// =========================
+// SHOPIFY (NEW)
+// =========================
+
+model ShopifyShop {
+  id                             String    @id @default(uuid())
+  shopDomain                     String    @unique
+  accessTokenEncrypted           String
+  storefrontAccessTokenEncrypted String?
+  scopes                         String
+  installedAt                    DateTime  @default(now())
+  uninstalledAt                  DateTime?
+  isActive                       Boolean   @default(true)
+  botId                          String?
+  bot                            Bot?      @relation(fields: [botId], references: [id], onDelete: SetNull)
+  shopCurrency                   String?
+  lastProductsSyncAt             DateTime?
+  createdAt                      DateTime  @default(now())
+  updatedAt                      DateTime  @updatedAt
+
+  products   ShopifyProduct[]
+  variants   ShopifyVariant[]
+  dataEvents ShopifyDataEvent[]
+}
+
+model ShopifyProduct {
+  id     String      @id @default(uuid())
+  shopId String
+  shop   ShopifyShop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  productId        String
+  title            String
+  handle           String?
+  bodyHtml         String?
+  vendor           String?
+  productType      String?
+  status           String?
+  tags             String[]  @default([])
+  publishedAt      DateTime?
+  shopifyCreatedAt DateTime?
+  shopifyUpdatedAt DateTime?
+  imageUrl         String?
+  priceMin         Decimal?  @db.Decimal(12, 2)
+  priceMax         Decimal?  @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  variants ShopifyVariant[]
+
+  @@unique([shopId, productId], name: "shopId_productId")
+  @@index([shopId])
+  @@index([status])
+}
+
+model ShopifyVariant {
+  id          String         @id @default(uuid())
+  shopId      String
+  shop        ShopifyShop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  productDbId String
+  product     ShopifyProduct @relation(fields: [productDbId], references: [id], onDelete: Cascade)
+
+  variantId         String
+  title             String?
+  sku               String?
+  price             Decimal?  @db.Decimal(12, 2)
+  compareAtPrice    Decimal?  @db.Decimal(12, 2)
+  availableForSale  Boolean   @default(false)
+  inventoryQuantity Int?
+  imageUrl          String?
+  selectedOptions   Json?
+  shopifyCreatedAt  DateTime?
+  shopifyUpdatedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shopId, variantId], name: "shopId_variantId")
+  @@index([shopId])
+  @@index([productDbId])
+}
+
+model ShopifyDataEvent {
+  id            String       @id @default(uuid())
+  shopId        String?
+  shop          ShopifyShop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  shopDomain    String?
+  customerEmail String?
+  eventType     String
+  webhookId     String?      @unique
+  payloadJson   Json?
+  processedAt   DateTime?
+  createdAt     DateTime     @default(now())
+
+  @@index([shopId])
+  @@index([shopDomain])
+  @@index([eventType])
 }

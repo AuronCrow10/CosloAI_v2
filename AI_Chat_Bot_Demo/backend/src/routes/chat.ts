@@ -206,8 +206,9 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
 
     // --- Call chat service (only when in AI mode) ---
     const reply = await generateBotReplyForSlug(slug, trimmedMessage, {
-      conversationId: dbConversationId ?? undefined
+      conversationId: dbConversationId ?? convId
     });
+    console.log("[RAW REPLY]", reply);
 
     try {
   if (dbConversationId && dbBot) {

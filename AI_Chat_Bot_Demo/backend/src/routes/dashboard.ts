@@ -1186,12 +1186,13 @@ router.get(
 
     const bots = await prisma.bot.findMany({
       where: { userId },
-      select: {
-        id: true,
-        name: true,
-        status: true,
-        knowledgeClientId: true,
-        useCalendar: true,
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          knowledgeClientId: true,
+          knowledgeSource: true,
+          useCalendar: true,
         channelWeb: true,
         channelWhatsapp: true,
         channelInstagram: true,
@@ -1201,22 +1202,27 @@ router.get(
 
     const botIds = bots.map((b) => b.id);
 
-    const [convoCounts, lastConversations, channels] = await Promise.all([
-      prisma.conversation.groupBy({
-        by: ["botId"],
-        where: { botId: { in: botIds }, lastMessageAt: { gte: thirtyDaysAgo } },
-        _count: { _all: true }
+      const [convoCounts, lastConversations, channels, shopifyShops] =
+        await Promise.all([
+        prisma.conversation.groupBy({
+          by: ["botId"],
+          where: { botId: { in: botIds }, lastMessageAt: { gte: thirtyDaysAgo } },
+          _count: { _all: true }
       }),
       prisma.conversation.groupBy({
         by: ["botId"],
         where: { botId: { in: botIds } },
         _max: { lastMessageAt: true }
       }),
-      prisma.botChannel.findMany({
-        where: { botId: { in: botIds } },
-        select: { botId: true, type: true }
-      })
-    ]);
+        prisma.botChannel.findMany({
+          where: { botId: { in: botIds } },
+          select: { botId: true, type: true }
+        }),
+        prisma.shopifyShop.findMany({
+          where: { botId: { in: botIds }, isActive: true },
+          select: { botId: true }
+        })
+      ]);
 
     const convoCountMap = new Map<string, number>();
     convoCounts.forEach((c) => {
@@ -1232,37 +1238,44 @@ router.get(
       string,
       { WEB: number; WHATSAPP: number; FACEBOOK: number; INSTAGRAM: number }
     >();
-    channels.forEach((c) => {
-      if (!channelMap.has(c.botId)) {
-        channelMap.set(c.botId, {
-          WEB: 0,
-          WHATSAPP: 0,
+      channels.forEach((c) => {
+        if (!channelMap.has(c.botId)) {
+          channelMap.set(c.botId, {
+            WEB: 0,
+            WHATSAPP: 0,
           FACEBOOK: 0,
           INSTAGRAM: 0
         });
       }
-      const entry = channelMap.get(c.botId)!;
-      entry[c.type] += 1;
-    });
+        const entry = channelMap.get(c.botId)!;
+        entry[c.type] += 1;
+      });
 
-    const items = bots.map((b) => {
-      const counts = channelMap.get(b.id) || {
-        WEB: 0,
-        WHATSAPP: 0,
+      const shopifyBotIds = new Set(shopifyShops.map((s) => s.botId));
+
+      const items = bots.map((b) => {
+        const counts = channelMap.get(b.id) || {
+          WEB: 0,
+          WHATSAPP: 0,
         FACEBOOK: 0,
         INSTAGRAM: 0
       };
       const totalChannels =
         counts.WEB + counts.WHATSAPP + counts.FACEBOOK + counts.INSTAGRAM;
 
-      const lastConversationAt = lastConvoMap.get(b.id) || null;
-      const conversationsLast30Days = convoCountMap.get(b.id) || 0;
+        const lastConversationAt = lastConvoMap.get(b.id) || null;
+        const conversationsLast30Days = convoCountMap.get(b.id) || 0;
 
-      let score = 100;
-      if (b.status !== "ACTIVE") score -= 30;
-      if (totalChannels === 0) score -= 25;
-      if (!b.knowledgeClientId) score -= 10;
-      if (!b.useCalendar) score -= 10;
+        const knowledgeEnabled =
+          (b as any).knowledgeSource === "SHOPIFY"
+            ? shopifyBotIds.has(b.id)
+            : !!b.knowledgeClientId;
+
+        let score = 100;
+        if (b.status !== "ACTIVE") score -= 30;
+        if (totalChannels === 0) score -= 25;
+        if (!knowledgeEnabled) score -= 10;
+        if (!b.useCalendar) score -= 10;
       if (
         lastConversationAt &&
         differenceInCalendarDays(today, lastConversationAt) > 30
@@ -1280,16 +1293,16 @@ router.get(
           ? lastConversationAt.toISOString()
           : null,
         conversationsLast30Days,
-        channels: {
-          web: counts.WEB > 0 || b.channelWeb,
-          whatsapp: counts.WHATSAPP > 0 || b.channelWhatsapp,
-          facebook: counts.FACEBOOK > 0 || b.channelMessenger,
-          instagram: counts.INSTAGRAM > 0 || b.channelInstagram
-        },
-        knowledgeEnabled: !!b.knowledgeClientId,
-        calendarEnabled: !!b.useCalendar
-      };
-    });
+          channels: {
+            web: counts.WEB > 0 || b.channelWeb,
+            whatsapp: counts.WHATSAPP > 0 || b.channelWhatsapp,
+            facebook: counts.FACEBOOK > 0 || b.channelMessenger,
+            instagram: counts.INSTAGRAM > 0 || b.channelInstagram
+          },
+          knowledgeEnabled,
+          calendarEnabled: !!b.useCalendar
+        };
+      });
 
     res.json({ items });
   }

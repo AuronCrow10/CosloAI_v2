@@ -143,7 +143,7 @@ export async function getUsageForBot(params: {
 
   // 2) Crawler usage from Knowledge backend (per knowledgeClientId)
   let knowledgeSummary: KnowledgeUsageSummary | null = null;
-  if (bot.knowledgeClientId) {
+  if ((bot as any).knowledgeSource !== "SHOPIFY" && bot.knowledgeClientId) {
     knowledgeSummary = await fetchKnowledgeUsageForClient({
       clientId: bot.knowledgeClientId,
       from: from ?? null,

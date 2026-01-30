@@ -63,6 +63,7 @@ const botCreateSchema = z.object({
 
   domain: z.string().url().optional().nullable(),
 
+  knowledgeSource: z.enum(["RAG", "SHOPIFY"]).optional().default("RAG"),
   useDomainCrawler: z.boolean().optional().default(false),
   usePdfCrawler: z.boolean().optional().default(false),
   channelWeb: z.boolean().optional().default(true),
@@ -226,6 +227,12 @@ router.post("/bots", async (req: Request, res: Response) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
   const data = parsed.data;
+  const knowledgeSource = data.knowledgeSource ?? "RAG";
+
+  const useDomainCrawler =
+    knowledgeSource === "SHOPIFY" ? false : data.useDomainCrawler;
+  const usePdfCrawler =
+    knowledgeSource === "SHOPIFY" ? false : data.usePdfCrawler;
 
   const existing = await prisma.bot.findUnique({ where: { slug: data.slug } });
   if (existing) {
@@ -257,10 +264,11 @@ if (selectedCount > 1) {
       name: data.name,
       description: data.description ?? null,
       systemPrompt: data.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      knowledgeSource,
       knowledgeClientId: null, // <-- created later on first crawl/upload
       domain: data.domain ?? null,
-      useDomainCrawler: data.useDomainCrawler,
-      usePdfCrawler: data.usePdfCrawler,
+      useDomainCrawler,
+      usePdfCrawler,
       channelWeb: data.channelWeb,
       channelWhatsapp: data.channelWhatsapp,
       channelInstagram: data.channelInstagram,
@@ -351,6 +359,11 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
 
+  const nextKnowledgeSource =
+    typeof data.knowledgeSource === "string"
+      ? data.knowledgeSource
+      : (bot as any).knowledgeSource ?? "RAG";
+
 
   let lead200 =
   typeof data.leadWhatsappMessages200 === "boolean"
@@ -390,11 +403,15 @@ if (selectedCount > 1) {
   // feature flags for pricing (unchanged)
   const nextFeatureFlags = {
     useDomainCrawler:
-      typeof data.useDomainCrawler === "boolean"
+      nextKnowledgeSource === "SHOPIFY"
+        ? false
+        : typeof data.useDomainCrawler === "boolean"
         ? data.useDomainCrawler
         : bot.useDomainCrawler,
     usePdfCrawler:
-      typeof data.usePdfCrawler === "boolean"
+      nextKnowledgeSource === "SHOPIFY"
+        ? false
+        : typeof data.usePdfCrawler === "boolean"
         ? data.usePdfCrawler
         : bot.usePdfCrawler,
     channelWeb:
@@ -476,6 +493,11 @@ if (selectedCount > 1) {
     leadWhatsappMessages500: lead500,
     leadWhatsappMessages1000: lead1000
   };
+
+  if (nextKnowledgeSource === "SHOPIFY") {
+    updateData.useDomainCrawler = false;
+    updateData.usePdfCrawler = false;
+  }
 
   const bookingServicesPayload = Array.isArray(
     (data as any).bookingServices

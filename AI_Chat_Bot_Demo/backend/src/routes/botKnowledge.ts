@@ -55,6 +55,9 @@ async function ensureKnowledgeClient(botId: string, userId: string) {
   const bot = await getUserBot(botId, userId);
   if (!bot) throw new Error("BOT_NOT_FOUND");
   if (bot.status !== "ACTIVE") throw new Error("BOT_NOT_ACTIVE");
+  if ((bot as any).knowledgeSource === "SHOPIFY") {
+    throw new Error("KNOWLEDGE_SOURCE_SHOPIFY");
+  }
 
   if (bot.knowledgeClientId) return { bot, knowledgeClientId: bot.knowledgeClientId };
 
@@ -90,6 +93,9 @@ router.post("/bots/:id/knowledge/estimate-crawl", async (req: Request, res: Resp
     if (err instanceof Error) {
       if (err.message === "BOT_NOT_FOUND") return res.status(404).json({ error: "Bot not found" });
       if (err.message === "BOT_NOT_ACTIVE") return res.status(400).json({ error: "Bot must be active." });
+      if (err.message === "KNOWLEDGE_SOURCE_SHOPIFY") {
+        return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+      }
     }
     return res.status(500).json({ error: "Internal server error" });
   }
@@ -195,6 +201,9 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
       if (err.message === "BOT_NOT_ACTIVE") {
         return res.status(400).json({ error: "Bot must be active before crawling knowledge." });
       }
+      if (err.message === "KNOWLEDGE_SOURCE_SHOPIFY") {
+        return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+      }
     }
     return res.status(500).json({ error: "Internal server error" });
   }
@@ -240,6 +249,9 @@ router.get("/bots/:id/knowledge/crawl-status", async (req: Request, res: Respons
 
     const bot = await getUserBot(botId, userId);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if ((bot as any).knowledgeSource === "SHOPIFY") {
+      return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+    }
     if (!bot.knowledgeClientId) return res.status(400).json({ error: "Bot has no knowledge client yet" });
 
     const data = await getCrawlJob(jobId); // { job: ... }
@@ -281,6 +293,9 @@ router.post("/bots/:id/knowledge/deactivate-job", async (req: Request, res: Resp
 
     const bot = await getUserBot(botId, userId);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if ((bot as any).knowledgeSource === "SHOPIFY") {
+      return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+    }
     if (!bot.knowledgeClientId) {
       return res.status(400).json({ error: "Bot has no knowledge client yet" });
     }
@@ -308,6 +323,9 @@ router.get("/bots/:id/knowledge/chunks", async (req: Request, res: Response) => 
 
     const bot = await getUserBot(botId, userId);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if ((bot as any).knowledgeSource === "SHOPIFY") {
+      return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+    }
     if (!bot.knowledgeClientId) {
       return res.status(400).json({ error: "Bot has no knowledge client yet" });
     }
@@ -336,6 +354,9 @@ router.patch("/bots/:id/knowledge/chunks/:chunkId", async (req: Request, res: Re
 
     const bot = await getUserBot(botId, userId);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if ((bot as any).knowledgeSource === "SHOPIFY") {
+      return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+    }
     if (!bot.knowledgeClientId) {
       return res.status(400).json({ error: "Bot has no knowledge client yet" });
     }
@@ -365,6 +386,9 @@ router.delete("/bots/:id/knowledge/chunks/:chunkId", async (req: Request, res: R
 
     const bot = await getUserBot(botId, userId);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if ((bot as any).knowledgeSource === "SHOPIFY") {
+      return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+    }
     if (!bot.knowledgeClientId) {
       return res.status(400).json({ error: "Bot has no knowledge client yet" });
     }

@@ -6,6 +6,7 @@ export interface AppConfig {
   port: number;
 
   databaseUrl: string;
+  redisUrl: string;
 
   knowledgeBaseUrl: string;
   knowledgeInternalToken: string;
@@ -46,6 +47,17 @@ export interface AppConfig {
   stripeWebhookSecret: string | null;
   stripePriceIdBasic: string | null;
 
+  // Shopify
+  shopifyApiKey: string | null;
+  shopifyApiSecret: string | null;
+  shopifyScopes: string | null;
+  shopifyAppUrl: string | null;
+  shopifyApiVersion: string;
+  shopifyTokenEncryptionKey: string | null;
+  shopifyOrderDataRetentionDays: number;
+  shopifyConversationRetentionDays: number;
+  shopifyRegisterComplianceWebhooks: boolean;
+
   metaAppId: string | null;
   metaAppSecret: string | null;
   metaRedirectUri: string | null;
@@ -70,6 +82,7 @@ export const config: AppConfig = {
   port: Number(process.env.PORT || 4000),
 
   databaseUrl: requireEnv("DATABASE_URL"),
+  redisUrl: process.env.REDIS_URL || "redis://redis:6379",
 
   knowledgeBaseUrl: requireEnv("KNOWLEDGE_BASE_URL"),
   knowledgeInternalToken: requireEnv("KNOWLEDGE_INTERNAL_TOKEN"),
@@ -110,6 +123,23 @@ export const config: AppConfig = {
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || null,
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || null,
   stripePriceIdBasic: process.env.STRIPE_PRICE_ID_BASIC || null,
+
+  shopifyApiKey: process.env.SHOPIFY_API_KEY || null,
+  shopifyApiSecret: process.env.SHOPIFY_API_SECRET || null,
+  shopifyScopes: process.env.SHOPIFY_SCOPES || null,
+  shopifyAppUrl: process.env.SHOPIFY_APP_URL || null,
+  shopifyApiVersion: process.env.SHOPIFY_API_VERSION || "2024-10",
+  shopifyTokenEncryptionKey: process.env.SHOPIFY_TOKEN_ENCRYPTION_KEY || null,
+  shopifyOrderDataRetentionDays: Number(
+    process.env.SHOPIFY_ORDER_DATA_RETENTION_DAYS || 90
+  ),
+  shopifyConversationRetentionDays: Number(
+    process.env.SHOPIFY_CONVERSATION_RETENTION_DAYS || 180
+  ),
+  shopifyRegisterComplianceWebhooks:
+    String(process.env.SHOPIFY_REGISTER_COMPLIANCE_WEBHOOKS || "")
+      .toLowerCase()
+      .trim() === "true",
 
   metaAppId: process.env.META_APP_ID || null,
   metaAppSecret: process.env.META_APP_SECRET || null,

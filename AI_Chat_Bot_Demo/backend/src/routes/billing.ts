@@ -465,6 +465,110 @@ router.get("/usage-plans", async (_req, res) => {
 });
 
 /**
+ * POST /api/bots/:id/activate-free
+ * - Protected + ownership checked
+ * - Activates a free plan without Stripe Checkout redirect
+ */
+router.post("/bots/:id/activate-free", requireAuth, async (req, res) => {
+  try {
+    const botId = req.params.id;
+    const userId = (req as any).user.id as string;
+    const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
+
+    if (!usagePlanId) {
+      return res.status(400).json({ error: "usagePlanId is required" });
+    }
+
+    const bot = await prisma.bot.findUnique({
+      where: { id: botId },
+      include: {
+        user: true,
+        subscription: {
+          include: { usagePlan: true }
+        }
+      }
+    });
+
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    if (bot.userId !== userId) return res.status(403).json({ error: "Forbidden" });
+
+    const usagePlan = await prisma.usagePlan.findFirst({
+      where: { id: usagePlanId, isActive: true }
+    });
+    if (!usagePlan) return res.status(404).json({ error: "Usage plan not found" });
+    if (usagePlan.monthlyAmountCents !== 0) {
+      return res
+        .status(400)
+        .json({ error: "activate-free is only allowed for free plans" });
+    }
+    if (bot.subscription?.usagePlan?.monthlyAmountCents) {
+      return res.status(400).json({
+        error: "Paid subscriptions cannot be downgraded to the free plan"
+      });
+    }
+
+    const featurePricing = await computeBotPricingForBot(
+      botToFeatureFlags({
+        useDomainCrawler: bot.useDomainCrawler,
+        usePdfCrawler: bot.usePdfCrawler,
+        channelWeb: bot.channelWeb,
+        channelWhatsapp: bot.channelWhatsapp,
+        channelMessenger: bot.channelMessenger,
+        channelInstagram: bot.channelInstagram,
+        useCalendar: bot.useCalendar,
+        leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+        leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+        leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+      })
+    );
+
+    const compactPlanSnapshot = {
+      f: featurePricing.featureCodes,
+      fp: 0,
+      p: usagePlan.code,
+      pt: usagePlan.monthlyAmountCents,
+      t: usagePlan.monthlyAmountCents,
+      c: usagePlan.currency
+    };
+
+    if (bot.subscription) {
+      await prisma.subscription.update({
+        where: { id: bot.subscription.id },
+        data: {
+          usagePlanId: usagePlan.id,
+          status: "ACTIVE",
+          currency: usagePlan.currency,
+          planSnapshotJson: compactPlanSnapshot
+        }
+      });
+    } else {
+      await prisma.subscription.create({
+        data: {
+          botId,
+          stripeCustomerId: `free_${bot.userId}`,
+          stripeSubscriptionId: `free_${bot.id}`,
+          stripePriceId: "",
+          status: "ACTIVE",
+          currency: usagePlan.currency,
+          planSnapshotJson: compactPlanSnapshot,
+          usagePlanId: usagePlan.id
+        }
+      });
+    }
+
+    await prisma.bot.update({
+      where: { id: botId },
+      data: { status: "ACTIVE" }
+    });
+
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("Error activating free plan:", err);
+    return res.status(500).json({ error: "Failed to activate free plan" });
+  }
+});
+
+/**
  * POST /api/bots/:id/checkout
  * - Protected + ownership checked
  * - Adds referralCode to Stripe metadata (cookie or body)
@@ -704,6 +808,20 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
       return res.json({ ok: true, unchanged: true });
     }
 
+    const targetPlan = await prisma.usagePlan.findFirst({
+      where: { id: usagePlanId, isActive: true }
+    });
+    if (!targetPlan) {
+      return res.status(404).json({ error: "Usage plan not found" });
+    }
+
+    const currentAmount = bot.subscription.usagePlan?.monthlyAmountCents ?? 0;
+    if (currentAmount > 0 && targetPlan.monthlyAmountCents === 0) {
+      return res.status(400).json({
+        error: "Paid subscriptions cannot be downgraded to the free plan"
+      });
+    }
+
     await updateBotSubscriptionForUsagePlanChange({
       botId: bot.id,
       newUsagePlanId: usagePlanId,
@@ -748,6 +866,12 @@ router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
       return res
         .status(400)
         .json({ error: "Bot has no active usage plan for top-ups" });
+    }
+
+    if (usagePlan.monthlyAmountCents <= 0) {
+      return res.status(400).json({
+        error: "Top-ups are not available for free plans"
+      });
     }
 
     const baseMonthlyTokens = usagePlan.monthlyTokens ?? null;
@@ -866,6 +990,12 @@ router.post("/bots/:id/topup-checkout", requireAuth, async (req, res) => {
       return res
         .status(400)
         .json({ error: "Bot has no active usage plan for top-ups" });
+    }
+
+    if (usagePlan.monthlyAmountCents <= 0) {
+      return res.status(400).json({
+        error: "Top-ups are not available for free plans"
+      });
     }
 
     const baseMonthlyTokens = usagePlan.monthlyTokens ?? null;

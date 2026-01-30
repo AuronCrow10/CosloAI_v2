@@ -30,6 +30,15 @@ import {
   updateBookingDraft
 } from "./bookingDraftService";
 import { detectBookingFieldUpdates } from "./bookingFieldCapture";
+import { z } from "zod";
+import {
+  toolSearchProducts,
+  toolGetProductDetails,
+  toolAddToCart,
+  toolGetCheckoutLink,
+  toolGetOrderStatus
+} from "../shopify/toolService";
+import { getShopForBotId } from "../shopify/shopService";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
@@ -229,6 +238,156 @@ function buildCancelBookingTool(): ChatTool {
   };
 }
 
+function buildShopifySearchTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "search_shopify_products",
+      description:
+        "Search the connected Shopify catalog by keywords and optional price filters.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query text" },
+          minPrice: { type: "number", description: "Minimum price filter" },
+          maxPrice: { type: "number", description: "Maximum price filter" },
+          limit: { type: "number", description: "Max number of results (1-100)" },
+          cursor: { type: "number", description: "Pagination cursor offset" }
+        }
+      }
+    }
+  };
+}
+
+function buildShopifyProductDetailsTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "get_shopify_product_details",
+      description:
+        "Get detailed Shopify product data including variants and availability.",
+      parameters: {
+        type: "object",
+        properties: {
+          productId: {
+            type: "string",
+            description: "Shopify product ID (gid://shopify/Product/...)"
+          }
+        },
+        required: ["productId"]
+      }
+    }
+  };
+}
+
+function buildShopifyAddToCartTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "shopify_add_to_cart",
+      description:
+        "Generate cart URLs for adding a product variant to the Shopify cart.",
+      parameters: {
+        type: "object",
+        properties: {
+          variantId: {
+            type: "string",
+            description: "Shopify variant ID (gid://shopify/ProductVariant/...)"
+          },
+          quantity: { type: "number", description: "Quantity to add" },
+          sessionId: {
+            type: "string",
+            description:
+              "Session identifier for the user (defaults to current conversation if omitted)."
+          }
+        },
+        required: ["variantId", "quantity"]
+      }
+    }
+  };
+}
+
+function buildShopifyCheckoutLinkTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "shopify_get_checkout_link",
+      description: "Get the Shopify cart URL for checkout.",
+      parameters: {
+        type: "object",
+        properties: {}
+      }
+    }
+  };
+}
+
+function buildShopifyOrderStatusTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "shopify_get_order_status",
+      description: "Lookup order status by customer email and order number.",
+      parameters: {
+        type: "object",
+        properties: {
+          email: { type: "string", description: "Customer email address" },
+          orderNumber: { type: "string", description: "Order number or name" }
+        },
+        required: ["email", "orderNumber"]
+      }
+    }
+  };
+}
+
+function getShopifyInstructions(): string {
+  return (
+    "Shopify tools are available to search products, fetch product details, add items to cart, and check order status. " +
+    "If a Shopify shop is connected, assume product questions refer to the store catalog and use Shopify tools proactively, even for short questions like 'Avete snowboard?' or 'Do you sell X?'. " +
+    "Prefer search before product details if you need to narrow options. " +
+    "When a tool returns URLs (addToCartUrl, productUrl, cartUrl), include them verbatim in your reply so the widget can render actions. " +
+    "When presenting Shopify tool results, keep the reply in the user's language and do not switch to English unless the user does. " +
+    "If the user wants to buy something (e.g. 'voglio il primo', 'lo compro', 'buy this'), call shopify_add_to_cart instead of asking for email. " +
+    "Email is only required for order status lookups. " +
+    "Never invent product URLs, shop domains, or checkout links; only use URLs returned by Shopify tools. " +
+    "Do not claim you added items to the cart; you must provide the add-to-cart link (the user must open it). " +
+    "Do not include any URLs in the reply text; use tool outputs for buttons/actions only. " +
+    "When listing multiple products, include one image per product (as markdown image) on its own line."
+  );
+}
+
+const SHOPIFY_TOOL_NAMES = new Set([
+  "search_shopify_products",
+  "get_shopify_product_details",
+  "shopify_add_to_cart",
+  "shopify_get_checkout_link",
+  "shopify_get_order_status"
+]);
+
+const shopifySearchSchema = z.object({
+  query: z.string().optional(),
+  minPrice: z.number().optional(),
+  maxPrice: z.number().optional(),
+  limit: z.number().optional(),
+  cursor: z.number().optional()
+});
+
+const shopifyProductDetailsSchema = z.object({
+  productId: z.string().min(1)
+});
+
+const shopifyAddToCartSchema = z.object({
+  variantId: z.string().min(1),
+  quantity: z.number().int().positive(),
+  sessionId: z.string().optional()
+});
+
+const shopifyCheckoutSchema = z.object({}).passthrough();
+
+const shopifyOrderStatusSchema = z.object({
+  email: z.string().email(),
+  orderNumber: z.string().min(1)
+});
+
 /**
  * Tool used to keep a per-conversation snapshot of booking details.
  */
@@ -366,6 +525,152 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
 type GenerateReplyOptions = {
   conversationId?: string;
 };
+
+function detectReplyLanguageHint(message: string): string | null {
+  const lower = message.trim().toLowerCase();
+  if (!lower) return null;
+
+  // Lightweight Italian signal to keep tool outputs in the user's language.
+  const italianSignals = [
+    "ciao",
+    "avete",
+    "avete?",
+    "grazie",
+    "buongiorno",
+    "per favore",
+    "vorrei",
+    "mi serve",
+    "quanto costa",
+    "avete snowboard"
+  ];
+
+  if (italianSignals.some((s) => lower.includes(s))) {
+    return "Rispondi in italiano.";
+  }
+
+  const spanishSignals = ["hola", "gracias", "por favor", "cuanto cuesta"];
+  if (spanishSignals.some((s) => lower.includes(s))) {
+    return "Responde en espanol.";
+  }
+
+  return null;
+}
+
+function detectSimpleLang(message: string): "it" | "es" | "en" {
+  const lower = message.trim().toLowerCase();
+  if (!lower) return "en";
+  const itSignals = [
+    "ciao",
+    "avete",
+    "grazie",
+    "vorrei",
+    "carrello",
+    "prezzo",
+    "quanto costa"
+  ];
+  if (itSignals.some((s) => lower.includes(s))) return "it";
+  const esSignals = ["hola", "gracias", "quiero", "carrito", "precio"];
+  if (esSignals.some((s) => lower.includes(s))) return "es";
+  return "en";
+}
+
+function buildShopifySummary(params: {
+  lang: "it" | "es" | "en";
+  items: Array<{ title?: string | null; priceMin?: any }>;
+}): string {
+  const { lang, items } = params;
+  const intro =
+    lang === "it"
+      ? "Ecco 3 opzioni:"
+      : lang === "es"
+        ? "Aqui tienes 3 opciones:"
+        : "Here are 3 options:";
+  const ask =
+    lang === "it"
+      ? "Quale ti interessa?"
+      : lang === "es"
+        ? "Cual te interesa?"
+        : "Which one interests you?";
+  const lines = items.slice(0, 3).map((item, idx) => {
+    const title = item.title || (lang === "it" ? "Prodotto" : lang === "es" ? "Producto" : "Product");
+    const price =
+      item.priceMin != null
+        ? typeof item.priceMin === "string"
+          ? item.priceMin
+          : item.priceMin.toString()
+        : "";
+    const priceLabel =
+      price && lang === "it"
+        ? `€${price}`
+        : price && lang === "es"
+          ? `€${price}`
+          : price
+            ? `$${price}`
+            : "";
+    const suffix = priceLabel ? ` — ${priceLabel}` : "";
+    return `${idx + 1}. ${title}${suffix}`;
+  });
+  return [intro, ...lines, ask].join("\n");
+}
+
+function shouldEnableBookingForTurn(message: string, shopifyEnabled: boolean): boolean {
+  if (!shopifyEnabled) return true;
+  const lower = message.trim().toLowerCase();
+  if (!lower) return true;
+
+  const bookingSignals = [
+    "prenot",
+    "appunt",
+    "appointment",
+    "book",
+    "booking",
+    "reserve",
+    "reservation",
+    "schedule",
+    "calendario",
+    "slot",
+    "disponibilit"
+  ];
+
+  const shopifySignals = [
+    "prodotto",
+    "product",
+    "prezzo",
+    "price",
+    "costo",
+    "cost",
+    "carrello",
+    "cart",
+    "checkout",
+    "acquista",
+    "buy",
+    "ordine",
+    "ordina",
+    "taglia",
+    "colore",
+    "variant",
+    "varianti",
+    "spedizione",
+    "shipping",
+    "sconto",
+    "discount",
+    "catalogo",
+    "catalog",
+    "avete"
+  ];
+
+  const hasBookingSignal = bookingSignals.some((s) => lower.includes(s));
+  if (hasBookingSignal) return true;
+
+  const hasShopifySignal = shopifySignals.some((s) => lower.includes(s));
+  const hasPriceSignal = /[\d,.]+\s?(€|\$|eur|usd)/i.test(lower);
+
+  if (hasShopifySignal || hasPriceSignal) {
+    return false;
+  }
+
+  return true;
+}
 
 /**
  * Decide whether we really need to hit the knowledge backend for this turn.
@@ -527,7 +832,8 @@ export async function generateBotReplyForSlug(
   if (!botConfig) {
     throw new ChatServiceError(`Bot not found for slug '${slug}'`, 404);
   }
-  if (!botConfig.knowledgeClientId) {
+  const knowledgeSource = botConfig.knowledgeSource ?? "RAG";
+  if (knowledgeSource === "RAG" && !botConfig.knowledgeClientId) {
     throw new ChatServiceError(
       "This bot has no knowledge base configured yet. Ask the owner to set up content & crawl the site.",
       400
@@ -584,12 +890,20 @@ export async function generateBotReplyForSlug(
       ? await getConversationMemorySummary(options.conversationId)
       : null;
 
-  const useKnowledge = shouldUseKnowledgeForTurn(message, historyMessages);
+  const useKnowledge =
+    knowledgeSource === "RAG" &&
+    shouldUseKnowledgeForTurn(message, historyMessages);
 
   // 1) Build the RAG or no-RAG system message
   let contextSystemMessage: ChatMessage;
 
   if (useKnowledge) {
+    if (!botConfig.knowledgeClientId) {
+      throw new Error(
+        "Knowledge client ID is required when knowledge source is RAG."
+      );
+    }
+
     const results = await searchKnowledge({
       clientId: botConfig.knowledgeClientId,
       domain: botConfig.domain,
@@ -671,9 +985,31 @@ export async function generateBotReplyForSlug(
 
   messages.push(contextSystemMessage);
 
+  const languageHint = detectReplyLanguageHint(message);
+  if (languageHint) {
+    messages.push({
+      role: "system",
+      content:
+        "Language lock for this turn: the assistant must follow the user's language.\n" +
+        languageHint
+    });
+  }
+
+  const shopifyShop =
+    botConfig.botId ? await getShopForBotId(botConfig.botId) : null;
+  const shopifyEnabled = knowledgeSource === "SHOPIFY" && !!shopifyShop;
+  if (knowledgeSource === "SHOPIFY" && !shopifyEnabled) {
+    throw new ChatServiceError(
+      "This bot is configured to use Shopify knowledge, but no Shopify store is connected yet.",
+      400
+    );
+  }
+  const bookingEnabledForTurn =
+    bookingEnabled && shouldEnableBookingForTurn(message, shopifyEnabled);
+
   // 3b) Inject booking draft snapshot, if any
   let bookingDraft: BookingDraft | null = null;
-  if (bookingEnabled && options.conversationId) {
+  if (bookingEnabledForTurn && options.conversationId) {
     bookingDraft = await loadBookingDraft(options.conversationId);
     if (botBookingCfg) {
       const captureDebug =
@@ -714,7 +1050,7 @@ export async function generateBotReplyForSlug(
   const tools: ChatTool[] = [];
   let bookingTool: ChatTool | null = null;
 
-  if (bookingEnabled && botBookingCfg) {
+  if (bookingEnabledForTurn && botBookingCfg) {
     bookingTool = buildBookingTool(botBookingCfg);
     tools.push(bookingTool);
     tools.push(buildUpdateBookingTool(botBookingCfg));
@@ -734,6 +1070,19 @@ export async function generateBotReplyForSlug(
     });
   }
 
+  if (shopifyEnabled) {
+    tools.push(buildShopifySearchTool());
+    tools.push(buildShopifyProductDetailsTool());
+    tools.push(buildShopifyAddToCartTool());
+    tools.push(buildShopifyCheckoutLinkTool());
+    tools.push(buildShopifyOrderStatusTool());
+
+    messages.push({
+      role: "system",
+      content: getShopifyInstructions()
+    });
+  }
+
   // 4) Attach recent history
   if (historyMessages.length > 0) {
     messages.push({
@@ -750,8 +1099,8 @@ export async function generateBotReplyForSlug(
     content: message
   });
 
-  // 6) If booking is disabled, simple path
-  if (!bookingEnabled || !bookingTool) {
+  // 6) If no tools, simple path
+  if (tools.length === 0) {
     const reply = await getChatCompletion({
       messages,
       maxTokens: 200,
@@ -768,7 +1117,7 @@ export async function generateBotReplyForSlug(
     return reply;
   }
 
-  // 7) Booking-enabled path: use tools
+  // 7) Tool-enabled path
   const firstResponse = await createChatCompletionWithUsage({
     model: "gpt-4.1-mini",
     messages,
@@ -777,7 +1126,7 @@ export async function generateBotReplyForSlug(
     toolChoice: "auto",
     usageContext: {
       ...usageBase,
-      operation: "chat_booking_first"
+      operation: bookingEnabledForTurn ? "chat_booking_first" : "chat_tools_first"
     }
   });
 
@@ -838,9 +1187,191 @@ export async function generateBotReplyForSlug(
   // If there was no booking tool call (only update_booking_draft, etc.),
   // we must NOT send an assistant message with tool_calls again without tool messages.
   if (!bookingCall) {
+    const shopifyCall = toolCalls.find((tc) =>
+      SHOPIFY_TOOL_NAMES.has(tc.function?.name || "")
+    );
+
+    if (shopifyCall) {
+      if (!botConfig.botId) {
+        throw new Error("Shopify tools unavailable for this bot.");
+      }
+
+      let toolResult: any = null;
+      try {
+        const rawArgs = shopifyCall.function?.arguments || "{}";
+        const parsed = JSON.parse(rawArgs);
+        const sessionId =
+          parsed.sessionId || options.conversationId || `web:${slug}`;
+
+        switch (shopifyCall.function?.name) {
+          case "search_shopify_products": {
+            const args = shopifySearchSchema.parse(parsed);
+            const cappedLimit = Math.min(args.limit ?? 3, 3);
+            toolResult = await toolSearchProducts({
+              botId: botConfig.botId,
+              query: args.query,
+              priceMin: args.minPrice,
+              priceMax: args.maxPrice,
+              limit: cappedLimit,
+              cursor: args.cursor
+            });
+            break;
+          }
+          case "get_shopify_product_details": {
+            const args = shopifyProductDetailsSchema.parse(parsed);
+            toolResult = await toolGetProductDetails({
+              botId: botConfig.botId,
+              productId: args.productId
+            });
+            break;
+          }
+          case "shopify_add_to_cart": {
+            const args = shopifyAddToCartSchema.parse(parsed);
+            toolResult = await toolAddToCart({
+              botId: botConfig.botId,
+              sessionId,
+              variantId: args.variantId,
+              quantity: args.quantity
+            });
+            break;
+          }
+          case "shopify_get_checkout_link": {
+            shopifyCheckoutSchema.parse(parsed);
+            toolResult = await toolGetCheckoutLink({
+              botId: botConfig.botId
+            });
+            break;
+          }
+          case "shopify_get_order_status": {
+            const args = shopifyOrderStatusSchema.parse(parsed);
+            toolResult = await toolGetOrderStatus({
+              botId: botConfig.botId,
+              email: args.email,
+              orderNumber: args.orderNumber
+            });
+            break;
+          }
+          default:
+            toolResult = { error: "Unsupported Shopify tool call" };
+        }
+      } catch (err: any) {
+        toolResult = {
+          error: err?.message || "Failed to process Shopify tool call"
+        };
+      }
+
+      const assistantForToolStep: ChatMessage = {
+        role: "assistant",
+        content: firstMessage.content || "",
+        tool_calls: [shopifyCall]
+      };
+
+      const toolMessages: ChatMessage[] = [
+        ...messages,
+        assistantForToolStep,
+        {
+          role: "tool",
+          tool_call_id: shopifyCall.id,
+          content: JSON.stringify(toolResult)
+        }
+      ];
+
+      const secondResponse = await createChatCompletionWithUsage({
+        model: "gpt-4.1-mini",
+        messages: toolMessages,
+        maxTokens: 300,
+        usageContext: {
+          ...usageBase,
+          operation: "chat_shopify_tool"
+        }
+      });
+
+      const secondChoice = secondResponse.choices[0];
+      let secondContent =
+        secondChoice.message.content ||
+        "Ho aggiornato le informazioni richieste.";
+
+      if (
+        shopifyCall.function?.name === "search_shopify_products" &&
+        toolResult &&
+        Array.isArray((toolResult as any).items)
+      ) {
+        const items = (toolResult as any).items as Array<{
+          title?: string | null;
+          imageUrl?: string | null;
+          productUrl?: string | null;
+          addToCartUrl?: string | null;
+          priceMin?: any;
+        }>;
+        const lang = detectSimpleLang(message);
+        const cleanedText = buildShopifySummary({ lang, items });
+
+        const targetItems = items.filter((item) => item.imageUrl).slice(0, 3);
+        const imageBlocks = targetItems
+          .map((item) => {
+            const lines: string[] = [];
+            if (item.productUrl) {
+              lines.push(`[View product](${item.productUrl})`);
+            }
+            if (item.addToCartUrl) {
+              lines.push(`[Add to cart](${item.addToCartUrl})`);
+            }
+            lines.push(`![${item.title || "Product"}](${item.imageUrl})`);
+            return lines.join("\n");
+          })
+          .join("\n\n");
+
+        if (imageBlocks) {
+          secondContent = cleanedText
+            ? `${cleanedText}\n\n${imageBlocks}`
+            : imageBlocks;
+        } else {
+          secondContent = cleanedText || secondContent;
+        }
+      }
+
+      if (
+        shopifyCall.function?.name === "shopify_add_to_cart" &&
+        toolResult &&
+        (toolResult as any).addToCartUrl
+      ) {
+        const addUrl = (toolResult as any).addToCartUrl as string;
+        const cartUrl = (toolResult as any).cartUrl as string | undefined;
+        const hasAdd = /\/cart\/add/i.test(secondContent);
+        const hasCart = /\/cart\b/i.test(secondContent);
+        if (!hasAdd || (!hasCart && cartUrl)) {
+          const lines = [
+            !hasAdd ? `[Add to cart](${addUrl})` : null,
+            !hasCart && cartUrl ? `[View cart](${cartUrl})` : null
+          ].filter(Boolean);
+          if (lines.length > 0) {
+            secondContent = `${secondContent}\n\n${lines.join("\n")}`;
+          }
+        }
+      }
+
+      if (
+        shopifyCall.function?.name === "shopify_get_checkout_link" &&
+        toolResult &&
+        (toolResult as any).cartUrl
+      ) {
+        const cartUrl = (toolResult as any).cartUrl as string;
+        const hasCart = /\/cart\b/i.test(secondContent);
+        if (!hasCart) {
+          secondContent = `${secondContent}\n\n[View cart](${cartUrl})`;
+        }
+      }
+
+      if (botConfig.botId) {
+        void maybeSendUsageAlertsForBot(botConfig.botId);
+      }
+
+      return secondContent;
+    }
+
     // 🔄 NEW: after processing update_booking_draft calls, see if the draft now has ALL required fields.
     if (
-      bookingEnabled &&
+      bookingEnabledForTurn &&
       botBookingCfg &&
       options.conversationId
     ) {
