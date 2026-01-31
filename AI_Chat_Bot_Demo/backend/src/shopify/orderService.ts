@@ -28,14 +28,12 @@ const ORDER_LOOKUP_QUERY = `
             }
           }
         }
-        fulfillments(first: 10) {
-          nodes {
-            status
-            trackingInfo {
-              company
-              number
-              url
-            }
+        fulfillments {
+          status
+          trackingInfo {
+            company
+            number
+            url
           }
         }
       }
@@ -158,7 +156,7 @@ export async function lookupOrderByEmailAndNumber(params: {
     totalAmount: order.totalPriceSet?.shopMoney?.amount || null,
     currencyCode: order.totalPriceSet?.shopMoney?.currencyCode || null,
     fulfillments:
-      order.fulfillments?.nodes?.map((f: any) => ({
+      order.fulfillments?.map((f: any) => ({
         status: f.status || null,
         trackingCompany: f.trackingInfo?.[0]?.company || null,
         trackingNumber: f.trackingInfo?.[0]?.number || null,
