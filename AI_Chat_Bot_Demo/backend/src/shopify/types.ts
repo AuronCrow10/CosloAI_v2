@@ -36,6 +36,7 @@ export type ShopifyCartLineInput = {
 export type ShopifyOrderLookupResult = {
   orderId: string;
   orderName: string;
+  email?: string | null;
   status: string;
   financialStatus: string | null;
   fulfillmentStatus: string | null;

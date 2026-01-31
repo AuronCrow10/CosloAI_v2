@@ -141,6 +141,7 @@ export async function lookupOrderByEmailAndNumber(params: {
   return {
     orderId: order.id,
     orderName: order.name,
+    email: order.email || null,
     status: order.displayFulfillmentStatus || "UNKNOWN",
     financialStatus: order.displayFinancialStatus || null,
     fulfillmentStatus: order.displayFulfillmentStatus || null,
