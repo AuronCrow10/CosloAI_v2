@@ -256,24 +256,36 @@ const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
   .filter(Boolean);
 
 app.use(
-  cors({
-    origin: (origin, cb) => {
-      // Non-browser clients / same-origin requests might not send Origin
-      if (!origin) return cb(null, true);
+  cors((req, cb) => {
+    const origin = req.header("Origin");
+    const isWidgetConfig = req.path === "/api/shopify/widget-config";
+    const isMyShopifyOrigin = origin
+      ? /^https:\/\/[a-z0-9-]+\.myshopify\.com$/i.test(origin)
+      : false;
 
-      if (allowedOrigins.length > 0) {
-        return cb(null, allowedOrigins.includes(origin));
-      }
+    // Non-browser clients / same-origin requests might not send Origin
+    if (!origin) {
+      return cb(null, { origin: true, credentials: true });
+    }
 
-      if (process.env.NODE_ENV !== "production") {
-        // reflect any origin in dev
-        return cb(null, true);
-      }
+    if (isWidgetConfig && isMyShopifyOrigin) {
+      return cb(null, { origin: true, credentials: true });
+    }
 
-      // prod: no CORS headers (same-origin expected)
-      return cb(null, false);
-    },
-    credentials: true
+    if (allowedOrigins.length > 0) {
+      return cb(null, {
+        origin: allowedOrigins.includes(origin),
+        credentials: true
+      });
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      // reflect any origin in dev
+      return cb(null, { origin: true, credentials: true });
+    }
+
+    // prod: no CORS headers (same-origin expected)
+    return cb(null, { origin: false, credentials: true });
   })
 );
 
