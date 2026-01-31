@@ -6,6 +6,7 @@ import {
 } from "./productService";
 import { buildCartUrls, buildCartUrl, toCartVariantId } from "./cartService";
 import { lookupOrderByEmailAndNumber } from "./orderService";
+import { ShopifyOrderLookupResult } from "./types";
 
 function buildBaseUrl(shopDomain: string) {
   return `https://${shopDomain}`;
@@ -150,8 +151,10 @@ export async function toolGetOrderStatus(params: {
 
   const fulfillmentStatus = (order.fulfillmentStatus || "").toUpperCase();
   const tracking = order.fulfillments
-    .filter((f) => f.trackingNumber || f.trackingUrl || f.trackingCompany)
-    .map((f) => ({
+    .filter((f: ShopifyOrderLookupResult["fulfillments"][number]) =>
+      f.trackingNumber || f.trackingUrl || f.trackingCompany
+    )
+    .map((f: ShopifyOrderLookupResult["fulfillments"][number]) => ({
       company: f.trackingCompany || null,
       number: f.trackingNumber || null,
       url: f.trackingUrl || null,
