@@ -8,15 +8,11 @@ const ORDER_LOOKUP_QUERY = `
       nodes {
         id
         name
-        email
         processedAt
         displayFinancialStatus
         displayFulfillmentStatus
         totalPriceSet {
           shopMoney { amount currencyCode }
-        }
-        customer {
-          email
         }
         lineItems(first: 50) {
           nodes {
@@ -105,11 +101,7 @@ export async function lookupOrderByEmailAndNumber(params: {
       }
 
       const orderEmail = String(order.email || "").trim().toLowerCase();
-      const customerEmail = String(order.customer?.email || "")
-        .trim()
-        .toLowerCase();
-      const matchesEmail =
-        orderEmail === expectedEmail || customerEmail === expectedEmail;
+      const matchesEmail = orderEmail === expectedEmail;
       if (matchesEmail) {
         console.log("[shopify][order-lookup] match", {
           query,
