@@ -27,7 +27,8 @@ import {
   isValidWidgetToken,
   buildEventId,
   isValidTrackingToken,
-  ShopifyEventType
+  ShopifyEventType,
+  createWidgetToken
 } from "../shopify/analyticsService";
 import {
   logShopifyDataEvent,
@@ -98,6 +99,10 @@ const publicInstallSchema = z.object({
 
 const publicStatusSchema = z.object({
   shop: z.string().min(1)
+});
+
+const widgetContextSchema = z.object({
+  slug: z.string().min(1)
 });
 
 async function requireShopOwnerAccess(req: Request, shopDomain: string) {
@@ -580,6 +585,44 @@ router.post("/shopify/webhooks/orders-create", async (req: Request, res: Respons
     console.error("Failed to track Shopify purchase", err);
   }
   return res.status(200).json({ ok: true });
+});
+
+// Public widget context lookup by bot slug (for non-Shopify widget/demo pages)
+router.get("/shopify/widget-context", async (req: Request, res: Response) => {
+  const parsed = widgetContextSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const bot = await prisma.bot.findFirst({
+    where: {
+      slug: parsed.data.slug,
+      status: "ACTIVE",
+      channelWeb: true
+    },
+    select: { id: true, knowledgeSource: true }
+  });
+
+  if (!bot || bot.knowledgeSource !== "SHOPIFY") {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  const shop = await prisma.shopifyShop.findFirst({
+    where: { botId: bot.id, isActive: true },
+    select: { shopDomain: true }
+  });
+
+  if (!shop?.shopDomain) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  const widgetToken = createWidgetToken(shop.shopDomain, bot.id);
+
+  return res.json({
+    shopDomain: shop.shopDomain,
+    botId: bot.id,
+    widgetToken
+  });
 });
 
 router.post(

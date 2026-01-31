@@ -27,6 +27,7 @@
 
     var slug = script.getAttribute("data-bot-slug");
     var iconUrl = script.getAttribute("data-bot-icon");
+    var defaultIconUrl = "https://i.ibb.co/cczVssVz/test.gif";
     var position = script.getAttribute("data-bot-position") || "bottom-left";
 
     // NEW: optional language parameter (default: "en")
@@ -138,6 +139,10 @@
     });
 
     console.warn(iconUrl);
+    if (!iconUrl) {
+      iconUrl = defaultIconUrl;
+    }
+
     if (iconUrl) {
       var img = document.createElement("img");
       img.src = iconUrl; // GIF
