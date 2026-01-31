@@ -122,9 +122,80 @@ export async function toolGetOrderStatus(params: {
 }) {
   const shop = await resolveShopForBot(params.botId);
   const shopDomain = shop.shopDomain;
-  return lookupOrderByEmailAndNumber({
+  const order = await lookupOrderByEmailAndNumber({
     shopDomain,
     email: params.email,
     orderNumber: params.orderNumber
   });
+
+  if (!order) {
+    return {
+      found: false,
+      message:
+        "No order found for that email and order number. Ask the user to double-check both."
+    };
+  }
+
+  const fulfillmentStatus = (order.fulfillmentStatus || "").toUpperCase();
+  const tracking = order.fulfillments
+    .filter((f) => f.trackingNumber || f.trackingUrl || f.trackingCompany)
+    .map((f) => ({
+      company: f.trackingCompany || null,
+      number: f.trackingNumber || null,
+      url: f.trackingUrl || null,
+      status: f.status || null
+    }));
+
+  const isPartial =
+    fulfillmentStatus === "PARTIALLY_FULFILLED" ||
+    fulfillmentStatus === "PARTIAL" ||
+    fulfillmentStatus.includes("PARTIAL");
+
+  const isUnshipped = [
+    "UNFULFILLED",
+    "PENDING",
+    "ON_HOLD",
+    "SCHEDULED",
+    "IN_PROGRESS"
+  ].includes(fulfillmentStatus);
+
+  let statusLabel = "processing";
+  if (fulfillmentStatus === "FULFILLED") {
+    statusLabel = tracking.length > 0 ? "in transit" : "fulfilled";
+  } else if (isPartial) {
+    statusLabel = "partially fulfilled";
+  } else if (fulfillmentStatus === "DELIVERED") {
+    statusLabel = "delivered";
+  } else if (isUnshipped) {
+    statusLabel = "not shipped yet";
+  } else if (fulfillmentStatus) {
+    statusLabel = fulfillmentStatus.toLowerCase().replace(/_/g, " ");
+  }
+
+  const summary = `Order ${order.orderName} is ${statusLabel}.`;
+  const partialNote = isPartial
+    ? "Some items have shipped separately. The rest are still pending."
+    : null;
+  const addressNote = isUnshipped
+    ? "If you need to change the delivery address, let us know as soon as possible."
+    : "If the address is wrong, please contact support immediately.";
+  const deliveryNote =
+    tracking.length > 0
+      ? "If tracking hasn’t updated in 48 hours, contact the carrier or support."
+      : null;
+
+  return {
+    found: true,
+    order,
+    summary,
+    statusLabel,
+    isPartial,
+    canChangeAddress: isUnshipped,
+    tracking,
+    guidance: {
+      partialNote,
+      addressNote,
+      deliveryNote
+    }
+  };
 }

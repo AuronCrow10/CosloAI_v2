@@ -347,10 +347,11 @@ function getShopifyInstructions(): string {
     "When a tool returns URLs (addToCartUrl, productUrl, cartUrl), include them verbatim in your reply so the widget can render actions. " +
     "When presenting Shopify tool results, keep the reply in the user's language and do not switch to English unless the user does. " +
     "If the user wants to buy something (e.g. 'voglio il primo', 'lo compro', 'buy this'), call shopify_add_to_cart instead of asking for email. " +
-    "Email is only required for order status lookups. " +
+    "Email is only required for order status lookups. If the user asks 'Where is my order?', ask for email and order number, then call shopify_get_order_status. " +
+    "For order status replies: use the tool's summary, include tracking company/number/URL if present, mention partial fulfillment if indicated, and add the delivery + address guidance. " +
     "Never invent product URLs, shop domains, or checkout links; only use URLs returned by Shopify tools. " +
     "Do not claim you added items to the cart; you must provide the add-to-cart link (the user must open it). " +
-    "Do not include any URLs in the reply text; use tool outputs for buttons/actions only. " +
+    "Do not include any URLs in the reply text; use tool outputs for buttons/actions only, except for order tracking URLs. " +
     "When listing multiple products, include one image per product (as markdown image) on its own line."
   );
 }
