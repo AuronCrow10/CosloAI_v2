@@ -102,11 +102,12 @@ export async function lookupOrderByEmailAndNumber(params: {
 
       const orderEmail = String(order.email || "").trim().toLowerCase();
       const matchesEmail = orderEmail === expectedEmail;
-      if (matchesEmail) {
+      if (matchesEmail || !orderEmail) {
         console.log("[shopify][order-lookup] match", {
           query,
           orderName: order.name,
-          orderId: order.id
+          orderId: order.id,
+          emailVerified: matchesEmail
         });
         break;
       }

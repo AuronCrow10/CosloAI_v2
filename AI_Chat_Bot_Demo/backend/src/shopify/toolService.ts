@@ -188,6 +188,10 @@ export async function toolGetOrderStatus(params: {
   }
 
   const summary = `Order ${order.orderName} is ${statusLabel}.`;
+  const emailNote =
+    !String(order.email || "").trim()
+      ? "Order email could not be verified in Shopify. If this isn’t your order, please contact support."
+      : null;
   const partialNote = isPartial
     ? "Some items have shipped separately. The rest are still pending."
     : null;
@@ -208,6 +212,7 @@ export async function toolGetOrderStatus(params: {
     canChangeAddress: isUnshipped,
     tracking,
     guidance: {
+      emailNote,
       partialNote,
       addressNote,
       deliveryNote
