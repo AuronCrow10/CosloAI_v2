@@ -122,11 +122,23 @@ export async function toolGetOrderStatus(params: {
 }) {
   const shop = await resolveShopForBot(params.botId);
   const shopDomain = shop.shopDomain;
-  const order = await lookupOrderByEmailAndNumber({
-    shopDomain,
-    email: params.email,
-    orderNumber: params.orderNumber
-  });
+  let order: ShopifyOrderLookupResult | null = null;
+  try {
+    order = await lookupOrderByEmailAndNumber({
+      shopDomain,
+      email: params.email,
+      orderNumber: params.orderNumber
+    });
+  } catch (err) {
+    console.error("[shopify][order-status] lookup failed", {
+      shopDomain,
+      botId: params.botId,
+      orderNumber: params.orderNumber,
+      email: params.email,
+      error: err
+    });
+    throw err;
+  }
 
   if (!order) {
     return {

@@ -82,10 +82,18 @@ export async function lookupOrderByEmailAndNumber(params: {
   let lastError: unknown = null;
   let order: any = null;
 
+  console.log("[shopify][order-lookup] start", {
+    shopDomain: params.shopDomain,
+    orderNumber: params.orderNumber,
+    email: params.email,
+    queryCount: queries.length
+  });
+
   const expectedEmail = params.email.trim().toLowerCase();
 
   for (const query of queries) {
     try {
+      console.log("[shopify][order-lookup] query", { query });
       const data = await shopifyAdminGraphql<{
         orders: {
           nodes: Array<any>;
@@ -94,6 +102,7 @@ export async function lookupOrderByEmailAndNumber(params: {
 
       order = data.orders.nodes[0];
       if (!order) {
+        console.log("[shopify][order-lookup] no match", { query });
         continue;
       }
 
@@ -104,17 +113,38 @@ export async function lookupOrderByEmailAndNumber(params: {
       const matchesEmail =
         orderEmail === expectedEmail || customerEmail === expectedEmail;
       if (matchesEmail) {
+        console.log("[shopify][order-lookup] match", {
+          query,
+          orderName: order.name,
+          orderId: order.id
+        });
         break;
       }
 
+      console.log("[shopify][order-lookup] email mismatch", {
+        query,
+        orderName: order.name,
+        orderId: order.id,
+        orderEmail,
+        customerEmail
+      });
       order = null;
     } catch (err) {
+      console.warn("[shopify][order-lookup] query failed", {
+        query,
+        error: err
+      });
       lastError = err;
     }
   }
 
   if (!order) {
     if (lastError) throw lastError;
+    console.log("[shopify][order-lookup] not found", {
+      shopDomain: params.shopDomain,
+      orderNumber: params.orderNumber,
+      email: params.email
+    });
     return null;
   }
 
