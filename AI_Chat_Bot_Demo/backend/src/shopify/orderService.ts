@@ -115,8 +115,7 @@ export async function lookupOrderByEmailAndNumber(params: {
         query,
         orderName: order.name,
         orderId: order.id,
-        orderEmail,
-        customerEmail
+        orderEmail
       });
       order = null;
     } catch (err) {
