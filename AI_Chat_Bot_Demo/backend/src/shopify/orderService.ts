@@ -8,11 +8,15 @@ const ORDER_LOOKUP_QUERY = `
       nodes {
         id
         name
+        email
         processedAt
         displayFinancialStatus
         displayFulfillmentStatus
         totalPriceSet {
           shopMoney { amount currencyCode }
+        }
+        customer {
+          email
         }
         lineItems(first: 50) {
           nodes {
@@ -53,6 +57,13 @@ function buildOrderQueries(email: string, orderNumber: string): string[] {
     queries.push(`email:${cleanEmail} name:${rawNumber}`);
     queries.push(`email:${cleanEmail} order_number:${rawNumber}`);
   }
+  if (hashNumber) {
+    queries.push(`name:${hashNumber}`);
+  }
+  if (rawNumber) {
+    queries.push(`name:${rawNumber}`);
+    queries.push(`order_number:${rawNumber}`);
+  }
 
   return Array.from(new Set(queries));
 }
@@ -71,6 +82,8 @@ export async function lookupOrderByEmailAndNumber(params: {
   let lastError: unknown = null;
   let order: any = null;
 
+  const expectedEmail = params.email.trim().toLowerCase();
+
   for (const query of queries) {
     try {
       const data = await shopifyAdminGraphql<{
@@ -80,7 +93,21 @@ export async function lookupOrderByEmailAndNumber(params: {
       }>(params.shopDomain, accessToken, ORDER_LOOKUP_QUERY, { query });
 
       order = data.orders.nodes[0];
-      if (order) break;
+      if (!order) {
+        continue;
+      }
+
+      const orderEmail = String(order.email || "").trim().toLowerCase();
+      const customerEmail = String(order.customer?.email || "")
+        .trim()
+        .toLowerCase();
+      const matchesEmail =
+        orderEmail === expectedEmail || customerEmail === expectedEmail;
+      if (matchesEmail) {
+        break;
+      }
+
+      order = null;
     } catch (err) {
       lastError = err;
     }
