@@ -51,20 +51,51 @@
           "Scrivimi, rispondo subito!",
         ];
 
-    if (!slug) {
-      console.warn("[Bot Widget] Missing data-bot-slug on script tag CAZZO");
-      return;
-    }
-
-    // prova a ricavare l'origin da src, così funziona su dev/prod
+    // prova a ricavare l'origin da src, cosÃ¬ funziona su dev/prod
     var baseUrl;
     try {
       baseUrl = new URL(script.src).origin;
     } catch (e) {
       baseUrl = "";
     }
+    if (!slug) {
+      var shopParam = null;
+      try {
+        shopParam = new URL(script.src).searchParams.get("shop");
+      } catch (e) {
+        shopParam = null;
+      }
 
-    console.log("[Bot Widget] init on", baseUrl, "slug=CAZZO", slug);
+      if (!shopParam) {
+        console.warn("[Bot Widget] Missing data-bot-slug on script tag.");
+        return;
+      }
+
+      fetch(
+        baseUrl +
+          "/api/shopify/widget-config?shop=" +
+          encodeURIComponent(shopParam)
+      )
+        .then(function (res) {
+          if (!res.ok) throw new Error("Widget config fetch failed");
+          return res.json();
+        })
+        .then(function (payload) {
+          startWidget(payload.botSlug, {
+            shop: shopParam,
+            botId: payload.botId,
+            widgetToken: payload.widgetToken || null
+          });
+        })
+        .catch(function (err) {
+          console.warn("[Bot Widget] Failed to resolve shop config.", err);
+        });
+      return;
+    }
+
+    function startWidget(resolvedSlug, shopMeta) {
+      slug = resolvedSlug;
+      console.log("[Bot Widget] init on", baseUrl, "slug", slug);
 
     var launcher = document.createElement("button");
     launcher.type = "button";
@@ -192,6 +223,18 @@
       var sep = widgetUrl.indexOf("?") === -1 ? "?" : "&";
       widgetUrl += sep + "lang=" + encodeURIComponent(lang);
     }
+    if (shopMeta && shopMeta.shop) {
+      var sepShop = widgetUrl.indexOf("?") === -1 ? "?" : "&";
+      widgetUrl += sepShop + "shop=" + encodeURIComponent(shopMeta.shop);
+    }
+    if (shopMeta && shopMeta.botId) {
+      var sepBot = widgetUrl.indexOf("?") === -1 ? "?" : "&";
+      widgetUrl += sepBot + "botId=" + encodeURIComponent(shopMeta.botId);
+    }
+    if (shopMeta && shopMeta.widgetToken) {
+      var sepToken = widgetUrl.indexOf("?") === -1 ? "?" : "&";
+      widgetUrl += sepToken + "wt=" + encodeURIComponent(shopMeta.widgetToken);
+    }
     iframe.src = widgetUrl;
 
     iframe.style.border = "none";
@@ -277,6 +320,9 @@
     }
 
     startHints();
+    }
+
+    startWidget(slug);
   }
 
   if (

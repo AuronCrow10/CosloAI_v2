@@ -16,6 +16,8 @@ import {
   buildRateLimitMessage
 } from "../services/rateLimitService";
 import { handleMetaLeadgen } from "../services/metaLeadService";
+import { getShopForBotId } from "../shopify/shopService";
+import { createTrackingToken } from "../shopify/analyticsService";
 
 import { ConversationMode } from "@prisma/client";
 
@@ -167,6 +169,13 @@ type MetaButton = {
   url: string;
 };
 
+type TrackingContext = {
+  shopDomain: string;
+  botId: string;
+  conversationId?: string | null;
+  baseUrl: string;
+};
+
 type UiLang = "it" | "es" | "en";
 
 function detectUiLanguage(text: string): UiLang {
@@ -273,7 +282,40 @@ function extractActionUrls(reply: string): {
   return { productUrl, addToCartUrl };
 }
 
-function buildActionButtons(reply: string, lang: UiLang): {
+function buildTrackedUrl(
+  ctx: TrackingContext | null,
+  eventType: "view_product" | "add_to_cart",
+  targetUrl: string | null
+): string | null {
+  if (!ctx || !targetUrl) return targetUrl;
+  try {
+    const url = new URL("/api/shopify/track", ctx.baseUrl);
+    url.searchParams.set("shop", ctx.shopDomain);
+    url.searchParams.set("botId", ctx.botId);
+    url.searchParams.set("event", eventType);
+    url.searchParams.set("target", targetUrl);
+    if (ctx.conversationId) {
+      url.searchParams.set("conversationId", ctx.conversationId);
+    }
+    const token = createTrackingToken({
+      shopDomain: ctx.shopDomain,
+      botId: ctx.botId,
+      eventType,
+      targetUrl,
+      conversationId: ctx.conversationId ?? null
+    });
+    url.searchParams.set("token", token);
+    return url.toString();
+  } catch {
+    return targetUrl;
+  }
+}
+
+function buildActionButtons(
+  reply: string,
+  lang: UiLang,
+  tracking: TrackingContext | null
+): {
   buttons: MetaButton[];
   templateText: string;
   productUrl: string | null;
@@ -289,14 +331,16 @@ function buildActionButtons(reply: string, lang: UiLang): {
     buttons.push({
       type: "web_url",
       title: buttonLabel("view", lang),
-      url: productUrl
+      url: buildTrackedUrl(tracking, "view_product", productUrl) || productUrl
     });
   }
   if (addToCartUrl) {
     buttons.push({
       type: "web_url",
       title: buttonLabel("add", lang),
-      url: addToCartUrl
+      url:
+        buildTrackedUrl(tracking, "add_to_cart", addToCartUrl) ||
+        addToCartUrl
     });
   }
 
@@ -341,7 +385,8 @@ export async function sendGraphText(
   channelId: string,
   graphTargetId: string, // pageId or igBusinessId (or pageId for IG via FB Login)
   userId: string,
-  reply: string
+  reply: string,
+  options?: { botId?: string; conversationId?: string | null }
 ): Promise<SendReplyResult> {
   const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
   if (!channel) {
@@ -374,6 +419,20 @@ export async function sendGraphText(
   }
 
   const url = `${config.metaGraphApiBaseUrl}/${graphTargetId}/messages`;
+  const trackingBase = config.shopifyAppUrl || process.env.FRONTEND_ORIGIN || "";
+  const trackingContext =
+    options?.botId && trackingBase
+      ? await getShopForBotId(options.botId).then((shop) =>
+          shop?.shopDomain
+            ? {
+                shopDomain: shop.shopDomain,
+                botId: options.botId!,
+                conversationId: options.conversationId ?? null,
+                baseUrl: trackingBase
+              }
+            : null
+        )
+      : null;
   const imageSegments = parseImageSegments(reply);
   const replySansImagesRaw = stripImageMarkdown(reply);
   const lang = detectUiLanguage(
@@ -384,7 +443,7 @@ export async function sendGraphText(
     templateText,
     productUrl: globalProductUrl,
     addToCartUrl: globalAddToCartUrl
-  } = buildActionButtons(replySansImagesRaw, lang);
+  } = buildActionButtons(replySansImagesRaw, lang, trackingContext);
   const replyText =
     stripUrls(stripMarkdownLinks(stripActionLines(replySansImagesRaw))) ||
     replySansImagesRaw ||
@@ -439,14 +498,18 @@ export async function sendGraphText(
                     elementButtons.push({
                       type: "web_url",
                       title: buttonLabel("view", lang),
-                      url: productUrl
+                      url:
+                        buildTrackedUrl(trackingContext, "view_product", productUrl) ||
+                        productUrl
                     });
                   }
                   if (addToCartUrl) {
                     elementButtons.push({
                       type: "web_url",
                       title: buttonLabel("add", lang),
-                      url: addToCartUrl
+                      url:
+                        buildTrackedUrl(trackingContext, "add_to_cart", addToCartUrl) ||
+                        addToCartUrl
                     });
                   }
 
@@ -842,7 +905,8 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     channel.id,
     pageId,
     userId,
-    HUMAN_HANDOFF_MESSAGE
+    HUMAN_HANDOFF_MESSAGE,
+    { botId: bot.id, conversationId: convo.id }
   );
 
   logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
@@ -975,7 +1039,8 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
               channel.id,
               pageId,
               userId,
-              rateMessage
+              rateMessage,
+              { botId: bot.id, conversationId: convo.id }
             );
 
             logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
@@ -1043,7 +1108,8 @@ try {
             channel.id,
             pageId,
             userId,
-            reply
+            reply,
+            { botId: bot.id, conversationId: convo.id }
           );
 
           logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
@@ -1233,7 +1299,8 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     channel.id,
     graphTargetId,
     userId,
-    HUMAN_HANDOFF_MESSAGE
+    HUMAN_HANDOFF_MESSAGE,
+    { botId: bot.id, conversationId: convo.id }
   );
 
   logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
@@ -1367,7 +1434,8 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
               channel.id,
               graphTargetId,
               userId,
-              rateMessage
+              rateMessage,
+              { botId: bot.id, conversationId: convo.id }
             );
 
             logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {
@@ -1435,7 +1503,8 @@ try {
             channel.id,
             graphTargetId,
             userId,
-            reply
+            reply,
+            { botId: bot.id, conversationId: convo.id }
           );
 
           logLine(send.ok ? "INFO" : "ERROR", "META", "reply sent", {

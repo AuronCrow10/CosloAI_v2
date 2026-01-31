@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
@@ -21,6 +22,13 @@ import { lookupOrderByEmailAndNumber } from "../shopify/orderService";
 import { resolveWidgetConfig } from "../shopify/widgetService";
 import { verifyWebhookHmac } from "../shopify/crypto";
 import { registerShopifyWebhooks } from "../shopify/webhookService";
+import {
+  insertShopifyEvent,
+  isValidWidgetToken,
+  buildEventId,
+  isValidTrackingToken,
+  ShopifyEventType
+} from "../shopify/analyticsService";
 import {
   logShopifyDataEvent,
   findCustomerDataSummary,
@@ -60,6 +68,27 @@ const shopListSchema = z.object({
 
 const shopLookupSchema = z.object({
   shop: z.string().min(1)
+});
+
+const shopifyEventSchema = z.object({
+  shopDomain: z.string().min(1),
+  botId: z.string().min(1),
+  token: z.string().min(1),
+  eventType: z.enum(["view_product", "add_to_cart"]),
+  sessionId: z.string().optional(),
+  conversationId: z.string().optional(),
+  productId: z.string().optional(),
+  variantId: z.string().optional(),
+  meta: z.any().optional()
+});
+
+const shopifyTrackSchema = z.object({
+  shop: z.string().min(1),
+  botId: z.string().min(1),
+  event: z.enum(["view_product", "add_to_cart"]),
+  target: z.string().min(1),
+  token: z.string().min(1),
+  conversationId: z.string().optional()
 });
 
 const publicInstallSchema = z.object({
@@ -112,6 +141,137 @@ router.get("/shopify/install", requireAuth, async (req: Request, res: Response) 
   });
 
   return res.redirect(installUrl);
+});
+
+function parseProductHandle(url: URL): string | null {
+  const match = url.pathname.match(/\/products\/([^/?#]+)/i);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function parseVariantId(url: URL): string | null {
+  const raw = url.searchParams.get("id") || url.searchParams.get("variant");
+  return raw ? raw.trim() : null;
+}
+
+function appendCartProperties(url: URL, props: Record<string, string>) {
+  Object.entries(props).forEach(([key, value]) => {
+    if (!value) return;
+    const param = `properties[${key}]`;
+    if (!url.searchParams.has(param)) {
+      url.searchParams.set(param, value);
+    }
+  });
+}
+
+router.get("/shopify/track", async (req: Request, res: Response) => {
+  const parsed = shopifyTrackSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  let shopDomain: string;
+  try {
+    shopDomain = normalizeShopDomain(parsed.data.shop);
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || "Invalid shop domain" });
+  }
+
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(parsed.data.target);
+  } catch {
+    return res.status(400).json({ error: "Invalid target URL" });
+  }
+
+  if (!["http:", "https:"].includes(targetUrl.protocol)) {
+    return res.status(400).json({ error: "Invalid target URL" });
+  }
+
+  const host = targetUrl.hostname.toLowerCase();
+  const normalizedShop = shopDomain.toLowerCase();
+  if (host !== normalizedShop && !host.endsWith(`.${normalizedShop}`)) {
+    return res.status(400).json({ error: "Target host not allowed" });
+  }
+
+  const { botId, token, event, conversationId } = parsed.data;
+  const eventType = event as ShopifyEventType;
+
+  if (
+    !isValidTrackingToken({
+      shopDomain,
+      botId,
+      eventType,
+      targetUrl: parsed.data.target,
+      conversationId: conversationId ?? null,
+      token
+    })
+  ) {
+    return res.status(401).json({ error: "Invalid tracking token" });
+  }
+
+  if (eventType === "add_to_cart") {
+    appendCartProperties(targetUrl, {
+      coslo_bot_id: botId,
+      coslo_conversation_id: conversationId ?? ""
+    });
+  }
+
+  const eventId = crypto.randomUUID();
+  const productHandle = parseProductHandle(targetUrl);
+  const variantId = parseVariantId(targetUrl);
+
+  await insertShopifyEvent({
+    id: eventId,
+    shopDomain,
+    botId,
+    eventType,
+    conversationId: conversationId ?? null,
+    productId: productHandle ?? null,
+    variantId: variantId ?? null,
+    source: "meta",
+    meta: {
+      targetUrl: targetUrl.toString()
+    }
+  });
+
+  return res.redirect(targetUrl.toString());
+});
+
+router.post("/shopify/events", async (req: Request, res: Response) => {
+  const parsed = shopifyEventSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  let shopDomain: string;
+  try {
+    shopDomain = normalizeShopDomain(parsed.data.shopDomain);
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || "Invalid shop domain" });
+  }
+
+  const { botId, token, eventType, sessionId, conversationId, productId, variantId, meta } =
+    parsed.data;
+
+  if (!isValidWidgetToken(shopDomain, botId, token)) {
+    return res.status(401).json({ error: "Invalid widget token" });
+  }
+
+  const eventId = crypto.randomUUID();
+  await insertShopifyEvent({
+    id: eventId,
+    shopDomain,
+    botId,
+    eventType,
+    sessionId: sessionId ?? null,
+    conversationId: conversationId ?? null,
+    productId: productId ?? null,
+    variantId: variantId ?? null,
+    source: "widget",
+    meta: meta ?? null
+  });
+
+  return res.json({ ok: true });
 });
 
 router.get("/shopify/install/public", async (req: Request, res: Response) => {
@@ -338,6 +498,86 @@ router.post("/shopify/webhooks/orders-create", async (req: Request, res: Respons
       orderId: payload.id,
       orderNumber: payload.name
     });
+  }
+
+  try {
+    const shopDomain = req.get("X-Shopify-Shop-Domain") || payload?.shop_domain || "";
+    const normalizedShop = shopDomain ? normalizeShopDomain(shopDomain) : "";
+    if (!normalizedShop) {
+      return res.status(200).json({ ok: true });
+    }
+
+    const shopRecord = await prisma.shopifyShop.findUnique({
+      where: { shopDomain: normalizedShop },
+      select: { botId: true }
+    });
+
+    const orderId = payload?.id ? String(payload.id) : null;
+    const orderName = payload?.name ? String(payload.name) : null;
+    const orderNumber =
+      payload?.order_number != null ? String(payload.order_number) : null;
+    const currency = payload?.currency ? String(payload.currency) : null;
+    const totalPrice = payload?.total_price ? Number(payload.total_price) : null;
+    const revenueCents =
+      totalPrice != null && Number.isFinite(totalPrice)
+        ? Math.round(totalPrice * 100)
+        : null;
+
+    const readAttribute = (attrs: any[], key: string): string | null => {
+      if (!Array.isArray(attrs)) return null;
+      const found = attrs.find(
+        (a) =>
+          a &&
+          (String(a.name || a.key || "").toLowerCase() === key.toLowerCase())
+      );
+      if (!found) return null;
+      return String(found.value ?? "");
+    };
+
+    const noteAttrs = payload?.note_attributes || [];
+    let sessionId = readAttribute(noteAttrs, "coslo_session_id");
+    let conversationId = readAttribute(noteAttrs, "coslo_conversation_id");
+    let botIdFromOrder = readAttribute(noteAttrs, "coslo_bot_id");
+
+    if (!sessionId || !conversationId || !botIdFromOrder) {
+      const lineItems = Array.isArray(payload?.line_items)
+        ? payload.line_items
+        : [];
+      for (const item of lineItems) {
+        const props = item?.properties || [];
+        sessionId = sessionId || readAttribute(props, "coslo_session_id");
+        conversationId =
+          conversationId || readAttribute(props, "coslo_conversation_id");
+        botIdFromOrder = botIdFromOrder || readAttribute(props, "coslo_bot_id");
+        if (sessionId || conversationId || botIdFromOrder) break;
+      }
+    }
+
+    const botId = botIdFromOrder || shopRecord?.botId || null;
+    if (orderId && botId) {
+      const eventId = buildEventId("purchase", [normalizedShop, orderId]);
+      await insertShopifyEvent({
+        id: eventId,
+        shopDomain: normalizedShop,
+        botId,
+        eventType: "purchase",
+        sessionId: sessionId || null,
+        conversationId: conversationId || null,
+        orderId,
+        orderName,
+        orderNumber,
+        revenueCents,
+        currency,
+        source: "shopify_webhook",
+        meta: {
+          lineItemCount: Array.isArray(payload?.line_items)
+            ? payload.line_items.length
+            : 0
+        }
+      });
+    }
+  } catch (err) {
+    console.error("Failed to track Shopify purchase", err);
   }
   return res.status(200).json({ ok: true });
 });

@@ -1397,4 +1397,190 @@ router.get(
   }
 );
 
+/**
+ * GET /api/dashboard/shopify-analytics?days=30
+ * Returns Shopify widget commerce events (views, add-to-cart, purchases)
+ */
+router.get(
+  "/dashboard/shopify-analytics",
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = req.user!.id;
+    const days = parseRangeDays(req, 30);
+
+    const today = startOfDay(new Date());
+    const rangeStart = subDays(today, days - 1);
+    const rangeEnd = addDays(today, 1);
+
+    const bots = await prisma.bot.findMany({
+      where: { userId },
+      select: { id: true, name: true, knowledgeSource: true }
+    });
+    const botIds = bots.map((b) => b.id);
+
+    if (botIds.length === 0) {
+      res.json({
+        rangeDays: days,
+        totals: {
+          viewProduct: 0,
+          addToCart: 0,
+          purchases: 0,
+          revenueCents: 0,
+          revenueFormatted: "â‚¬0.00"
+        },
+        series: { dates: [], viewProduct: [], addToCart: [], purchases: [] },
+        perBot: []
+      });
+      return;
+    }
+
+    const shopifyBotIds = bots
+      .filter((b) => b.knowledgeSource === "SHOPIFY")
+      .map((b) => b.id);
+
+    if (shopifyBotIds.length === 0) {
+      res.json({
+        rangeDays: days,
+        totals: {
+          viewProduct: 0,
+          addToCart: 0,
+          purchases: 0,
+          revenueCents: 0,
+          revenueFormatted: "Ã¢â€šÂ¬0.00"
+        },
+        series: { dates: [], viewProduct: [], addToCart: [], purchases: [] },
+        perBot: []
+      });
+      return;
+    }
+
+    const totalsRows = (await prisma.$queryRaw`
+      SELECT event_type, COUNT(*)::int AS count, COALESCE(SUM(revenue_cents), 0)::int AS revenue_cents
+      FROM shopify_analytics_event
+      WHERE bot_id = ANY(${shopifyBotIds})
+        AND created_at >= ${rangeStart}
+        AND created_at < ${rangeEnd}
+      GROUP BY event_type
+    `) as Array<{ event_type: string; count: number; revenue_cents: number }>;
+
+    const totalsMap = new Map<string, { count: number; revenue: number }>();
+    totalsRows.forEach((row) => {
+      totalsMap.set(row.event_type, {
+        count: row.count,
+        revenue: row.revenue_cents
+      });
+    });
+
+    const viewProduct = totalsMap.get("view_product")?.count || 0;
+    const addToCart = totalsMap.get("add_to_cart")?.count || 0;
+    const purchases = totalsMap.get("purchase")?.count || 0;
+    const revenueCents = totalsMap.get("purchase")?.revenue || 0;
+
+    const revenueFormatted = new Intl.NumberFormat("en-GB", {
+      style: "currency",
+      currency: "EUR",
+      minimumFractionDigits: 2
+    }).format(revenueCents / 100);
+
+    const dayRows = (await prisma.$queryRaw`
+      SELECT DATE_TRUNC('day', created_at) AS day, event_type, COUNT(*)::int AS count
+      FROM shopify_analytics_event
+      WHERE bot_id = ANY(${shopifyBotIds})
+        AND created_at >= ${rangeStart}
+        AND created_at < ${rangeEnd}
+      GROUP BY day, event_type
+      ORDER BY day ASC
+    `) as Array<{ day: Date; event_type: string; count: number }>;
+
+    const toDayString = (d: Date): string => d.toISOString().slice(0, 10);
+    const dates: string[] = [];
+    const viewSeries: number[] = [];
+    const addSeries: number[] = [];
+    const purchaseSeries: number[] = [];
+
+    const dayMap = new Map<string, { view: number; add: number; purchase: number }>();
+    dayRows.forEach((row) => {
+      const key = toDayString(row.day);
+      const entry = dayMap.get(key) || { view: 0, add: 0, purchase: 0 };
+      if (row.event_type === "view_product") entry.view += row.count;
+      if (row.event_type === "add_to_cart") entry.add += row.count;
+      if (row.event_type === "purchase") entry.purchase += row.count;
+      dayMap.set(key, entry);
+    });
+
+    for (let i = days - 1; i >= 0; i--) {
+      const d = startOfDay(subDays(today, i));
+      const key = toDayString(d);
+      const entry = dayMap.get(key) || { view: 0, add: 0, purchase: 0 };
+      dates.push(key);
+      viewSeries.push(entry.view);
+      addSeries.push(entry.add);
+      purchaseSeries.push(entry.purchase);
+    }
+
+    const perBotRows = (await prisma.$queryRaw`
+      SELECT bot_id, event_type, COUNT(*)::int AS count, COALESCE(SUM(revenue_cents), 0)::int AS revenue_cents
+      FROM shopify_analytics_event
+      WHERE bot_id = ANY(${shopifyBotIds})
+        AND created_at >= ${rangeStart}
+        AND created_at < ${rangeEnd}
+      GROUP BY bot_id, event_type
+    `) as Array<{ bot_id: string; event_type: string; count: number; revenue_cents: number }>;
+
+    const perBotMap = new Map<
+      string,
+      { viewProduct: number; addToCart: number; purchases: number; revenueCents: number }
+    >();
+    perBotRows.forEach((row) => {
+      const entry =
+        perBotMap.get(row.bot_id) || {
+          viewProduct: 0,
+          addToCart: 0,
+          purchases: 0,
+          revenueCents: 0
+        };
+      if (row.event_type === "view_product") entry.viewProduct += row.count;
+      if (row.event_type === "add_to_cart") entry.addToCart += row.count;
+      if (row.event_type === "purchase") {
+        entry.purchases += row.count;
+        entry.revenueCents += row.revenue_cents;
+      }
+      perBotMap.set(row.bot_id, entry);
+    });
+
+    const perBot = bots
+      .filter((b) => shopifyBotIds.includes(b.id))
+      .map((b) => {
+      const entry = perBotMap.get(b.id) || {
+        viewProduct: 0,
+        addToCart: 0,
+        purchases: 0,
+        revenueCents: 0
+      };
+      return {
+        botId: b.id,
+        botName: b.name,
+        ...entry
+      };
+    });
+
+    res.json({
+      rangeDays: days,
+      totals: {
+        viewProduct,
+        addToCart,
+        purchases,
+        revenueCents,
+        revenueFormatted
+      },
+      series: {
+        dates,
+        viewProduct: viewSeries,
+        addToCart: addSeries,
+        purchases: purchaseSeries
+      },
+      perBot
+    });
+  }
+);
+
 export default router;

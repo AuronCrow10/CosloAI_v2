@@ -502,7 +502,8 @@ router.post(
           channel.id,
           graphTargetId,
           conversation.externalUserId,
-          trimmed
+          trimmed,
+          { botId: conversation.botId, conversationId: conversation.id }
         );
 
         if (!result.ok) {
@@ -640,7 +641,8 @@ router.post(
           channel.id,
           graphTargetId,
           conversation.externalUserId,
-          trimmed
+          trimmed,
+          { botId: conversation.botId, conversationId: conversation.id }
         );
 
         if (!result.ok) {
