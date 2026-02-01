@@ -61,6 +61,11 @@ export async function syncShopifyPolicies(shopDomain: string) {
     });
   }
 
+  console.log("[shopify] policy sync ok", {
+    shopDomain,
+    policyCount: policies.length
+  });
+
   return { policyCount: policies.length };
 }
 
