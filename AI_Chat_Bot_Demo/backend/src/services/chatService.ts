@@ -39,7 +39,7 @@ import {
   toolGetOrderStatus
 } from "../shopify/toolService";
 import { getShopForBotId } from "../shopify/shopService";
-import { getRefundPolicyForBot } from "../shopify/policyService";
+import { getPoliciesForBot } from "../shopify/policyService";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
@@ -1083,20 +1083,29 @@ export async function generateBotReplyForSlug(
     tools.push(buildShopifyCheckoutLinkTool());
     tools.push(buildShopifyOrderStatusTool());
 
-    const refundPolicy = botConfig.botId
-      ? await getRefundPolicyForBot(botConfig.botId)
+    const policies = botConfig.botId
+      ? await getPoliciesForBot(botConfig.botId)
       : null;
-    if (refundPolicy?.body || refundPolicy?.title) {
-      const title = refundPolicy.title ? refundPolicy.title.trim() : "Refund policy";
-      const body = refundPolicy.body ? stripHtml(refundPolicy.body) : "";
-      const policyText = body
-        ? `${title}: ${body}`
-        : title;
+    if (policies && policies.length > 0) {
+      const policyLines = policies.map((policy) => {
+        const typeLabel = policy.type
+          ? policy.type.replace(/_/g, " ").toLowerCase()
+          : "policy";
+        const title = policy.title ? policy.title.trim() : typeLabel;
+        const body = policy.body ? stripHtml(policy.body) : "";
+        const url = policy.url ? policy.url.trim() : "";
+        const parts = [];
+        if (title) parts.push(title);
+        if (body) parts.push(body);
+        if (url) parts.push(`URL: ${url}`);
+        return parts.join(" — ");
+      });
+
       messages.push({
         role: "system",
         content:
-          "Shopify policy (shop-specific). Use only when the user asks about refunds/returns:\n" +
-          policyText
+          "Shopify policies (shop-specific). Use when the user asks about refunds/returns/shipping/privacy or store policies:\n" +
+          policyLines.join("\n")
       });
     }
 

@@ -69,15 +69,23 @@ export async function syncShopifyPolicies(shopDomain: string) {
   return { policyCount: policies.length };
 }
 
-export async function getRefundPolicyForBot(botId: string) {
+export async function getPoliciesForBot(botId: string) {
   const shop = await getShopForBotId(botId);
   if (!shop) return null;
 
-  const policy = await prisma.shopifyPolicy.findFirst({
-    where: { shopId: shop.id, type: "REFUND" },
-    select: { title: true, body: true, url: true, shopifyUpdatedAt: true }
+  const policies = await prisma.shopifyPolicy.findMany({
+    where: { shopId: shop.id },
+    select: {
+      type: true,
+      title: true,
+      body: true,
+      url: true,
+      shopifyUpdatedAt: true
+    },
+    orderBy: { type: "asc" }
   });
 
-  if (!policy?.body && !policy?.title) return null;
-  return policy;
+  const cleaned = policies.filter((p) => p.body || p.title || p.url);
+  if (cleaned.length === 0) return null;
+  return cleaned;
 }
