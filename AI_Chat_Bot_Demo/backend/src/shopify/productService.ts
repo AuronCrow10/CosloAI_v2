@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma/prisma";
 import { shopifyAdminGraphql } from "./client";
 import { decryptAccessToken, getShopByDomain } from "./shopService";
+import { syncShopifyPolicies } from "./policyService";
 import { ShopifyProductSummary } from "./types";
 
 type ShopifyVariantNode = {
@@ -276,6 +277,15 @@ export async function syncShopifyProducts(shopDomain: string) {
       shopCurrency: shopCurrency ?? shop.shopCurrency
     }
   });
+
+  try {
+    await syncShopifyPolicies(shopDomain);
+  } catch (err) {
+    console.warn("[shopify] policy sync failed", {
+      shopDomain,
+      error: (err as Error)?.message || err
+    });
+  }
 
   return { syncedCount, shopCurrency };
 }

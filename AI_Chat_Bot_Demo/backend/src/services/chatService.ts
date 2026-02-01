@@ -39,6 +39,7 @@ import {
   toolGetOrderStatus
 } from "../shopify/toolService";
 import { getShopForBotId } from "../shopify/shopService";
+import { getRefundPolicyForBot } from "../shopify/policyService";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
@@ -354,6 +355,10 @@ function getShopifyInstructions(): string {
     "Do not include any URLs in the reply text; use tool outputs for buttons/actions only, except for order tracking URLs. " +
     "When listing multiple products, include one image per product (as markdown image) on its own line."
   );
+}
+
+function stripHtml(input: string): string {
+  return input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 const SHOPIFY_TOOL_NAMES = new Set([
@@ -1077,6 +1082,23 @@ export async function generateBotReplyForSlug(
     tools.push(buildShopifyAddToCartTool());
     tools.push(buildShopifyCheckoutLinkTool());
     tools.push(buildShopifyOrderStatusTool());
+
+    const refundPolicy = botConfig.botId
+      ? await getRefundPolicyForBot(botConfig.botId)
+      : null;
+    if (refundPolicy?.body || refundPolicy?.title) {
+      const title = refundPolicy.title ? refundPolicy.title.trim() : "Refund policy";
+      const body = refundPolicy.body ? stripHtml(refundPolicy.body) : "";
+      const policyText = body
+        ? `${title}: ${body}`
+        : title;
+      messages.push({
+        role: "system",
+        content:
+          "Shopify policy (shop-specific). Use only when the user asks about refunds/returns:\n" +
+          policyText
+      });
+    }
 
     messages.push({
       role: "system",

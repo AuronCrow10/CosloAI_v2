@@ -894,6 +894,7 @@ model ShopifyShop {
   products   ShopifyProduct[]
   variants   ShopifyVariant[]
   dataEvents ShopifyDataEvent[]
+  policies   ShopifyPolicy[]
 }
 
 model ShopifyProduct {
@@ -951,6 +952,22 @@ model ShopifyVariant {
   @@unique([shopId, variantId], name: "shopId_variantId")
   @@index([shopId])
   @@index([productDbId])
+}
+
+model ShopifyPolicy {
+  id               String      @id @default(uuid())
+  shopId           String
+  shop             ShopifyShop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  type             String
+  title            String?
+  body             String?
+  url              String?
+  shopifyUpdatedAt DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@unique([shopId, type], name: "shopId_type")
+  @@index([shopId])
 }
 
 model ShopifyDataEvent {
