@@ -634,6 +634,22 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
       }
     }
 
+    if (!referralCodeToApply && bot.user.referralCodeId) {
+      const userReferral = await prisma.referralCode.findUnique({
+        where: { id: bot.user.referralCodeId },
+        include: { partner: true }
+      });
+
+      if (
+        userReferral &&
+        userReferral.isActive &&
+        userReferral.partner.status === "ACTIVE" &&
+        userReferral.partner.userId !== bot.userId
+      ) {
+        referralCodeToApply = userReferral.code;
+      }
+    }
+
     let stripeCustomerId: string | null = null;
     const existingSub = await prisma.subscription.findUnique({
       where: { botId }

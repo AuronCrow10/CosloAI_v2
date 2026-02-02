@@ -6,6 +6,7 @@ import { logger } from '../logger.js';
 
 const CACHE_SCHEMA_VERSION = 1;
 const ESTIMATE_KEY_PREFIX = 'estimate';
+const ESTIMATE_STATUS_KEY_PREFIX = 'estimate_status';
 
 export interface CachedPage {
   url: string;
@@ -30,6 +31,14 @@ export interface EstimateCacheMeta {
 export interface EstimateCachePayload {
   meta: EstimateCacheMeta;
   pages: CachedPage[];
+}
+
+export interface EstimateJobStatusPayload {
+  estimateId: string;
+  status: 'running' | 'completed' | 'failed';
+  domain: string;
+  createdAt: string;
+  error?: string;
 }
 
 let redisClient: Redis | null = null;
@@ -111,6 +120,10 @@ function estimateKey(estimateId: string): string {
 
 function signatureKey(signature: string): string {
   return `${ESTIMATE_KEY_PREFIX}:sig:${signature}`;
+}
+
+function estimateStatusKey(estimateId: string): string {
+  return `${ESTIMATE_STATUS_KEY_PREFIX}:${estimateId}`;
 }
 
 export async function getCachedEstimateBySignature(
@@ -221,5 +234,62 @@ export async function deleteCachedEstimateById(
     await multi.exec();
   } catch (err) {
     logger.warn('Failed to delete estimate cache.', err);
+  }
+}
+
+export async function getEstimateJobStatus(
+  estimateId: string,
+  config: AppConfig,
+): Promise<EstimateJobStatusPayload | null> {
+  const redis = getRedis(config);
+  if (!redis) return null;
+
+  if (!(await ensureRedisConnected(redis))) return null;
+
+  try {
+    const raw = await redis.get(estimateStatusKey(estimateId));
+    if (!raw) return null;
+    return JSON.parse(raw) as EstimateJobStatusPayload;
+  } catch (err) {
+    logger.warn('Failed to read estimate job status.', err);
+    return null;
+  }
+}
+
+export async function setEstimateJobStatus(
+  payload: EstimateJobStatusPayload,
+  config: AppConfig,
+): Promise<void> {
+  const redis = getRedis(config);
+  if (!redis) return;
+
+  if (!(await ensureRedisConnected(redis))) return;
+
+  const ttl = Math.max(60, config.cache.estimateTtlSeconds);
+  try {
+    await redis.set(
+      estimateStatusKey(payload.estimateId),
+      JSON.stringify(payload),
+      'EX',
+      ttl,
+    );
+  } catch (err) {
+    logger.warn('Failed to write estimate job status.', err);
+  }
+}
+
+export async function clearEstimateJobStatus(
+  estimateId: string,
+  config: AppConfig,
+): Promise<void> {
+  const redis = getRedis(config);
+  if (!redis) return;
+
+  if (!(await ensureRedisConnected(redis))) return;
+
+  try {
+    await redis.del(estimateStatusKey(estimateId));
+  } catch (err) {
+    logger.warn('Failed to clear estimate job status.', err);
   }
 }

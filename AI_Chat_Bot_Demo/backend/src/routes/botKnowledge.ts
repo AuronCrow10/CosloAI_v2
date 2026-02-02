@@ -9,7 +9,8 @@ import {
   crawlDomain,
   ingestDocs,
   getCrawlJob,
-  estimateCrawl,
+  startEstimateCrawlAsync,
+  getEstimateCrawlStatus,
   estimateDocs,
   listCrawlJobs,
   deactivateChunksByJob,
@@ -86,10 +87,68 @@ router.post("/bots/:id/knowledge/estimate-crawl", async (req: Request, res: Resp
     const domainToUse = overrideDomain || bot.domain;
     if (!domainToUse) return res.status(400).json({ error: "No domain configured for this bot" });
 
-    const data = await estimateCrawl(domainToUse);
+    const data = await startEstimateCrawlAsync(domainToUse);
     return res.json(data);
   } catch (err: any) {
     console.error("Error in estimate-crawl", err);
+    if (err instanceof Error) {
+      if (err.message === "BOT_NOT_FOUND") return res.status(404).json({ error: "Bot not found" });
+      if (err.message === "BOT_NOT_ACTIVE") return res.status(400).json({ error: "Bot must be active." });
+      if (err.message === "KNOWLEDGE_SOURCE_SHOPIFY") {
+        return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
+      }
+    }
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// --- Estimate crawl status (async) ---
+router.get("/bots/:id/knowledge/estimate-crawl-status", async (req: Request, res: Response) => {
+  try {
+    const botId = req.params.id;
+    const userId = req.user!.id;
+    const estimateId = String(req.query.estimateId || "").trim();
+
+    if (!estimateId) return res.status(400).json({ error: "estimateId is required" });
+
+    const { bot } = await ensureKnowledgeClient(botId, userId);
+
+    const status = await getEstimateCrawlStatus(estimateId);
+    if (!status || !status.status) {
+      return res.status(404).json({ error: "Estimate not found" });
+    }
+
+    if (status.status !== "completed") {
+      return res.json({ status: status.status, estimateId, error: status.error });
+    }
+
+    const estimate = status.estimate ?? null;
+    const snapshot = await getPlanUsageForBot(bot.id);
+    const limit = snapshot?.monthlyTokenLimit ?? null;
+    const usedTokens = snapshot?.usedTokensTotal ?? 0;
+    const remainingTokens =
+      limit && limit > 0 ? Math.max(limit - usedTokens, 0) : null;
+
+    const requiredTokens =
+      estimate && typeof estimate.tokensEstimated === "number"
+        ? estimate.tokensEstimated
+        : 0;
+
+    const canProceed =
+      !limit || limit <= 0 || remainingTokens == null || requiredTokens <= remainingTokens;
+
+    return res.json({
+      status: "estimate",
+      canProceed,
+      estimate,
+      estimateId,
+      limit,
+      usedTokens,
+      remainingTokens,
+      requiredTokens
+    });
+  } catch (err: any) {
+    console.error("Error in estimate-crawl-status", err);
     if (err instanceof Error) {
       if (err.message === "BOT_NOT_FOUND") return res.status(404).json({ error: "Bot not found" });
       if (err.message === "BOT_NOT_ACTIVE") return res.status(400).json({ error: "Bot must be active." });
@@ -122,16 +181,52 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
       return res.status(400).json({ error: "Domain crawler disabled for this bot" });
     }
 
-    let estimate: any = null;
-    let estimateKey: string | null = null;
-    try {
-      const estimateResp = await estimateCrawl(domainToUse);
-      estimate = estimateResp?.estimate ?? null;
-      estimateKey = estimateResp?.estimateId ?? null;
-    } catch (err) {
-      console.error("Error in pre-crawl estimate", err);
+    if (!confirmed) {
+      const estimateResp = await startEstimateCrawlAsync(domainToUse);
+      if (estimateResp?.status === "completed") {
+        const estimate = estimateResp.estimate ?? null;
+        const snapshot = await getPlanUsageForBot(bot.id);
+        const limit = snapshot?.monthlyTokenLimit ?? null;
+        const usedTokens = snapshot?.usedTokensTotal ?? 0;
+        const remainingTokens =
+          limit && limit > 0 ? Math.max(limit - usedTokens, 0) : null;
+
+        const requiredTokens =
+          estimate && typeof estimate.tokensEstimated === "number"
+            ? estimate.tokensEstimated
+            : 0;
+
+        const canProceed =
+          !limit || limit <= 0 || remainingTokens == null || requiredTokens <= remainingTokens;
+
+        return res.status(200).json({
+          status: "estimate",
+          canProceed,
+          estimate,
+          estimateId: estimateResp.estimateId ?? null,
+          limit,
+          usedTokens,
+          remainingTokens,
+          requiredTokens
+        });
+      }
+
+      return res.status(202).json({
+        status: "estimate_pending",
+        estimateId: estimateResp?.estimateId ?? null
+      });
     }
 
+    if (!estimateId) {
+      return res.status(400).json({ error: "estimateId is required before confirming." });
+    }
+
+    const status = await getEstimateCrawlStatus(estimateId);
+    if (!status || status.status !== "completed") {
+      return res.status(400).json({ error: "Estimate is not ready yet." });
+    }
+
+    const estimate = status.estimate ?? null;
     const snapshot = await getPlanUsageForBot(bot.id);
     const limit = snapshot?.monthlyTokenLimit ?? null;
     const usedTokens = snapshot?.usedTokensTotal ?? 0;
@@ -149,19 +244,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
         canProceed: false,
         error: "Crawl would exceed the monthly token limit.",
         estimate,
-        limit,
-        usedTokens,
-        remainingTokens,
-        requiredTokens
-      });
-    }
-
-    if (!confirmed) {
-      return res.status(200).json({
-        status: "estimate",
-        canProceed: true,
-        estimate,
-        estimateId: estimateKey,
+        estimateId,
         limit,
         usedTokens,
         remainingTokens,
@@ -172,7 +255,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
     const resp = await crawlDomain({
       clientId: knowledgeClientId,
       domain: domainToUse,
-      estimateId: estimateId || estimateKey || undefined
+      estimateId
     });
 
     // Persist last crawl info (optional: useful elsewhere)
@@ -192,7 +275,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
       knowledgeClientId,
       domain: resp.domain,
       estimate,
-      estimateId: estimateKey
+      estimateId
     });
   } catch (err: any) {
     console.error("Error in crawl-domain", err);

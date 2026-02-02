@@ -194,16 +194,47 @@ export async function updateBotSubscriptionForFeatureChange(
 
   const stripeSubId = bot.subscription.stripeSubscriptionId;
 
+  const dbSub = await prisma.subscription.findUnique({
+    where: { id: bot.subscription.id },
+    include: { usagePlan: true }
+  });
+
+  const featureCodes = getEnabledFeatureCodes(
+    botToFeatureFlags({
+      useDomainCrawler: bot.useDomainCrawler,
+      usePdfCrawler: bot.usePdfCrawler,
+      channelWeb: bot.channelWeb,
+      channelWhatsapp: bot.channelWhatsapp,
+      channelMessenger: bot.channelMessenger,
+      channelInstagram: bot.channelInstagram,
+      useCalendar: bot.useCalendar,
+      leadWhatsappMessages200: bot.leadWhatsappMessages200,
+      leadWhatsappMessages500: bot.leadWhatsappMessages500,
+      leadWhatsappMessages1000: bot.leadWhatsappMessages1000
+    })
+  );
+
+  const snapshotCurrency = dbSub?.currency || dbSub?.usagePlan?.currency || "eur";
+
+  if (stripeSubId.startsWith("free_")) {
+    await prisma.subscription.update({
+      where: { id: bot.subscription.id },
+      data: {
+        planSnapshotJson: {
+          f: featureCodes,
+          fp: 0,
+          c: snapshotCurrency
+        }
+      }
+    });
+    return;
+  }
+
   const stripeSub = await stripe.subscriptions.retrieve(stripeSubId, {
     expand: ["items.data.price"]
   });
 
   const existingItems = stripeSub.items.data;
-
-  const dbSub = await prisma.subscription.findUnique({
-    where: { id: bot.subscription.id },
-    include: { usagePlan: true }
-  });
 
   const planPriceId: string | null = dbSub?.usagePlan?.stripePriceId ?? null;
 
@@ -234,9 +265,9 @@ export async function updateBotSubscriptionForFeatureChange(
     where: { id: bot.subscription.id },
     data: {
       planSnapshotJson: {
-        f: [],  // optional: keep feature codes if you want; fp is what matters
+        f: featureCodes,
         fp: 0,
-        c: dbSub!.currency || dbSub!.usagePlan?.currency || "eur"
+        c: snapshotCurrency
       }
     }
   });
@@ -273,6 +304,9 @@ export async function updateBotSubscriptionForUsagePlanChange({
 
   const dbSub = bot.subscription;
   const stripeSubId = dbSub.stripeSubscriptionId;
+  if (stripeSubId.startsWith("free_")) {
+    throw new Error("Free plans do not have Stripe subscriptions.");
+  }
 
   // Load the new usage plan (must be active and have a Stripe price)
   const newPlan = await prisma.usagePlan.findFirst({

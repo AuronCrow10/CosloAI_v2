@@ -18,6 +18,7 @@ import { authenticator } from "otplib";
 import { randomInt } from "crypto";
 import { addSeconds } from "date-fns";
 import { sendMail } from "../services/mailer";
+import { REFERRAL_COOKIE_NAME, validateReferralCode } from "../services/referralService";
 
 const router = Router();
 
@@ -187,12 +188,21 @@ router.post("/register", async (req: Request, res: Response) => {
 
   const passwordHash = await hashPassword(password);
 
+  let referralCodeId: string | null = null;
+  const rawReferral = (req as any).cookies?.[REFERRAL_COOKIE_NAME] as string | undefined;
+  if (rawReferral) {
+    const valid = await validateReferralCode(rawReferral);
+    if (valid) referralCodeId = valid.referralCodeId;
+  }
+
   const user = await prisma.user.create({
     data: {
       email,
       passwordHash,
       role: "CLIENT",
-      emailVerified: false
+      emailVerified: false,
+      referralCodeId: referralCodeId ?? undefined,
+      referredAt: referralCodeId ? new Date() : undefined
     }
   });
 
@@ -514,6 +524,13 @@ router.post("/google", async (req: Request, res: Response) => {
   const googleId = payload.sub;
   const email = payload.email;
 
+  let referralCodeId: string | null = null;
+  const rawReferral = (req as any).cookies?.[REFERRAL_COOKIE_NAME] as string | undefined;
+  if (rawReferral) {
+    const valid = await validateReferralCode(rawReferral);
+    if (valid) referralCodeId = valid.referralCodeId;
+  }
+
   let user = await prisma.user.findUnique({ where: { googleId } });
   if (!user) {
     user = await prisma.user.upsert({
@@ -526,7 +543,9 @@ router.post("/google", async (req: Request, res: Response) => {
         email,
         googleId,
         role: "CLIENT",
-        emailVerified: true
+        emailVerified: true,
+        referralCodeId: referralCodeId ?? undefined,
+        referredAt: referralCodeId ? new Date() : undefined
       }
     });
   }

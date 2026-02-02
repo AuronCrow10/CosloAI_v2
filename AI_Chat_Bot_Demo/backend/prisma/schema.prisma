@@ -54,8 +54,15 @@ model User {
   // If this user was referred by someone else, their attributions live here.
   referralAttributionsAsLead ReferralAttribution[] @relation("ReferredUserAttributions")
 
+  // If this user signed up via a referral link, store the code used.
+  referralCodeId String?
+  referralCode   ReferralCode? @relation(fields: [referralCodeId], references: [id])
+  referredAt     DateTime?
+
   // NEW: Mobile devices
   mobileDevices MobileDevice[]
+
+  @@index([referralCodeId])
 }
 
 model MfaBackupCode {
@@ -638,6 +645,7 @@ model ReferralCode {
 
   clicks       ReferralClick[]
   attributions ReferralAttribution[]
+  referredUsers User[]
 
   @@index([partnerId])
 }

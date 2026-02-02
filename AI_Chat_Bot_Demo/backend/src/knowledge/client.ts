@@ -108,6 +108,18 @@ export async function estimateCrawl(domain: string): Promise<any> {
   return res.data; // { estimate: ... }
 }
 
+export async function startEstimateCrawlAsync(domain: string): Promise<any> {
+  const res = await client.post("/estimate/crawl/async", { domain });
+  return res.data; // { status, estimateId, estimate? }
+}
+
+export async function getEstimateCrawlStatus(estimateId: string): Promise<any> {
+  const res = await client.get(
+    `/estimate/crawl/status?estimateId=${encodeURIComponent(estimateId)}`
+  );
+  return res.data;
+}
+
 export async function estimateDocs(params: {
   clientId: string;
   files: Express.Multer.File[];

@@ -26,6 +26,11 @@ import {
   setCachedEstimate,
   getCachedEstimateById,
   deleteCachedEstimateById,
+  getEstimateJobStatus,
+  setEstimateJobStatus,
+  clearEstimateJobStatus,
+  type EstimateCacheMeta,
+  type EstimateJobStatusPayload,
   type CachedPage,
 } from './cache/estimateCache.js';
 import type {
@@ -38,6 +43,7 @@ import type {
 
 const app = express();
 app.use(express.json());
+
 
 const allowedMimeTypes = new Set([
   'application/pdf',
@@ -78,6 +84,26 @@ function requireInternalAuth(
 const config = loadConfig();
 const db = new Database(config.db);
 const embeddings = new EmbeddingService(config.embeddings);
+
+const estimateJobs = new Map<string, EstimateJobStatusPayload>();
+
+async function setEstimateJobStatusSafe(payload: EstimateJobStatusPayload) {
+  estimateJobs.set(payload.estimateId, payload);
+  await setEstimateJobStatus(payload, config);
+
+  const ttlMs = Math.max(60, config.cache.estimateTtlSeconds) * 1000;
+  setTimeout(() => {
+    estimateJobs.delete(payload.estimateId);
+  }, ttlMs).unref();
+}
+
+async function getEstimateJobStatusSafe(
+  estimateId: string,
+): Promise<EstimateJobStatusPayload | null> {
+  const fromCache = await getEstimateJobStatus(estimateId, config);
+  if (fromCache) return fromCache;
+  return estimateJobs.get(estimateId) ?? null;
+}
 
 db.init()
   .then(() => logger.info('DB initialized'))
@@ -416,6 +442,19 @@ async function ingestCachedPages(params: {
   return { pagesVisited, pagesStored, chunksStored };
 }
 
+function buildEstimateFromCache(meta: EstimateCacheMeta): CrawlEstimate {
+  return {
+    domain: meta.domain,
+    pagesEstimated: meta.pagesEstimated,
+    samplePages: meta.pagesCounted,
+    avgEmbeddingTokensPerPage:
+      meta.pagesCounted > 0 ? Math.round(meta.tokensEstimated / meta.pagesCounted) : 0,
+    tokensEstimated: meta.tokensEstimated,
+    tokensLow: meta.tokensEstimated,
+    tokensHigh: meta.tokensEstimated,
+  };
+}
+
 // --- Clients ---
 app.post('/clients', requireInternalAuth, async (req, res) => {
   try {
@@ -610,6 +649,152 @@ app.get('/crawl/jobs', requireInternalAuth, async (req, res) => {
 });
 
 // --- Estimates ---
+app.post('/estimate/crawl/async', requireInternalAuth, async (req, res) => {
+  try {
+    const { domain } = req.body as { domain?: string };
+    if (!domain) return res.status(400).json({ error: 'domain is required' });
+
+    const startUrl = normalizeDomainToStartUrl(domain);
+    const host = extractDomain(domain);
+    const signature = buildEstimateSignature(host, config);
+
+    const cached = await getCachedEstimateBySignature(signature, config);
+    if (cached) {
+      const estimate = buildEstimateFromCache(cached.meta);
+      logger.info(
+        `Estimate cache hit for domain=${host} estimateId=${cached.meta.estimateId}`,
+      );
+      return res.json({
+        status: 'completed',
+        estimate,
+        estimateId: cached.meta.estimateId,
+        cached: true,
+      });
+    }
+
+    const estimateId = crypto.randomUUID();
+    await setEstimateJobStatusSafe({
+      estimateId,
+      status: 'running',
+      domain: host,
+      createdAt: new Date().toISOString(),
+    });
+
+    (async () => {
+      try {
+        const urls = await fetchSitemapUrls(startUrl, host, config.crawl.enableSitemap);
+        const { pagesEstimated, pagesVisited, pagesCounted, totalTokens, pages } =
+          await estimateDomainTokensWithBrowser({
+            startUrl,
+            host,
+            sitemapUrls: urls,
+          });
+
+        logger.info(
+          `Estimate summary for domain=${host}: pagesEstimated=${pagesEstimated}, pagesVisited=${pagesVisited}, pagesCounted=${pagesCounted}, tokens=${totalTokens}`,
+        );
+
+        const estimate: CrawlEstimate = {
+          domain: host,
+          pagesEstimated,
+          samplePages: pagesCounted,
+          avgEmbeddingTokensPerPage:
+            pagesCounted > 0 ? Math.round(totalTokens / pagesCounted) : 0,
+          tokensEstimated: totalTokens,
+          tokensLow: totalTokens,
+          tokensHigh: totalTokens,
+        };
+
+        await setCachedEstimate(
+          {
+            meta: {
+              estimateId,
+              signature,
+              domain: host,
+              startUrl,
+              createdAt: new Date().toISOString(),
+              pagesEstimated,
+              pagesVisited,
+              pagesCounted,
+              tokensEstimated: totalTokens,
+              schemaVersion: 1,
+            },
+            pages,
+          },
+          config,
+        );
+
+        await setEstimateJobStatusSafe({
+          estimateId,
+          status: 'completed',
+          domain: host,
+          createdAt: new Date().toISOString(),
+        });
+
+        logger.info(
+          `Estimate cache stored for domain=${host} estimateId=${estimateId} pagesCounted=${pagesCounted}`,
+        );
+      } catch (err: any) {
+        logger.error('Error in async estimate crawl', err);
+        await setEstimateJobStatusSafe({
+          estimateId,
+          status: 'failed',
+          domain: host,
+          createdAt: new Date().toISOString(),
+          error: clampErrorMessage(err?.message || 'Estimate failed'),
+        });
+      }
+    })().catch((e) => logger.error('Unexpected async estimate failure', e));
+
+    return res.status(202).json({ status: 'running', estimateId, domain: host });
+  } catch (err) {
+    logger.error('Error in POST /estimate/crawl/async', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+app.get('/estimate/crawl/status', requireInternalAuth, async (req, res) => {
+  try {
+    const estimateId = String(req.query.estimateId || '').trim();
+    if (!estimateId) return res.status(400).json({ error: 'estimateId is required' });
+
+    const status = await getEstimateJobStatusSafe(estimateId);
+
+    if (!status) {
+      const cached = await getCachedEstimateById(estimateId, config);
+      if (!cached) return res.status(404).json({ error: 'Estimate not found' });
+      return res.json({
+        status: 'completed',
+        estimateId,
+        estimate: buildEstimateFromCache(cached.meta),
+      });
+    }
+
+    if (status.status === 'running') {
+      return res.json({ status: 'running', estimateId });
+    }
+
+    if (status.status === 'failed') {
+      return res.json({ status: 'failed', estimateId, error: status.error });
+    }
+
+    const cached = await getCachedEstimateById(estimateId, config);
+    if (!cached) {
+      return res.json({ status: 'running', estimateId });
+    }
+
+    await clearEstimateJobStatus(estimateId, config);
+    return res.json({
+      status: 'completed',
+      estimateId,
+      estimate: buildEstimateFromCache(cached.meta),
+    });
+  } catch (err) {
+    logger.error('Error in GET /estimate/crawl/status', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 app.post('/estimate/crawl', requireInternalAuth, async (req, res) => {
   try {
     const { domain } = req.body as { domain?: string };

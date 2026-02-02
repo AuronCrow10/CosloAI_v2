@@ -134,7 +134,8 @@ router.get("/referrals/me/stats", requireAuth, async (req, res) => {
   const from = monthStartUtc(month);
   const to = nextMonthStartUtc(month);
 
-  const [activeAttributions, conversionsThisMonth, payoutRows, agg] = await Promise.all([
+  const [activeAttributions, conversionsThisMonth, payoutRows, agg, referredTotal, referredUsers] =
+    await Promise.all([
     prisma.referralAttribution.count({ where: { partnerId: partner.id, endedAt: null } }),
     prisma.referralAttribution.count({
       where: { partnerId: partner.id, startedAt: { gte: from, lt: to } }
@@ -147,6 +148,20 @@ router.get("/referrals/me/stats", requireAuth, async (req, res) => {
       by: ["currency"],
       where: { partnerId: partner.id, monthKey: month },
       _sum: { commissionCents: true, amountBaseCents: true }
+    }),
+    prisma.user.count({
+      where: { referralCode: { partnerId: partner.id } }
+    }),
+    prisma.user.findMany({
+      where: { referralCode: { partnerId: partner.id } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      select: {
+        id: true,
+        email: true,
+        createdAt: true,
+        referralCode: { select: { code: true } }
+      }
     })
   ]);
 
@@ -154,6 +169,13 @@ router.get("/referrals/me/stats", requireAuth, async (req, res) => {
     month,
     activeAttributions,
     conversionsThisMonth,
+    referredUsersTotal: referredTotal,
+    referredUsers: referredUsers.map((u) => ({
+      id: u.id,
+      email: u.email,
+      createdAt: u.createdAt,
+      referralCode: u.referralCode?.code ?? null
+    })),
     totalsByCurrency: agg.map((r) => ({
       currency: r.currency,
       revenueCents: r._sum.amountBaseCents ?? 0,
@@ -496,7 +518,15 @@ router.get(
 
     if (!partner) return res.status(404).json({ error: "Partner not found" });
 
-    const [clientsTotal, clientsActive, monthAgg, lifeAgg, payoutThisMonth] = await Promise.all([
+    const [
+      clientsTotal,
+      clientsActive,
+      monthAgg,
+      lifeAgg,
+      payoutThisMonth,
+      referredTotal,
+      referredUsers
+    ] = await Promise.all([
       prisma.referralAttribution.count({ where: { partnerId } }),
       prisma.referralAttribution.count({ where: { partnerId, endedAt: null } }),
       prisma.referralCommission.groupBy({
@@ -511,6 +541,21 @@ router.get(
       }),
       prisma.referralPayoutPeriod.findMany({
         where: { partnerId, monthKey: month }
+      }),
+      prisma.user.count({
+        where: { referralCode: { partnerId } }
+      }),
+      prisma.user.findMany({
+        where: { referralCode: { partnerId } },
+        orderBy: { createdAt: "desc" },
+        take,
+        skip,
+        select: {
+          id: true,
+          email: true,
+          createdAt: true,
+          referralCode: { select: { code: true } }
+        }
       })
     ]);
 
@@ -604,6 +649,15 @@ router.get(
           commissionCents: c.commissionCents,
           stripeInvoiceId: c.stripeInvoiceId,
           stripeSubscriptionId: c.stripeSubscriptionId
+        }))
+      },
+      referredUsers: {
+        total: referredTotal,
+        items: referredUsers.map((u) => ({
+          id: u.id,
+          email: u.email,
+          createdAt: u.createdAt,
+          referralCode: u.referralCode?.code ?? null
         }))
       },
       payoutHistory: payoutHistory.map((p) => ({
