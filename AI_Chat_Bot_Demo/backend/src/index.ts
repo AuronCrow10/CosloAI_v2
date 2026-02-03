@@ -128,6 +128,7 @@ const mainCspDirectives = {
     "'wasm-unsafe-eval'",
     "https://accounts.google.com",
     "https://connect.facebook.net",
+    "https://www.googletagmanager.com",
     "https://coslo.it"
   ],
   frameSrc: [
@@ -141,6 +142,8 @@ const mainCspDirectives = {
     "https://accounts.google.com",
     "https://oauth2.googleapis.com",
     "https://www.googleapis.com",
+    "https://www.google-analytics.com",
+    "https://*.google-analytics.com",
     "https://graph.facebook.com",
     "https://*.facebook.com",
     "wss:"
