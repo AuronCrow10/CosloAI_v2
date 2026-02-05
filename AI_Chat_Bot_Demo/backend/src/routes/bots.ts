@@ -3,6 +3,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
+import { listAccessibleBots } from "../services/teamAccessService";
 import { updateBotSubscriptionForFeatureChange } from "../services/billingService";
 import { deleteKnowledgeClient } from "../services/knowledgeClient";
 
@@ -31,7 +32,8 @@ const bookingWeeklyScheduleSchema = z
           .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format"),
         end: z
           .string()
-          .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format")
+          .regex(/^\d{2}:\d{2}$/, "Must be in HH:MM 24h format"),
+        maxSimultaneousBookings: z.number().int().positive()
       })
     )
   )
@@ -213,15 +215,23 @@ router.use("/bots/", requireAuth);
 
 // List bots
 router.get("/bots", async (req: Request, res: Response) => {
-  const bots = await prisma.bot.findMany({
-    where: { userId: req.user!.id },
-    orderBy: { createdAt: "desc" }
-  });
+  const bots = await listAccessibleBots(req.user!);
   res.json(bots);
+});
+
+// Team members are restricted to bots list only
+router.use("/bots/:id", (req: Request, res: Response, next) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  return next();
 });
 
 // Create bot
 router.post("/bots", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
   const parsed = botCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -346,6 +356,9 @@ if (selectedCount > 1) {
 
 // Update bot (features, basics, etc.)
 router.patch("/bots/:id", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
   const parsed = botUpdateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -363,6 +376,12 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
     typeof data.knowledgeSource === "string"
       ? data.knowledgeSource
       : (bot as any).knowledgeSource ?? "RAG";
+
+  const bookingServicesPayload = Array.isArray(
+    (data as any).bookingServices
+  )
+    ? (data as any).bookingServices
+    : undefined;
 
 
   let lead200 =
@@ -499,12 +518,6 @@ if (selectedCount > 1) {
     updateData.usePdfCrawler = false;
   }
 
-  const bookingServicesPayload = Array.isArray(
-    (data as any).bookingServices
-  )
-    ? (data as any).bookingServices
-    : undefined;
-
   delete updateData.bookingServices;
 
   // If client explicitly *omits* bookingRequiredFields, Prisma won't touch it.
@@ -547,6 +560,9 @@ if (selectedCount > 1) {
 
 // Get bot
 router.get("/bots/:id", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
   const bot = await prisma.bot.findFirst({
     where: { id: req.params.id, userId: req.user!.id },
     include: { bookingServices: true }
@@ -557,6 +573,9 @@ router.get("/bots/:id", async (req: Request, res: Response) => {
 
 // Delete bot (hard delete with slug confirmation and full cascade)
 router.delete("/bots/:id", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
   const { slug } = req.body as { slug?: string };
 
   if (!slug) {

@@ -31,6 +31,7 @@ import {
 } from "./bookingDraftService";
 import { detectBookingFieldUpdates } from "./bookingFieldCapture";
 import { z } from "zod";
+import { DateTime } from "luxon";
 import {
   toolSearchProducts,
   toolGetProductDetails,
@@ -357,6 +358,8 @@ function getShopifyInstructions(): string {
   );
 }
 
+
+
 function stripHtml(input: string): string {
   return input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -513,6 +516,7 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
     "- confirmationEmailSent (boolean | undefined)\n" +
     "- confirmationEmailError (string | undefined)\n" +
     "- possibly suggestedSlots: an array of alternative datetimes in ISO 8601, sorted by closeness to the requested time (this is OPTIONAL and may be missing).\n\n" +
+    "- possibly suggestedSlotsDisplay: an array of pre-formatted alternative slots with fields {iso, weekday, date, time, label}. Use these labels verbatim when proposing alternatives (do NOT re-compute weekday names).\n\n" +
     "- possibly suggestedServices: an array of service names when the service is unclear or not matched (OPTIONAL).\n\n" +
     "After receiving the booking tool result:\n" +
     "- You may include a short recap of the final booking details (name, service, date/time) in the confirmation message.\n" +
@@ -523,6 +527,7 @@ function getBookingInstructions(bookingCfg: BotBookingConfig): string {
     "  • Never invent new times; only use the suggestedSlots data.\n" +
     "  • Propose up to two alternatives, giving priority to one just before and one just after the requested time if such options exist.\n" +
     "  • If there is no suitable option before, propose the first two options after the requested time.\n" +
+    "  • If suggestedSlotsDisplay is present, use its labels verbatim for day/date/time.\n" +
     "- If success is false AND suggestedServices is present: ask the user to pick one of those services.\n" +
     "- Do NOT tell the user to wait while you \"process\" or \"book\"; silently use tools and then respond with the final result.\n"
   );
@@ -562,6 +567,8 @@ function detectReplyLanguageHint(message: string): string | null {
   return null;
 }
 
+
+
 function detectSimpleLang(message: string): "it" | "es" | "en" {
   const lower = message.trim().toLowerCase();
   if (!lower) return "en";
@@ -578,6 +585,37 @@ function detectSimpleLang(message: string): "it" | "es" | "en" {
   const esSignals = ["hola", "gracias", "quiero", "carrito", "precio"];
   if (esSignals.some((s) => lower.includes(s))) return "es";
   return "en";
+}
+
+function formatSuggestedSlot(params: {
+  iso: string;
+  timeZone: string;
+  lang: "it" | "es" | "en";
+}): { iso: string; weekday: string; date: string; time: string; label: string } | null {
+  const { iso, timeZone, lang } = params;
+  const dt = DateTime.fromISO(iso, { zone: timeZone });
+  if (!dt.isValid) return null;
+
+  const locale = lang === "it" ? "it" : lang === "es" ? "es" : "en";
+  const localized = dt.setLocale(locale);
+
+  const weekday = localized.toFormat("cccc");
+  const date =
+    lang === "es"
+      ? localized.toFormat("d 'de' LLLL 'de' yyyy")
+      : lang === "en"
+        ? localized.toFormat("LLLL d, yyyy")
+        : localized.toFormat("d LLLL yyyy");
+  const time = localized.toFormat("HH:mm");
+
+  const label =
+    lang === "it"
+      ? `${weekday} ${date} alle ${time}`
+      : lang === "es"
+        ? `${weekday} ${date} a las ${time}`
+        : `${weekday}, ${date} at ${time}`;
+
+  return { iso, weekday, date, time, label };
 }
 
 function buildShopifySummary(params: {
@@ -825,6 +863,12 @@ function formatBookingDraftSystemMessage(draft: BookingDraft): string {
     "\n\nUse these values as defaults when completing or updating bookings unless the user explicitly changes them."
   );
 }
+
+
+
+
+
+
 
 /**
  * Generate a reply for a given bot slug and user message.
@@ -1167,12 +1211,7 @@ export async function generateBotReplyForSlug(
   const toolCalls = firstMessage.tool_calls;
 
   // Process any booking draft updates first
-  if (
-    toolCalls &&
-    toolCalls.length > 0 &&
-    options.conversationId &&
-    botBookingCfg
-  ) {
+  if (toolCalls && toolCalls.length > 0 && options.conversationId && botBookingCfg) {
     const draftCalls = toolCalls.filter(
       (tc) => tc.function?.name === "update_booking_draft"
     );
@@ -1401,79 +1440,70 @@ export async function generateBotReplyForSlug(
       return secondContent;
     }
 
-    // 🔄 NEW: after processing update_booking_draft calls, see if the draft now has ALL required fields.
-    if (
-      bookingEnabledForTurn &&
-      botBookingCfg &&
-      options.conversationId
-    ) {
-      try {
-        const latestDraft = await loadBookingDraft(options.conversationId);
+    // 🔄 Auto-book if a draft is now complete
+    if (bookingEnabledForTurn && options.conversationId && botBookingCfg) {
+        try {
+          const latestDraft = await loadBookingDraft(options.conversationId);
 
-        if (hasAllRequiredBookingFields(latestDraft, botBookingCfg)) {
-          const draftAny: any = latestDraft;
+          if (hasAllRequiredBookingFields(latestDraft, botBookingCfg)) {
+            const draftAny: any = latestDraft;
 
-          // Build BookAppointmentArgs from the completed draft
-          const draftArgs: BookAppointmentArgs = {
-            name: String(draftAny.name ?? ""),
-            email: String(draftAny.email ?? ""),
-            phone: String(draftAny.phone ?? ""),
-            service: String(draftAny.service ?? ""),
-            datetime: String(draftAny.datetime ?? "")
-          };
+            const draftArgs: BookAppointmentArgs = {
+              name: String(draftAny.name ?? ""),
+              email: String(draftAny.email ?? ""),
+              phone: String(draftAny.phone ?? ""),
+              service: String(draftAny.service ?? ""),
+              datetime: String(draftAny.datetime ?? "")
+            };
 
-          // Include any custom fields from the draft
-          if (latestDraft?.customFields) {
-            for (const [key, value] of Object.entries(latestDraft.customFields)) {
-              if (
-                typeof value === "string" &&
-                value.trim().length > 0 &&
-                !(key in draftArgs)
-              ) {
-                (draftArgs as any)[key] = value;
+            if (latestDraft?.customFields) {
+              for (const [key, value] of Object.entries(latestDraft.customFields)) {
+                if (
+                  typeof value === "string" &&
+                  value.trim().length > 0 &&
+                  !(key in draftArgs)
+                ) {
+                  (draftArgs as any)[key] = value;
+                }
               }
             }
-          }
 
-          console.log("📅 [Booking] Auto-booking from completed draft", {
-            slug,
-            conversationId: options.conversationId,
-            draftArgs
-          });
+            console.log("📅 [Booking] Auto-booking from completed draft", {
+              slug,
+              conversationId: options.conversationId,
+              draftArgs
+            });
 
-          const autoResult = await handleBookAppointment(slug, draftArgs);
+            const autoResult = await handleBookAppointment(slug, draftArgs);
 
-          if (botConfig.botId) {
-            void maybeSendUsageAlertsForBot(botConfig.botId);
-          }
+            if (botConfig.botId) {
+              void maybeSendUsageAlertsForBot(botConfig.botId);
+            }
 
-          if (autoResult.success) {
-            // Simple, backend-crafted confirmation (no extra model call)
-            const emailNotice =
-              autoResult.confirmationEmailSent === false
-                ? " However, there was a problem sending the confirmation email, so please note the date and time."
-                : " You will receive a confirmation email shortly.";
+            if (autoResult.success) {
+              const emailNotice =
+                autoResult.confirmationEmailSent === false
+                  ? " However, there was a problem sending the confirmation email, so please note the date and time."
+                  : " You will receive a confirmation email shortly.";
 
-            return (
-              `Your booking has been created successfully for ${draftArgs.service} ` +
-              `on ${draftArgs.datetime} for ${draftArgs.name}.` +
-              emailNotice
-            );
-          } else {
-            // Bubble up backend error in a user-friendly way
+              return (
+                `Your booking has been created successfully for ${draftArgs.service} ` +
+                `on ${draftArgs.datetime} for ${draftArgs.name}.` +
+                emailNotice
+              );
+            }
+
             return (
               autoResult.errorMessage ||
               "Sorry, I couldn't process your booking. Please try another time or check your details."
             );
           }
+        } catch (err) {
+          console.error(
+            "📅 [Booking] Error while attempting auto-book from draft",
+            { slug, error: err }
+          );
         }
-      } catch (err) {
-        console.error(
-          "📅 [Booking] Error while attempting auto-book from draft",
-          { slug, error: err }
-        );
-        // On error, fall back to the normal behaviour below
-      }
     }
 
     // ⬇️ FALLBACK: behaviour when we're NOT ready to book (draft incomplete)
@@ -1523,20 +1553,19 @@ try {
   const rawArgs = bookingCall.function?.arguments || "{}";
   const parsed = JSON.parse(rawArgs);
 
-  if (
-    functionName === "book_appointment" &&
-    options.conversationId &&
-    botBookingCfg
-  ) {
-    try {
-      await updateBookingDraft(
-        options.conversationId,
-        parsed,
-        botBookingCfg.customFields
-      );
-    } catch (err) {
-      console.error("Failed to sync booking draft from booking tool:", err);
+  if (options.conversationId) {
+    if (functionName === "book_appointment" && botBookingCfg) {
+      try {
+        await updateBookingDraft(
+          options.conversationId,
+          parsed,
+          botBookingCfg.customFields
+        );
+      } catch (err) {
+        console.error("Failed to sync booking draft from booking tool:", err);
+      }
     }
+
   }
 
   console.log("🔧 [Booking Tool] call", {
@@ -1662,10 +1691,31 @@ try {
   };
 
   // 🔒 Sanitize bookingResult so the model never sees addToCalendarUrl
-  const bookingResultForModel: BookingResult = {
+  const bookingResultForModel: any = {
     ...bookingResult,
     addToCalendarUrl: undefined
   };
+
+  if (
+    bookingResultForModel &&
+    Array.isArray(bookingResultForModel.suggestedSlots) &&
+    bookingResultForModel.suggestedSlots.length > 0
+  ) {
+    const lang = detectSimpleLang(message);
+    const timeZone =
+      botConfig.booking && "timeZone" in botConfig.booking
+        ? botConfig.booking.timeZone
+        : "UTC";
+    const display = bookingResultForModel.suggestedSlots
+      .map((iso: string) =>
+        formatSuggestedSlot({ iso, timeZone, lang })
+      )
+      .filter(Boolean);
+
+    if (display.length > 0) {
+      bookingResultForModel.suggestedSlotsDisplay = display;
+    }
+  }
 
   const toolMessages: ChatMessage[] = [
     ...messages,

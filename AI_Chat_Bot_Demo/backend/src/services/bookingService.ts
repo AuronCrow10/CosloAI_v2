@@ -10,6 +10,7 @@ import {
 } from "../google/calendar";
 import { prisma } from "../prisma/prisma";
 import { sendBotMail } from "./mailer";
+import { sendBookingCreatedPush } from "./pushNotificationService";
 
 export interface BookAppointmentArgs {
   name: string;
@@ -225,6 +226,7 @@ type WeekdayKey =
 type BookingTimeWindow = {
   start: string; // "HH:MM"
   end: string; // "HH:MM"
+  maxSimultaneousBookings?: number | null;
 };
 
 type BookingWeeklySchedule = Partial<Record<WeekdayKey, BookingTimeWindow[]>>;
@@ -265,28 +267,66 @@ function getWeekdayKey(dt: DateTime): WeekdayKey {
   return WEEKDAY_KEYS[dt.weekday - 1];
 }
 
+function getScheduleWindowForStart(
+  dt: DateTime,
+  durationMinutes: number,
+  schedule: BookingWeeklySchedule | null
+): BookingTimeWindow | null {
+  // No schedule configured → allow any time
+  if (!schedule) return null;
+
+  const dayKey = getWeekdayKey(dt);
+  const windows = schedule[dayKey];
+  if (!windows || windows.length === 0) return null;
+
+  const startMinutes = dt.hour * 60 + dt.minute;
+  const endMinutes = startMinutes + durationMinutes;
+
+  return (
+    windows.find((w) => {
+      const from = parseTimeToMinutes(w.start);
+      const to = parseTimeToMinutes(w.end);
+      if (from == null || to == null || from >= to) return false;
+      return startMinutes >= from && endMinutes <= to;
+    }) || null
+  );
+}
+
+function resolveWindowCapacity(params: {
+  dt: DateTime;
+  durationMinutes: number;
+  schedule: BookingWeeklySchedule | null;
+  fallback: number;
+}): { withinSchedule: boolean; capacity: number } {
+  const { dt, durationMinutes, schedule, fallback } = params;
+
+  if (!schedule) {
+    return { withinSchedule: true, capacity: fallback };
+  }
+
+  const window = getScheduleWindowForStart(dt, durationMinutes, schedule);
+  if (!window) {
+    return { withinSchedule: false, capacity: fallback };
+  }
+
+  const raw = window.maxSimultaneousBookings;
+  const capacity =
+    typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : fallback;
+
+  return { withinSchedule: true, capacity };
+}
+
 function isWithinWeeklySchedule(
   dt: DateTime,
   durationMinutes: number,
   schedule: BookingWeeklySchedule | null
 ): boolean {
-  // No schedule configured → allow any time
-  if (!schedule) return true;
-
-  const dayKey = getWeekdayKey(dt);
-  const windows = schedule[dayKey];
-  if (!windows || windows.length === 0) return false;
-
-  const startMinutes = dt.hour * 60 + dt.minute;
-  const endMinutes = startMinutes + durationMinutes;
-
-  // A booking is valid if fully contained in at least one window for that day
-  return windows.some((w) => {
-    const from = parseTimeToMinutes(w.start);
-    const to = parseTimeToMinutes(w.end);
-    if (from == null || to == null || from >= to) return false;
-    return startMinutes >= from && endMinutes <= to;
-  });
+  return resolveWindowCapacity({
+    dt,
+    durationMinutes,
+    schedule,
+    fallback: 1
+  }).withinSchedule;
 }
 
 async function computeSuggestedSlots(options: {
@@ -373,24 +413,25 @@ async function computeSuggestedSlots(options: {
         if (candidateStart > maxAllowed) continue;
       }
 
-      if (
-        !isWithinWeeklySchedule(
-          candidateStart,
-          duration,
-          weeklySchedule
-        )
-      ) {
+      const scheduleCheck = resolveWindowCapacity({
+        dt: candidateStart,
+        durationMinutes: duration,
+        schedule: weeklySchedule,
+        fallback: maxSimultaneousBookings
+      });
+
+      if (!scheduleCheck.withinSchedule) {
         continue;
       }
 
-      if (botId && maxSimultaneousBookings > 0) {
+      if (botId && scheduleCheck.capacity > 0) {
         const overlappingCount = existing.filter((b) => {
           const bStart = DateTime.fromJSDate(b.start);
           const bEnd = DateTime.fromJSDate(b.end);
           return bStart < candidateEnd && bEnd > candidateStart;
         }).length;
 
-        if (overlappingCount >= maxSimultaneousBookings) {
+        if (overlappingCount >= scheduleCheck.capacity) {
           continue;
         }
       }
@@ -432,7 +473,10 @@ async function computeSuggestedSlots(options: {
   let calendarChecks = 0;
   const MAX_CALENDAR_CHECKS = 8;
 
-  async function isFreeInCalendar(slotStart: DateTime): Promise<boolean> {
+  async function isFreeInCalendar(
+    slotStart: DateTime,
+    capacity: number
+  ): Promise<boolean> {
     if (!shouldCheckCalendarConflicts || !calendarId) {
       // This bot does not use external conflicts (e.g. no calendar configured)
       return true;
@@ -451,11 +495,11 @@ async function computeSuggestedSlots(options: {
         calendarId,
         timeMin: slotStart.toISO()!,
         timeMax: slotEnd.toISO()!,
-        maxResults: maxSimultaneousBookings
+        maxResults: capacity
       });
 
       // Slot is free in the calendar if it has fewer events than our capacity
-      return gcalEventsCount < maxSimultaneousBookings;
+      return gcalEventsCount < capacity;
     } catch (err) {
       // On error, be conservative: treat as conflict so we don't suggest it.
       console.error("📅 [Booking] Error checking calendar capacity for suggestion", {
@@ -467,9 +511,18 @@ async function computeSuggestedSlots(options: {
     }
   }
 
-  async function pickFirstFree(sortedCandidates: DateTime[]): Promise<DateTime | null> {
+  async function pickFirstFree(
+    sortedCandidates: DateTime[]
+  ): Promise<DateTime | null> {
     for (const dt of sortedCandidates) {
-      const free = await isFreeInCalendar(dt);
+      const scheduleCheck = resolveWindowCapacity({
+        dt,
+        durationMinutes: duration,
+        schedule: weeklySchedule,
+        fallback: maxSimultaneousBookings
+      });
+      if (!scheduleCheck.withinSchedule) continue;
+      const free = await isFreeInCalendar(dt, scheduleCheck.capacity);
       if (free) return dt;
     }
     return null;
@@ -870,8 +923,15 @@ export async function handleBookAppointment(
     }
   }
 
+  const scheduleCheck = resolveWindowCapacity({
+    dt: start,
+    durationMinutes,
+    schedule: weeklySchedule,
+    fallback: maxSimultaneousBookings
+  });
+
   // Enforce weekly opening hours (if configured on the service)
-  if (!isWithinWeeklySchedule(start, durationMinutes, weeklySchedule)) {
+  if (!scheduleCheck.withinSchedule) {
     const suggestedSlots = await computeSuggestedSlots({
       requestedStart: start,
       bookingCfg,
@@ -904,7 +964,9 @@ export async function handleBookAppointment(
 
   const end = start.plus({ minutes: durationMinutes });
 
-  if (botConfig.botId && maxSimultaneousBookings > 0) {
+  const windowCapacity = scheduleCheck.capacity;
+
+  if (botConfig.botId && windowCapacity > 0) {
     const overlappingCount = await prisma.booking.count({
       where: {
         botId: botConfig.botId,
@@ -916,7 +978,7 @@ export async function handleBookAppointment(
       }
     });
 
-    if (overlappingCount >= maxSimultaneousBookings) {
+    if (overlappingCount >= windowCapacity) {
       const suggestedSlots = await computeSuggestedSlots({
         requestedStart: start,
         bookingCfg,
@@ -938,26 +1000,26 @@ export async function handleBookAppointment(
   }
 
   // Check external calendar capacity (Google Calendar)
-  if (shouldCheckCalendarConflicts && maxSimultaneousBookings > 0) {
+  if (shouldCheckCalendarConflicts && windowCapacity > 0) {
     try {
       const gcalEventsCount = await countEventsInRange({
         calendarId,
         timeMin: start.toISO()!,
         timeMax: end.toISO()!,
         // We don't need more than maxSimultaneousBookings events to know it's full
-        maxResults: maxSimultaneousBookings
+        maxResults: windowCapacity
       });
 
       // If GCal already has >= maxSimultaneousBookings events in this slot,
       // we treat it as fully booked.
-      if (gcalEventsCount >= maxSimultaneousBookings) {
+      if (gcalEventsCount >= windowCapacity) {
         console.warn("?? [Booking] Rejected - calendar at capacity", {
           requestId,
           slug,
           calendarId,
           start: start.toISO(),
           end: end.toISO(),
-          maxSimultaneousBookings,
+          maxSimultaneousBookings: windowCapacity,
           gcalEventsCount
         });
 
@@ -1023,8 +1085,9 @@ export async function handleBookAppointment(
   });
 
   // Insert DB row
+  let bookingId: string | null = null;
   try {
-    await prisma.booking.create({
+    const created = await prisma.booking.create({
       data: {
         botId: botConfig.botId!,
         name: args.name,
@@ -1038,6 +1101,7 @@ export async function handleBookAppointment(
         calendarEventId: calendarEvent?.id || null
       }
     });
+    bookingId = created.id;
   } catch (err) {
     console.error("? [Booking] Failed to create booking in DB", {
       requestId,
@@ -1083,6 +1147,24 @@ export async function handleBookAppointment(
     requestId,
     slug
   });
+
+  if (botConfig.ownerUserId && botConfig.botId) {
+    try {
+      await sendBookingCreatedPush(botConfig.ownerUserId, {
+        botId: botConfig.botId,
+        botName: botConfig.name,
+        start: start.toISO() || start.toJSDate().toISOString(),
+        timeZone
+      });
+    } catch (err) {
+      console.error("[Booking] Failed to send booking push notification", {
+        requestId,
+        slug,
+        bookingId,
+        error: err
+      });
+    }
+  }
 
   return {
     success: true,
@@ -1304,7 +1386,14 @@ export async function handleUpdateAppointment(
     }
   }
 
-  if (!isWithinWeeklySchedule(newStart, durationMinutes, weeklySchedule)) {
+  const updateScheduleCheck = resolveWindowCapacity({
+    dt: newStart,
+    durationMinutes,
+    schedule: weeklySchedule,
+    fallback: maxSimultaneousBookings
+  });
+
+  if (!updateScheduleCheck.withinSchedule) {
     const suggestedSlots = await computeSuggestedSlots({
       requestedStart: newStart,
       bookingCfg,
@@ -1327,7 +1416,9 @@ export async function handleUpdateAppointment(
 
   const newEnd = newStart.plus({ minutes: durationMinutes });
 
-  if (botConfig.botId && maxSimultaneousBookings > 0) {
+  const updateWindowCapacity = updateScheduleCheck.capacity;
+
+  if (botConfig.botId && updateWindowCapacity > 0) {
     const overlappingCount = await prisma.booking.count({
       where: {
         botId: botConfig.botId,
@@ -1339,7 +1430,7 @@ export async function handleUpdateAppointment(
       }
     });
 
-    if (overlappingCount >= maxSimultaneousBookings) {
+    if (overlappingCount >= updateWindowCapacity) {
       const suggestedSlots = await computeSuggestedSlots({
         requestedStart: newStart,
         bookingCfg,
@@ -1361,23 +1452,23 @@ export async function handleUpdateAppointment(
     }
   }
 
-  if (!!calendarId && maxSimultaneousBookings > 0) {
+  if (!!calendarId && updateWindowCapacity > 0) {
     try {
       const gcalEventsCount = await countEventsInRange({
         calendarId,
         timeMin: newStart.toISO()!,
         timeMax: newEnd.toISO()!,
-        maxResults: maxSimultaneousBookings
+        maxResults: updateWindowCapacity
       });
 
-      if (gcalEventsCount >= maxSimultaneousBookings) {
+      if (gcalEventsCount >= updateWindowCapacity) {
         console.warn("?? [Booking] Update rejected - calendar at capacity", {
           requestId,
           slug,
           calendarId,
           newStart: newStart.toISO(),
           newEnd: newEnd.toISO(),
-          maxSimultaneousBookings,
+          maxSimultaneousBookings: updateWindowCapacity,
           gcalEventsCount
         });
 

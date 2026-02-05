@@ -16,6 +16,7 @@ model User {
   googleId      String?  @unique
   role          UserRole @default(CLIENT)
   emailVerified Boolean  @default(false)
+  lastLoginAt   DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -62,6 +63,15 @@ model User {
   // NEW: Mobile devices
   mobileDevices MobileDevice[]
 
+  // Team memberships (access to bots owned by other users)
+  teamMemberships TeamMembership[]
+
+  // Invites sent by this user (owner)
+  teamInvitesSent TeamInvite[] @relation("TeamInviteSender")
+
+  // Team memberships granted by this user (owner)
+  teamMembershipsGranted TeamMembership[] @relation("TeamMembershipGranter")
+
   @@index([referralCodeId])
 }
 
@@ -84,6 +94,50 @@ enum UserRole {
   ADMIN
   CLIENT
   REFERRER
+  TEAM_MEMBER
+}
+
+model TeamInvite {
+  id           String   @id @default(uuid())
+  email        String
+  token        String   @unique
+  invitedById  String
+  invitedBy    User     @relation("TeamInviteSender", fields: [invitedById], references: [id])
+  usedAt       DateTime?
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+
+  bots TeamInviteBot[]
+
+  @@index([email])
+  @@index([invitedById])
+}
+
+model TeamInviteBot {
+  id        String     @id @default(uuid())
+  inviteId  String
+  botId     String
+  invite    TeamInvite @relation(fields: [inviteId], references: [id])
+  bot       Bot        @relation(fields: [botId], references: [id])
+  createdAt DateTime   @default(now())
+
+  @@unique([inviteId, botId])
+  @@index([botId])
+}
+
+model TeamMembership {
+  id            String   @id @default(uuid())
+  userId        String
+  botId         String
+  grantedById   String
+  user          User     @relation(fields: [userId], references: [id])
+  bot           Bot      @relation(fields: [botId], references: [id])
+  grantedBy     User     @relation("TeamMembershipGranter", fields: [grantedById], references: [id])
+  createdAt     DateTime @default(now())
+
+  @@unique([userId, botId])
+  @@index([botId])
+  @@index([grantedById])
 }
 
 model Bot {
@@ -134,6 +188,10 @@ model Bot {
   // NEW: Booking records
   bookings        Booking[]
   bookingServices BookingService[]
+
+  // Team access
+  teamMemberships TeamMembership[]
+  teamInviteBots  TeamInviteBot[]
 
   // =========================
   // BOOKING CONFIG (NEW)

@@ -6,7 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 
 const router = Router();
 
-const USER_ROLE_VALUES = ["ADMIN", "CLIENT", "REFERRER"] as const;
+const USER_ROLE_VALUES = ["ADMIN", "CLIENT", "REFERRER", "TEAM_MEMBER"] as const;
 type UserRole = (typeof USER_ROLE_VALUES)[number];
 
 // Helper to safely parse positive ints from query

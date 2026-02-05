@@ -1,6 +1,7 @@
 // services/pushNotificationService.ts
 
 import axios from "axios";
+import { DateTime } from "luxon";
 import { prisma } from "../prisma/prisma";
 import { ChannelType } from "@prisma/client";
 
@@ -22,6 +23,13 @@ export type UsageAlertPushPayload = {
   limitTokens: number;
 };
 
+export type BookingCreatedPushPayload = {
+  botId: string;
+  botName: string;
+  start: string; // ISO datetime
+  timeZone?: string | null;
+};
+
 function formatChannelLabel(channel: ChannelType): string {
   switch (channel) {
     case "WHATSAPP":
@@ -34,6 +42,18 @@ function formatChannelLabel(channel: ChannelType): string {
     default:
       return "Website widget";
   }
+}
+
+function formatBookingDate(startIso: string, timeZone?: string | null): string {
+  const dt = DateTime.fromISO(startIso, {
+    zone: timeZone || "utc"
+  });
+
+  if (!dt.isValid) {
+    return startIso;
+  }
+
+  return dt.toFormat("cccc, dd LLLL yyyy 'at' HH:mm");
 }
 
 /**
@@ -236,6 +256,99 @@ export async function sendUsageAlertPushToUser(
   } catch (err) {
     console.error(
       "[Push] USAGE -> Failed to send Expo usage alert push notifications",
+      err
+    );
+  }
+}
+
+/**
+ * Send a push notification when a new booking is created via the assistant.
+ */
+export async function sendBookingCreatedPush(
+  userId: string,
+  payload: BookingCreatedPushPayload
+): Promise<void> {
+  console.log("[Push] BOOKING -> called for user", userId, "payload:", payload);
+
+  const devices = await prisma.mobileDevice.findMany({
+    where: { userId }
+  });
+
+  console.log("[Push] BOOKING -> found devices:", devices.length);
+
+  if (!devices.length) {
+    console.log("[Push] BOOKING -> no devices, abort");
+    return;
+  }
+
+  const formattedDate = formatBookingDate(payload.start, payload.timeZone);
+  const title = "New booking created";
+  const body = `${payload.botName} has a new booking on ${formattedDate}`;
+
+  const notifications = devices
+    .map((device) => {
+      const token = device.expoPushToken;
+      if (!token) return null;
+
+      if (
+        !token.startsWith("ExponentPushToken") &&
+        !token.startsWith("ExpoPushToken")
+      ) {
+        console.warn("[Push] BOOKING -> skipping invalid token", token);
+        return null;
+      }
+
+      return {
+        to: token,
+        sound: "default" as const,
+        title,
+        body,
+        data: {
+          type: "BOOKING_CREATED",
+          botId: payload.botId,
+          start: payload.start
+        }
+      };
+    })
+    .filter(
+      (n): n is {
+        to: string;
+        sound: "default";
+        title: string;
+        body: string;
+        data: {
+          type: "BOOKING_CREATED";
+          botId: string;
+          start: string;
+        };
+      } => n !== null
+    );
+
+  console.log(
+    "[Push] BOOKING -> notifications to send to:",
+    notifications.map((n) => n.to)
+  );
+
+  if (!notifications.length) {
+    console.log("[Push] BOOKING -> no valid notifications after filtering");
+    return;
+  }
+
+  try {
+    const resp = await axios.post(EXPO_PUSH_URL, notifications, {
+      headers: {
+        "Content-Type": "application/json"
+      },
+      timeout: 10000
+    });
+
+    console.log(
+      "[Push] BOOKING -> Expo response:",
+      JSON.stringify(resp.data, null, 2)
+    );
+  } catch (err) {
+    console.error(
+      "[Push] BOOKING -> Failed to send Expo booking push notifications",
       err
     );
   }

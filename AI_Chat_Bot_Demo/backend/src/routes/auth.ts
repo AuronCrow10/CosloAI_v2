@@ -147,7 +147,8 @@ export const passwordSchema = z
 
 const registerSchema = z.object({
   email: z.string().email("Inserisci un indirizzo email valido"),
-  password: passwordSchema
+  password: passwordSchema,
+  inviteToken: z.string().optional()
 });
 
 async function markLegalAcceptanceIfMissing(userId: string) {
@@ -182,39 +183,104 @@ router.post("/register", async (req: Request, res: Response) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const { email, password } = parsed.data;
+  const { email, password, inviteToken } = parsed.data;
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) return res.status(400).json({ error: "Email already in use" });
 
   const passwordHash = await hashPassword(password);
 
   let referralCodeId: string | null = null;
-  const rawReferral = (req as any).cookies?.[REFERRAL_COOKIE_NAME] as string | undefined;
-  if (rawReferral) {
-    const valid = await validateReferralCode(rawReferral);
-    if (valid) referralCodeId = valid.referralCodeId;
+  let inviteRecord: { id: string; email: string; invitedById: string } | null = null;
+  let inviteBotIds: string[] = [];
+
+  if (inviteToken) {
+    const invite = await prisma.teamInvite.findUnique({
+      where: { token: inviteToken },
+      include: { bots: true }
+    });
+
+    if (
+      !invite ||
+      invite.usedAt ||
+      invite.revokedAt ||
+      invite.email.toLowerCase().trim() !== email.toLowerCase().trim()
+    ) {
+      return res.status(400).json({ error: "Invalid invite token" });
+    }
+
+    inviteRecord = { id: invite.id, email: invite.email, invitedById: invite.invitedById };
+    inviteBotIds = invite.bots.map((b) => b.botId);
+    if (inviteBotIds.length === 0) {
+      return res.status(400).json({ error: "Invite has no bots" });
+    }
+  } else {
+    const rawReferral = (req as any).cookies?.[REFERRAL_COOKIE_NAME] as string | undefined;
+    if (rawReferral) {
+      const valid = await validateReferralCode(rawReferral);
+      if (valid) referralCodeId = valid.referralCodeId;
+    }
   }
 
   const user = await prisma.user.create({
     data: {
       email,
       passwordHash,
-      role: "CLIENT",
+      role: inviteRecord ? "TEAM_MEMBER" : "CLIENT",
       emailVerified: false,
       referralCodeId: referralCodeId ?? undefined,
       referredAt: referralCodeId ? new Date() : undefined
     }
   });
 
+  if (inviteRecord) {
+    await prisma.$transaction([
+      prisma.teamMembership.createMany({
+        data: inviteBotIds.map((botId) => ({
+          userId: user.id,
+          botId,
+          grantedById: inviteRecord!.invitedById
+        })),
+        skipDuplicates: true
+      }),
+      prisma.teamInvite.update({
+        where: { id: inviteRecord.id },
+        data: { usedAt: new Date() }
+      })
+    ]);
+  }
+
   await sendVerificationEmail(user.id, email);
 
-  return res
-    .status(201)
-    .json({ message: "Registered; check your email to verify." });
+  return res.status(201).json({
+    message: inviteRecord
+      ? "Registered successfully. You can now log in."
+      : "Registered; check your email to verify."
+  });
 });
 
 const verifyEmailSchema = z.object({
   token: z.string()
+});
+
+const inviteLookupSchema = z.object({
+  token: z.string()
+});
+
+router.get("/invite", async (req: Request, res: Response) => {
+  const parsed = inviteLookupSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const invite = await prisma.teamInvite.findUnique({
+    where: { token: parsed.data.token }
+  });
+
+  if (!invite || invite.usedAt || invite.revokedAt) {
+    return res.status(404).json({ error: "Invite not found" });
+  }
+
+  return res.json({ email: invite.email });
 });
 
 router.post("/verify-email", async (req: Request, res: Response) => {
@@ -375,7 +441,7 @@ router.post("/login", loginIpLimiter, loginEmailLimiter, async (req: Request, re
   if (!ok) return res.status(400).json({ error: "Invalid credentials" });
 
   if (!user.emailVerified) {
-    console.warn("User logging in without verified email", { userId: user.id });
+    return res.status(403).json({ error: "Email not verified" });
   }
 
   // If MFA is enabled, return an MFA challenge instead of full session
@@ -389,6 +455,10 @@ router.post("/login", loginIpLimiter, loginEmailLimiter, async (req: Request, re
   const refreshToken = await createRefreshToken(user.id);
 
   await markLegalAcceptanceIfMissing(user.id);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() }
+  });
 
   setAuthCookies(res, accessToken, refreshToken);
 
@@ -550,6 +620,10 @@ router.post("/google", async (req: Request, res: Response) => {
     });
   }
 
+  if (!user.emailVerified) {
+    return res.status(403).json({ error: "Email not verified" });
+  }
+
   // If MFA is enabled, return MFA challenge (same as email/password flow)
   if (user.mfaEnabled && user.mfaTotpSecret) {
     const mfaToken = signMfaToken(user.id);
@@ -561,6 +635,10 @@ router.post("/google", async (req: Request, res: Response) => {
   const refreshToken = await createRefreshToken(user.id);
 
   await markLegalAcceptanceIfMissing(user.id);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() }
+  });
 
   setAuthCookies(res, accessToken, refreshToken);
 
@@ -610,6 +688,10 @@ router.post("/mfa/totp/verify", mfaIpLimiter, async (req: Request, res: Response
       .json({ error: "Two-factor authentication is not enabled for this user." });
   }
 
+  if (!user.emailVerified) {
+    return res.status(403).json({ error: "Email not verified" });
+  }
+
   const isValid = authenticator.verify({
     token: code,
     secret: user.mfaTotpSecret
@@ -619,11 +701,18 @@ router.post("/mfa/totp/verify", mfaIpLimiter, async (req: Request, res: Response
     return res.status(400).json({ error: "Invalid authentication code." });
   }
 
-  const tokenPayload = { sub: user.id, role: user.role as "ADMIN" | "CLIENT" | "REFERRER" };
+  const tokenPayload = {
+    sub: user.id,
+    role: user.role as "ADMIN" | "CLIENT" | "REFERRER" | "TEAM_MEMBER"
+  };
   const accessToken = signAccessToken(tokenPayload);
   const refreshToken = await createRefreshToken(user.id);
 
   await markLegalAcceptanceIfMissing(user.id);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() }
+  });
 
   setAuthCookies(res, accessToken, refreshToken);
 

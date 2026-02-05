@@ -15,6 +15,7 @@ type WeekdayKey =
 type BookingTimeWindow = {
   start: string; // "HH:MM"
   end: string; // "HH:MM"
+  maxSimultaneousBookings?: number | null;
 };
 
 export type BookingWeeklySchedule = Partial<Record<WeekdayKey, BookingTimeWindow[]>>;

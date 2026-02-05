@@ -41,6 +41,7 @@ import adminPaymentsRouter from "./routes/adminPayments";
 import adminOpenAIUsageRouter from "./routes/adminOpenAIUsage";
 import adminIntegrationsRouter from "./routes/adminIntegrations";
 import adminPlansRouter from "./routes/adminPlans";
+import teamRouter from "./routes/team";
 // NEW: booking reminder scheduler
 import { scheduleBookingReminderJob } from "./services/bookingReminderService";
 import { scheduleShopifyDataCleanupJob } from "./shopify/dataProtectionService";
@@ -311,6 +312,7 @@ app.use("/api/account", accountRouter);
 app.use("/api", dashboardRouter);
 app.use("/api", whatsappTemplatesRouter);
 app.use("/api", shopifyRouter);
+app.use("/api", teamRouter);
 
 
 app.use("/api", adminUsersRouter);

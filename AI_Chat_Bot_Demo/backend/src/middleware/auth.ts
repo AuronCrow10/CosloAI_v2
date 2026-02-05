@@ -8,7 +8,7 @@ declare global {
       user?: {
         id: string;
         email: string;
-        role: "ADMIN" | "CLIENT" | "REFERRER";
+        role: "ADMIN" | "CLIENT" | "REFERRER" | "TEAM_MEMBER";
       };
     }
   }
@@ -39,6 +39,27 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     email: user.email,
     role: user.role
   };
+
+  if (req.user.role === "TEAM_MEMBER") {
+    const path = (req.originalUrl || "").split("?")[0];
+    const method = req.method.toUpperCase();
+
+    const allowBotList = method === "GET" && path === "/api/bots";
+    const allowConversationList =
+      method === "GET" && path.startsWith("/api/conversations/bots/");
+    const allowConversationRead =
+      method === "GET" &&
+      (path.endsWith("/messages") || path.endsWith("/details")) &&
+      path.startsWith("/api/conversations/");
+    const allowConversationWrite =
+      method === "POST" &&
+      (path.endsWith("/send") || path.endsWith("/mode")) &&
+      path.startsWith("/api/conversations/");
+
+    if (!(allowBotList || allowConversationList || allowConversationRead || allowConversationWrite)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+  }
 
   return next();
 }

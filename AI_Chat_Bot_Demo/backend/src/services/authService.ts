@@ -12,7 +12,7 @@ const SALT_ROUNDS = 10;
 
 export interface JwtPayload {
   sub: string;
-  role: "ADMIN" | "CLIENT" | "REFERRER";
+  role: "ADMIN" | "CLIENT" | "REFERRER" | "TEAM_MEMBER";
 }
 
 export interface MfaTokenPayload {

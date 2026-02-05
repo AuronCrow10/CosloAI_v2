@@ -12,6 +12,7 @@ import { logMessage, HUMAN_HANDOFF_MESSAGE } from "../services/conversationServi
 import { sendGraphText } from "./metaWebhook";
 import { MessageRole, ConversationMode } from "@prisma/client";
 import type { Server as SocketIOServer } from "socket.io";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 
 
@@ -135,14 +136,8 @@ router.get(
     const { botId } = req.params;
 
     // 1) Sicurezza: verifica che il bot appartenga all'utente loggato
-    const bot = await prisma.bot.findFirst({
-      where: {
-        id: botId,
-        userId: req.user!.id
-      }
-    });
-
-    if (!bot) {
+    const canAccess = await userCanAccessBot(req.user!, botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Bot not found" });
     }
 
@@ -228,7 +223,11 @@ router.get(
       include: { bot: true }
     });
 
-    if (!conversation || conversation.bot.userId !== req.user!.id) {
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
@@ -258,7 +257,11 @@ router.get(
       include: { bot: true }
     });
 
-    if (!conversation || conversation.bot.userId !== req.user!.id) {
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
@@ -366,7 +369,11 @@ router.post(
       include: { bot: true }
     });
 
-    if (!conversation || conversation.bot.userId !== req.user!.id) {
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
@@ -450,7 +457,11 @@ router.post(
       include: { bot: true }
     });
 
-    if (!conversation || conversation.bot.userId !== req.user!.id) {
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
@@ -560,7 +571,11 @@ router.post(
       include: { bot: true }
     });
 
-    if (!conversation || conversation.bot.userId !== req.user!.id) {
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
@@ -690,7 +705,11 @@ router.post(
       include: { bot: true }
     });
 
-    if (!conversation || conversation.bot.userId !== req.user!.id) {
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
