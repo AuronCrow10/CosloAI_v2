@@ -12,7 +12,6 @@ import { prisma } from "../prisma/prisma";
 import {
   findOrCreateConversation,
   logMessage,
-  HUMAN_HANDOFF_MESSAGE,
   shouldSwitchToHumanMode
 } from "../services/conversationService";
 import { evaluateConversation } from "../services/conversationAnalyticsService";
@@ -25,7 +24,6 @@ import { ConversationMode } from "@prisma/client";
 
 
 import type { Server as SocketIOServer } from "socket.io";
-import { sendHumanConversationPush } from "../services/pushNotificationService";
 
 const router = Router();
 
@@ -58,6 +56,8 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Message cannot be empty" });
   }
 
+  let effectiveMessage = trimmedMessage;
+
   const convId =
     typeof conversationId === "string" && conversationId ? conversationId : uuidv4();
 
@@ -78,99 +78,30 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
 
       dbConversationId = convo.id;
 
-      // --- HUMAN fallback detection (before rate limit / AI) ---
+      // --- HUMAN fallback detection (WEB) ---
+      // Web channel should NOT switch to HUMAN mode. If the user asks for a human,
+      // treat it like a contact-info request and keep AI mode.
       const wantsHuman = shouldSwitchToHumanMode(trimmedMessage);
-
-      if (wantsHuman && convo.mode !== "HUMAN") {
-        const updated = await prisma.conversation.update({
-          where: { id: convo.id },
-          data: { mode: ConversationMode.HUMAN }
-        });
-
-        // Log user request + generic handoff message
-        try {
-          await logMessage({
-            conversationId: convo.id,
-            role: "USER",
-            content: trimmedMessage
-          });
-
-          await logMessage({
-            conversationId: convo.id,
-            role: "ASSISTANT",
-            content: HUMAN_HANDOFF_MESSAGE
-          });
-        } catch (logErr) {
-          console.error("Failed to log HUMAN handoff for web chat", logErr);
-        }
-
-        // NEW: notify the agent via Socket.IO
-        try {
-          const io = req.app.get("io") as SocketIOServer | undefined;
-
-          if (io && dbBot) {
-            const now = new Date();
-            io.to(`user:${dbBot.userId}`).emit("conversation:modeChanged", {
-              conversationId: convo.id,
-              botId: convo.botId,
-              mode: updated.mode,
-              channel: convo.channel,
-              lastMessageAt: now,
-              lastUserMessageAt: now
-            });
-          }
-        } catch (err) {
-          console.error(
-            "Failed to emit conversation:modeChanged for web chat handoff",
-            err
-          );
-        }
-
-        if (dbBot) {
-          try {
-            await sendHumanConversationPush(dbBot.userId, {
-              conversationId: convo.id,
-              botId: dbBot.id,
-              botName: dbBot.name,
-              channel: "WEB"
-            });
-          } catch (pushErr) {
-            console.error(
-              "Failed to send HUMAN conversation push notification (WEB)",
-              pushErr
-            );
-          }
-        }
-
-        // Keep response shape backwards-compatible
-        return res.json({
-          conversationId: convId,
-          reply: HUMAN_HANDOFF_MESSAGE,
-          humanMode: true
-        });
+      if (wantsHuman) {
+        effectiveMessage =
+          "The user asked to speak with a human. On the web channel, do NOT hand off. " +
+          "Treat this as a contact-info request. Use any available website or Shopify context to provide contact details " +
+          "(phone, email, address, hours, website, support options). " +
+          "Do NOT invent business facts. If contact info is not clearly supported by CONTEXT, say you don't know and suggest checking the website or contacting the business. " +
+          "Reply in the user's language when reasonable.\n\n" +
+          "User message: " + trimmedMessage;
       }
 
       if (convo.mode === "HUMAN") {
-        // Already in HUMAN mode: log the user message only, do NOT call the AI
+        // Web channel does not honor HUMAN mode; continue in AI mode.
         try {
-          await logMessage({
-            conversationId: convo.id,
-            role: "USER",
-            content: trimmedMessage
+          await prisma.conversation.update({
+            where: { id: convo.id },
+            data: { mode: ConversationMode.AI }
           });
-        } catch (logErr) {
-          console.error(
-            "Failed to log user message while in HUMAN mode (web chat)",
-            logErr
-          );
+        } catch (err) {
+          console.error("Failed to reset WEB conversation to AI mode", err);
         }
-
-        // Keep response shape backwards-compatible
-        return res.json({
-          conversationId: convId,
-          reply: HUMAN_HANDOFF_MESSAGE,
-          humanMode: true
-        });
       }
 
       // --- Rate limiting for this conversation (DB bots only, AI mode only) ---
@@ -205,7 +136,7 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
     }
 
     // --- Call chat service (only when in AI mode) ---
-    const reply = await generateBotReplyForSlug(slug, trimmedMessage, {
+    const reply = await generateBotReplyForSlug(slug, effectiveMessage, {
       conversationId: dbConversationId ?? convId
     });
     console.log("[RAW REPLY]", reply);

@@ -14,6 +14,10 @@ const inviteSchema = z.object({
   botIds: z.array(z.string().uuid()).min(1)
 });
 
+const memberBotsSchema = z.object({
+  botIds: z.array(z.string().uuid()).min(1)
+});
+
 router.post("/team/invites", async (req: Request, res: Response) => {
   if (!req.user || req.user.role === "TEAM_MEMBER") {
     return res.status(403).json({ error: "Forbidden" });
@@ -172,6 +176,66 @@ router.delete("/team/members/:userId", async (req: Request, res: Response) => {
     where: {
       userId: targetUserId,
       bot: { userId: req.user.id }
+    }
+  });
+
+  return res.json({ ok: true });
+});
+
+router.put("/team/members/:userId", async (req: Request, res: Response) => {
+  if (!req.user || req.user.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const parsed = memberBotsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const targetUserId = req.params.userId;
+  const botIds = Array.from(new Set(parsed.data.botIds));
+
+  const ownedBots = await prisma.bot.findMany({
+    where: { id: { in: botIds }, userId: req.user.id },
+    select: { id: true, name: true }
+  });
+
+  if (ownedBots.length !== botIds.length) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.teamMembership.findMany({
+      where: {
+        userId: targetUserId,
+        bot: { userId: req.user!.id }
+      },
+      select: { botId: true }
+    });
+
+    const existingIds = new Set(existing.map((m) => m.botId));
+    const nextIds = new Set(botIds);
+
+    const toRemove = existing.filter((m) => !nextIds.has(m.botId));
+    const toAdd = botIds.filter((id) => !existingIds.has(id));
+
+    if (toRemove.length > 0) {
+      await tx.teamMembership.deleteMany({
+        where: {
+          userId: targetUserId,
+          botId: { in: toRemove.map((m) => m.botId) }
+        }
+      });
+    }
+
+    if (toAdd.length > 0) {
+      await tx.teamMembership.createMany({
+        data: toAdd.map((botId) => ({
+          userId: targetUserId,
+          botId,
+          grantedById: req.user!.id
+        }))
+      });
     }
   });
 

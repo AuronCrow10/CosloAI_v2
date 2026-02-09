@@ -1,7 +1,11 @@
 import { Request, Response } from "express";
 import Stripe from "stripe";
 import { prisma } from "../prisma/prisma";
-import { stripe } from "../services/billingService";
+import {
+  stripe,
+  computeBotPricingForBot,
+  botToFeatureFlags
+} from "../services/billingService";
 import { config } from "../config";
 import {
   computeCommissionCents,
@@ -154,27 +158,97 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         };
         const status = (statusMap[sub.status] ?? "ACTIVE") as any;
 
-        await prisma.subscription.update({
-          where: { id: dbSub.id },
-          data: {
-            status,
-            currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
+        if (status === "CANCELED") {
+          const freePlan = await prisma.usagePlan.findFirst({
+            where: { isActive: true, monthlyAmountCents: 0 },
+            orderBy: { createdAt: "asc" }
+          });
+
+          if (freePlan) {
+            const bot = await prisma.bot.findUnique({
+              where: { id: dbSub.botId }
+            });
+
+            if (bot) {
+              const featurePricing = await computeBotPricingForBot(
+                botToFeatureFlags({
+                  useDomainCrawler: bot.useDomainCrawler,
+                  usePdfCrawler: bot.usePdfCrawler,
+                  channelWeb: bot.channelWeb,
+                  channelWhatsapp: bot.channelWhatsapp,
+                  channelMessenger: bot.channelMessenger,
+                  channelInstagram: bot.channelInstagram,
+                  useCalendar: bot.useCalendar,
+                  leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+                  leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+                  leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+                })
+              );
+
+              const compactPlanSnapshot = {
+                f: featurePricing.featureCodes,
+                fp: 0,
+                p: freePlan.code,
+                pt: freePlan.monthlyAmountCents,
+                t: freePlan.monthlyAmountCents,
+                c: freePlan.currency
+              };
+
+              await prisma.subscription.update({
+                where: { id: dbSub.id },
+                data: {
+                  status: "ACTIVE",
+                  currency: freePlan.currency,
+                  usagePlanId: freePlan.id,
+                  stripeCustomerId: `free_${bot.userId}`,
+                  stripeSubscriptionId: `free_${bot.id}`,
+                  stripePriceId: "",
+                  planSnapshotJson: compactPlanSnapshot
+                }
+              });
+
+              await prisma.bot.update({
+                where: { id: dbSub.botId },
+                data: { status: "ACTIVE" }
+              });
+            }
+          } else {
+            await prisma.subscription.update({
+              where: { id: dbSub.id },
+              data: {
+                status,
+                currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
+              }
+            });
+
+            await prisma.bot.update({
+              where: { id: dbSub.botId },
+              data: { status: "CANCELED" }
+            });
           }
-        });
-
-        let botStatus: "ACTIVE" | "SUSPENDED" | "CANCELED";
-        if (status === "ACTIVE" || status === "TRIALING") {
-          botStatus = "ACTIVE";
-        } else if (status === "CANCELED") {
-          botStatus = "CANCELED";
         } else {
-          botStatus = "SUSPENDED";
-        }
+          await prisma.subscription.update({
+            where: { id: dbSub.id },
+            data: {
+              status,
+              currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
+            }
+          });
 
-        await prisma.bot.update({
-          where: { id: dbSub.botId },
-          data: { status: botStatus }
-        });
+          let botStatus: "ACTIVE" | "SUSPENDED" | "CANCELED";
+          if (status === "ACTIVE" || status === "TRIALING") {
+            botStatus = "ACTIVE";
+          } else if (status === "CANCELED") {
+            botStatus = "CANCELED";
+          } else {
+            botStatus = "SUSPENDED";
+          }
+
+          await prisma.bot.update({
+            where: { id: dbSub.botId },
+            data: { status: botStatus }
+          });
+        }
 
         // ✅ End attribution when subscription is not active/trialing
         const isActive = isStripeSubActive(sub.status);

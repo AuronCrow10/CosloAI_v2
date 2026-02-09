@@ -38,6 +38,11 @@ type UsagePlanLite = {
   updatedAt: Date;
 };
 
+type StripeCancelInfo = {
+  cancelAtPeriodEnd: boolean;
+  periodEnd: string | null;
+};
+
 type PaymentWithBotLite = {
   id: string;
   botId: string;
@@ -120,6 +125,40 @@ router.get("/billing/overview", async (req, res) => {
     });
 
     const subscriptions: any[] = [];
+
+    const cancelInfoMap = new Map<string, StripeCancelInfo>();
+    const stripeClient = stripe;
+    if (stripeClient) {
+      const stripeSubsToFetch = bots
+        .map((b) => b.subscription)
+        .filter(
+          (sub): sub is NonNullable<typeof sub> =>
+            !!sub &&
+            !!sub.stripeSubscriptionId &&
+            !sub.stripeSubscriptionId.startsWith("free_")
+        );
+
+      await Promise.all(
+        stripeSubsToFetch.map(async (sub) => {
+          try {
+            const stripeSub = await stripeClient.subscriptions.retrieve(
+              sub.stripeSubscriptionId
+            );
+            cancelInfoMap.set(sub.botId, {
+              cancelAtPeriodEnd: !!stripeSub.cancel_at_period_end,
+              periodEnd: stripeSub.current_period_end
+                ? new Date(stripeSub.current_period_end * 1000).toISOString()
+                : null
+            });
+          } catch (err) {
+            console.error(
+              "Failed to fetch Stripe subscription cancel info",
+              err
+            );
+          }
+        })
+      );
+    }
 
     for (const bot of bots) {
       const sub = bot.subscription;
@@ -219,6 +258,11 @@ router.get("/billing/overview", async (req, res) => {
         currency
       );
 
+      const cancelInfo = cancelInfoMap.get(bot.id) ?? {
+        cancelAtPeriodEnd: false,
+        periodEnd: null
+      };
+
       subscriptions.push({
         botId: bot.id,
         botName: bot.name,
@@ -250,7 +294,9 @@ router.get("/billing/overview", async (req, res) => {
         whatsappUsagePercent,
 
         periodStart: from,
-        periodEnd: to
+        periodEnd: to,
+        cancelAtPeriodEnd: cancelInfo.cancelAtPeriodEnd,
+        cancelAtPeriodEndDate: cancelInfo.periodEnd
       });
     }
 
@@ -736,12 +782,16 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
  */
 router.post("/bots/:id/cancel-subscription", requireAuth, async (req, res) => {
   try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe is not configured" });
+    }
+
     const botId = req.params.id;
     const userId = (req as any).user.id as string;
 
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      include: { subscription: true }
+      include: { subscription: { include: { usagePlan: true } } }
     });
 
     if (!bot || bot.userId !== userId) {
@@ -752,27 +802,33 @@ router.post("/bots/:id/cancel-subscription", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "No active subscription for this bot" });
     }
 
-    const stripeSubscriptionId = bot.subscription.stripeSubscriptionId;
-
-    if (stripe) {
-      try {
-        await stripe.subscriptions.cancel(stripeSubscriptionId);
-      } catch (err) {
-        console.error("Error canceling Stripe subscription", err);
-      }
+    const isFreePlan =
+      (bot.subscription.usagePlan?.monthlyAmountCents ?? 0) === 0;
+    if (isFreePlan || bot.subscription.stripeSubscriptionId.startsWith("free_")) {
+      return res.status(400).json({ error: "Free plans cannot be canceled" });
     }
 
-    await prisma.subscription.update({
-      where: { id: bot.subscription.id },
-      data: { status: "CANCELED" }
-    });
+    const stripeSubscriptionId = bot.subscription.stripeSubscriptionId;
 
-    const updatedBot = await prisma.bot.update({
-      where: { id: botId },
-      data: { status: "CANCELED" }
-    });
+    const updatedStripeSub = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      {
+        cancel_at_period_end: true,
+        metadata: {
+          botId: bot.id,
+          userId: String(bot.userId),
+          usagePlanId: bot.subscription.usagePlanId ?? ""
+        }
+      }
+    );
 
-    return res.json(updatedBot);
+    return res.json({
+      ok: true,
+      cancelAtPeriodEnd: !!updatedStripeSub.cancel_at_period_end,
+      periodEnd: updatedStripeSub.current_period_end
+        ? new Date(updatedStripeSub.current_period_end * 1000).toISOString()
+        : null
+    });
   } catch (err) {
     console.error("Error canceling subscription", err);
     return res.status(500).json({ error: "Failed to cancel subscription" });
