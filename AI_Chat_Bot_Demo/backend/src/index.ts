@@ -41,6 +41,7 @@ import adminPaymentsRouter from "./routes/adminPayments";
 import adminOpenAIUsageRouter from "./routes/adminOpenAIUsage";
 import adminIntegrationsRouter from "./routes/adminIntegrations";
 import adminPlansRouter from "./routes/adminPlans";
+import adminConversationsRouter from "./routes/adminConversations";
 import teamRouter from "./routes/team";
 // NEW: booking reminder scheduler
 import { scheduleBookingReminderJob } from "./services/bookingReminderService";
@@ -324,6 +325,7 @@ app.use("/api", adminPaymentsRouter);
 app.use("/api", adminOpenAIUsageRouter);
 app.use("/api", adminIntegrationsRouter);
 app.use("/api", adminPlansRouter);
+app.use("/api", adminConversationsRouter);
 
 
 // Chat & webhooks
