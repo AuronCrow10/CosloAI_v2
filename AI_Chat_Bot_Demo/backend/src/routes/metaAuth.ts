@@ -226,7 +226,8 @@ const stateToken = jwt.sign(
               "pages_show_list",
               "pages_messaging",
               "pages_manage_metadata",
-              "business_management"
+              "business_management",
+              "leads_retrieval"
             ]
           : [
               "pages_show_list",
