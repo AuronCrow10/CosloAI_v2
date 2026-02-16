@@ -614,7 +614,7 @@ router.post(
             {
               params: {
                 subscribed_fields:
-                  "messages,messaging_postbacks,message_reactions",
+                  "messages,messaging_postbacks,message_reactions,leadgen",
                 access_token: pageAccessToken
               },
               timeout: 10000
