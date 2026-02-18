@@ -61,6 +61,17 @@ function shortId(v: unknown, keepStart = 6, keepEnd = 4) {
   return `${s.slice(0, keepStart)}…${s.slice(-keepEnd)}`;
 }
 
+function safeStatusErrors(errs: unknown) {
+  if (!Array.isArray(errs)) return errs;
+  return errs.slice(0, 3).map((e) => {
+    const item: any = e;
+    return {
+      code: item?.code,
+      title: item?.title,
+      details: item?.details
+    };
+  });
+}
 function safeSnippet(text: string, maxLen = 90) {
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
@@ -260,6 +271,23 @@ router.post("/", async (req: Request, res: Response) => {
         const value = change?.value;
         const metadata = value?.metadata;
         const phoneNumberId: string | undefined = metadata?.phone_number_id;
+
+        const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
+        if (statuses.length > 0) {
+          for (const st of statuses) {
+            logLine("INFO", "WA", "message status", {
+              req: requestId,
+              phone: shortId(phoneNumberId),
+              id: shortId(st?.id),
+              status: st?.status,
+              recipient: shortId(st?.recipient_id),
+              ts: st?.timestamp,
+              errors: safeStatusErrors(st?.errors),
+              conversation: st?.conversation,
+              pricing: st?.pricing
+            });
+          }
+        }
 
         const messages = Array.isArray(value?.messages) ? value.messages : [];
         if (!phoneNumberId || messages.length === 0) continue;
@@ -743,3 +771,168 @@ try {
 });
 
 export default router;
+
+    [ordered]@{ code = $item.code; title = $item.title; details = $item.details }
+  }
+}
+function safeStatusErrors(errs: unknown) {
+  if (!Array.isArray(errs)) return errs;
+  return errs.slice(0, 3).map((e) => {
+    const item: any = e;
+    return {
+      code: item?.code,
+      title: item?.title,
+      details: item?.details
+    };
+  });
+}
+function safeSnippet(text: string, maxLen = 90) {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
+}
+
+function formatVal(v: unknown): string {
+  if (v === undefined || v === null) return "";
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+
+  if (typeof v === "string") {
+    const needsQuotes = /[\s"=|]/.test(v);
+    return needsQuotes ? JSON.stringify(v) : v;
+  }
+
+  return util.inspect(v, { depth: 2, breakLength: 160, compact: true });
+}
+
+function fmtCtx(ctx: Record<string, unknown>) {
+  const entries = Object.entries(ctx)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => [k, v] as const);
+
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  return entries.map(([k, v]) => `${k}=${formatVal(v)}`).join(" ");
+}
+
+function logLine(level: Level, src: "WA" | "META", msg: string, ctx: Record<string, unknown> = {}) {
+  if (LEVEL_WEIGHT[level] < LEVEL_WEIGHT[LOG_LEVEL]) return;
+
+  const line =
+    `${ts()} | ${level.padEnd(5)} | ${src.padEnd(4)} | ${msg.padEnd(28)} | ` +
+    fmtCtx(ctx);
+
+  if (level === "ERROR") console.error(line);
+  else if (level === "WARN") console.warn(line);
+  else console.log(line);
+}
+
+function getRequestId(req: Request) {
+  const existing =
+    (req.headers["x-request-id"] as string | undefined) ||
+    (req.headers["x-correlation-id"] as string | undefined);
+  return existing || crypto.randomUUID();
+}
+
+function verifyWhatsAppSignature(req: Request): boolean {
+  const secret = config.metaAppSecret;
+  if (!secret) return false;
+
+  const signature = req.header("x-hub-signature-256");
+  if (!signature || !signature.startsWith("sha256=")) return false;
+
+  const rawBody = (req as any).rawBody as Buffer | undefined;
+  if (!rawBody || rawBody.length === 0) return false;
+
+  const expected = `sha256=${crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest("hex")}`;
+
+  try {
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeAxiosError(err: unknown) {
+  if (!axios.isAxiosError(err)) return { status: undefined, data: err };
+  return { status: err.response?.status, data: err.response?.data ?? err.message };
+}
+
+export function isWhatsAppAuthError(err: unknown): boolean {
+  const ax = axios.isAxiosError(err) ? err : undefined;
+  const status = ax?.response?.status;
+  const code = (ax?.response?.data as any)?.error?.code;
+  return status === 401 || status === 403 || code === 190;
+}
+
+function extractWaMessageId(data: unknown): string | undefined {
+  const d: any = data;
+  return d?.messages?.[0]?.id || d?.message_id || d?.id;
+}
+
+function extractImageUrls(text: string): string[] {
+  const urls: string[] = [];
+  const regex = /!\[[^\]]*\]\((https?:\/\/[^)]+)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    urls.push(match[1]);
+  }
+  return urls;
+}
+
+function stripImageMarkdown(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function stripMarkdownLinks(text: string): string {
+  return text.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, "$1");
+}
+
+function stripActionLines(text: string): string {
+  const lines = text.split("\n");
+  const cleaned = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^\[.+\]\(https?:\/\/[^)]+\)$/.test(trimmed)) return false;
+    if (/^https?:\/\/\S+$/.test(trimmed)) return false;
+    if (
+      /^(view product|add to cart|vedi prodotto|aggiungi al carrello|ver producto|agregar al carrito)$/i.test(
+        trimmed
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
+  return cleaned.join("\n");
+}
+
+function stripUrls(text: string): string {
+  return text.replace(/https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").trim();
+}
+
+export async function markWhatsAppNeedsReconnect(requestId: string, channelId: string, context: string) {
+  try {
+    const channel = await prisma.botChannel.findUnique({ where: { id: channelId } });
+    const currentMeta = (channel?.meta as any) || {};
+
+    await prisma.botChannel.update({
+      where: { id: channelId },
+      data: {
+        meta: { ...currentMeta, needsReconnect: true }
+      }
+    });
+
+    logLine("WARN", "WA", "marked needsReconnect", { req: requestId, channel: channelId, ctx: context });
+  } catch (e: unknown) {
+    logLine("ERROR", "WA", "mark needsReconnect failed", { req: requestId, channel: channelId });
+    logLine("DEBUG", "WA", "mark needsReconnect failed details", { req: requestId, details: e });
+  }
+}
+
