@@ -3,6 +3,8 @@ import { prisma } from "../prisma/prisma";
 import { shopifyAdminGraphql } from "./client";
 import { decryptAccessToken, getShopByDomain } from "./shopService";
 import { syncShopifyPolicies } from "./policyService";
+import { buildShopCatalogSchema } from "../services/catalogIntelligenceService";
+import { buildShopCatalogContext } from "../services/shopCatalogContextService";
 import { ShopifyProductSummary } from "./types";
 
 type ShopifyVariantNode = {
@@ -287,6 +289,27 @@ export async function syncShopifyProducts(shopDomain: string) {
     });
   }
 
+  if (shop.botId) {
+    try {
+      await buildShopCatalogSchema(shop.botId, shopDomain);
+    } catch (err) {
+      console.warn("[shopify] catalog schema build failed", {
+        shopDomain,
+        botId: shop.botId,
+        error: (err as Error)?.message || err
+      });
+    }
+    try {
+      await buildShopCatalogContext(shop.botId, shopDomain);
+    } catch (err) {
+      console.warn("[shopify] catalog context build failed", {
+        shopDomain,
+        botId: shop.botId,
+        error: (err as Error)?.message || err
+      });
+    }
+  }
+
   return { syncedCount, shopCurrency };
 }
 
@@ -518,6 +541,9 @@ export async function searchShopifyProducts(
     limit?: number;
     cursor?: number;
     status?: string;
+    productType?: string;
+    tagFilters?: string[];
+    optionFilters?: Array<{ name: string; value: string }>;
   }
 ): Promise<{ items: ShopifyProductSummary[]; nextCursor: number | null }> {
   const shop = await getShopByDomain(shopDomain);
@@ -532,6 +558,7 @@ export async function searchShopifyProducts(
   if (params.status) {
     filters.push(Prisma.sql`p."status" = ${params.status}`);
   }
+  filters.push(Prisma.sql`p."publishedAt" IS NOT NULL`);
 
   if (params.priceMin != null) {
     filters.push(Prisma.sql`p."priceMax" >= ${params.priceMin}`);
@@ -541,10 +568,53 @@ export async function searchShopifyProducts(
     filters.push(Prisma.sql`p."priceMin" <= ${params.priceMax}`);
   }
 
+  if (params.productType && params.productType.trim()) {
+    filters.push(Prisma.sql`p."productType" ILIKE ${params.productType.trim()}`);
+  }
+
+  if (params.tagFilters && params.tagFilters.length > 0) {
+    filters.push(
+      Prisma.sql`p."tags" && ${params.tagFilters.map((tag) => tag.trim()).filter(Boolean)}`
+    );
+  }
+
   if (params.query && params.query.trim()) {
     filters.push(
       Prisma.sql`p."searchVector" @@ plainto_tsquery('simple', ${params.query.trim()})`
     );
+  }
+
+  if (params.optionFilters && params.optionFilters.length > 0) {
+    const optionClauses = params.optionFilters
+      .filter((opt) => opt.name && opt.value)
+      .map((opt) =>
+        Prisma.sql`EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v."selectedOptions") elem
+          WHERE lower(elem->>'name') = lower(${opt.name})
+            AND (
+              lower(elem->>'value') = lower(${opt.value})
+              OR (
+                regexp_replace(elem->>'value', '[^0-9]+', '', 'g') =
+                  regexp_replace(${opt.value}, '[^0-9]+', '', 'g')
+                AND regexp_replace(${opt.value}, '[^0-9]+', '', 'g') <> ''
+              )
+            )
+        )`
+      );
+
+    if (optionClauses.length > 0) {
+      filters.push(Prisma.sql`
+        EXISTS (
+          SELECT 1
+          FROM "ShopifyVariant" v
+          WHERE v."productDbId" = p."id"
+            AND v."shopId" = p."shopId"
+            AND v."availableForSale" = true
+            AND ${Prisma.join(optionClauses, " AND ")}
+        )
+      `);
+    }
   }
 
   const whereSql = Prisma.sql`WHERE ${Prisma.join(filters, " AND ")}`;

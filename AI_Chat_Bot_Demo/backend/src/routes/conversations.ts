@@ -1,4 +1,4 @@
-// routes/conversations.ts
+﻿// routes/conversations.ts
 import { Router, Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
@@ -8,11 +8,17 @@ import {
 } from "../services/conversationAnalyticsService";
 import axios from "axios";
 import { config } from "../config";
-import { logMessage, HUMAN_HANDOFF_MESSAGE } from "../services/conversationService";
+import { logMessage, getHumanHandoffMessage } from "../services/conversationService";
 import { sendGraphText } from "./metaWebhook";
 import { MessageRole, ConversationMode } from "@prisma/client";
 import type { Server as SocketIOServer } from "socket.io";
 import { userCanAccessBot } from "../services/teamAccessService";
+import {
+  computeAssignedStyle,
+  computeStyleUsed,
+  RevenueAIMode,
+  RevenueAIStyle
+} from "../services/revenueAIService";
 
 
 
@@ -286,7 +292,7 @@ router.get(
         businessSubtitle = displayPhoneNumber || channel.externalId;
         if (verifiedName) {
           businessSubtitle = businessSubtitle
-            ? `${businessSubtitle} – ${verifiedName}`
+            ? `${businessSubtitle} â€“ ${verifiedName}`
             : verifiedName;
         }
       } else if (conversation.channel === "FACEBOOK") {
@@ -321,6 +327,46 @@ router.get(
     });
 
     const lastUserMessageAt = lastUserMessage?.createdAt ?? null;
+    const revenueAISession = await prisma.revenueAISession.findUnique({
+      where: { conversationId: conversation.id }
+    });
+
+    const mode = (conversation.bot?.revenueAIMode || "AUTO") as RevenueAIMode;
+    const assignedStyle = revenueAISession?.assignedStyle
+      ? (revenueAISession.assignedStyle as RevenueAIStyle)
+      : computeAssignedStyle(conversation.id);
+
+    const now = new Date();
+    const sessionIdForOverride =
+      conversation.channel === "WEB" ? conversation.externalUserId : null;
+
+    const override = sessionIdForOverride
+      ? await prisma.revenueAIStyleOverride.findFirst({
+          where: {
+            botId: conversation.botId,
+            sessionId: sessionIdForOverride,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }]
+          },
+          orderBy: { updatedAt: "desc" }
+        })
+      : await prisma.revenueAIStyleOverride.findFirst({
+          where: {
+            botId: conversation.botId,
+            conversationId: conversation.id,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }]
+          },
+          orderBy: { updatedAt: "desc" }
+        });
+
+    const overrideStyle = override?.styleOverride
+      ? (override.styleOverride as RevenueAIStyle)
+      : null;
+
+    const effectiveStyle = computeStyleUsed({
+      mode,
+      assignedStyle,
+      overrideStyle
+    });
 
     return res.json({
       id: conversation.id,
@@ -331,12 +377,24 @@ router.get(
       lastMessageAt: conversation.lastMessageAt,
       lastUserMessageAt,
       mode: conversation.mode,
+      revenueAI: {
+        mode,
+        assignedStyle,
+        overrideStyle,
+        overrideExpiresAt: override?.expiresAt ?? null,
+        overrideScope: override?.sessionId
+          ? "SESSION"
+          : override?.conversationId
+          ? "CONVERSATION"
+          : null,
+        effectiveStyle
+      },
       business: {
         title: businessTitle,
         subtitle: businessSubtitle
       },
       user: {
-        identifier: conversation.externalUserId, // IG/FB PSID, phone, web id…
+        identifier: conversation.externalUserId, // IG/FB PSID, phone, web idâ€¦
         displayName: userDisplayName            // IG username, FB name, etc.
       }
     });
@@ -388,13 +446,19 @@ router.post(
       }
     });
 
-    // When switching into HUMAN mode manually, drop the generic handoff message
+    // When switching into HUMAN mode manually, drop the localized handoff message
     if (mode === "HUMAN") {
       try {
+        const lastUserMessage = await prisma.message.findFirst({
+          where: { conversationId: conversation.id, role: MessageRole.USER },
+          orderBy: { createdAt: "desc" }
+        });
+        const handoffMessage = getHumanHandoffMessage(lastUserMessage?.content ?? "");
+
         await logMessage({
           conversationId: conversation.id,
           role: MessageRole.ASSISTANT,
-          content: HUMAN_HANDOFF_MESSAGE
+          content: handoffMessage
         });
       } catch (err) {
         console.error("Failed to log HUMAN handoff message", err);
@@ -428,6 +492,151 @@ router.post(
     }
 
     return res.json({ ok: true, mode: updated.mode });
+  }
+);
+
+/**
+ * POST /api/conversations/:id/revenue-ai-style
+ *
+ * Body: { style: "AUTO" | "SOFT" | "CLOSER", expiresInHours?: number }
+ */
+router.post(
+  "/conversations/:id/revenue-ai-style",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { style, expiresInHours } = req.body || {};
+
+    if (!style || !["AUTO", "SOFT", "CLOSER"].includes(style)) {
+      return res.status(400).json({ error: "Invalid style" });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id },
+      include: { bot: true }
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    const canAccess = await userCanAccessBot(req.user!, conversation.botId);
+    if (!canAccess) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    const isWeb = conversation.channel === "WEB";
+    if (!isWeb && expiresInHours) {
+      return res
+        .status(400)
+        .json({ error: "Expiration is only supported for web sessions" });
+    }
+    if (isWeb && expiresInHours && Number(expiresInHours) !== 24) {
+      return res
+        .status(400)
+        .json({ error: "Only 24h expiration is supported" });
+    }
+
+    const scope = isWeb ? "SESSION" : "CONVERSATION";
+    const sessionId = isWeb ? conversation.externalUserId : null;
+    const now = new Date();
+    const expiresAt =
+      isWeb && Number(expiresInHours) === 24
+        ? new Date(now.getTime() + 24 * 60 * 60 * 1000)
+        : null;
+
+    const existingOverride =
+      scope === "SESSION"
+        ? await prisma.revenueAIStyleOverride.findFirst({
+            where: { botId: conversation.botId, sessionId }
+          })
+        : await prisma.revenueAIStyleOverride.findFirst({
+            where: { botId: conversation.botId, conversationId: conversation.id }
+          });
+
+    if (style === "AUTO") {
+      if (scope === "SESSION") {
+        await prisma.revenueAIStyleOverride.deleteMany({
+          where: { botId: conversation.botId, sessionId }
+        });
+      } else {
+        await prisma.revenueAIStyleOverride.deleteMany({
+          where: { botId: conversation.botId, conversationId: conversation.id }
+        });
+        await prisma.revenueAISession.updateMany({
+          where: { conversationId: conversation.id },
+          data: { styleOverride: null }
+        });
+      }
+
+      await prisma.revenueAIStyleOverrideAudit.create({
+        data: {
+          botId: conversation.botId,
+          conversationId: scope === "CONVERSATION" ? conversation.id : null,
+          sessionId: scope === "SESSION" ? sessionId : null,
+          fromStyle: existingOverride?.styleOverride ?? null,
+          toStyle: null,
+          expiresAt: null,
+          createdByUserId: req.user!.id
+        }
+      });
+
+      return res.json({
+        ok: true,
+        style: "AUTO",
+        expiresAt: null,
+        scope
+      });
+    }
+
+    const overridePayload = {
+      botId: conversation.botId,
+      conversationId: scope === "CONVERSATION" ? conversation.id : null,
+      sessionId: scope === "SESSION" ? sessionId : null,
+      styleOverride: style,
+      expiresAt,
+      createdByUserId: req.user!.id
+    };
+
+    if (existingOverride) {
+      await prisma.revenueAIStyleOverride.update({
+        where: { id: existingOverride.id },
+        data: {
+          styleOverride: style,
+          expiresAt,
+          createdByUserId: req.user!.id
+        }
+      });
+    } else {
+      await prisma.revenueAIStyleOverride.create({
+        data: overridePayload
+      });
+    }
+
+    if (scope === "CONVERSATION") {
+      await prisma.revenueAISession.updateMany({
+        where: { conversationId: conversation.id },
+        data: { styleOverride: style }
+      });
+    }
+
+    await prisma.revenueAIStyleOverrideAudit.create({
+      data: {
+        botId: conversation.botId,
+        conversationId: scope === "CONVERSATION" ? conversation.id : null,
+        sessionId: scope === "SESSION" ? sessionId : null,
+        fromStyle: existingOverride?.styleOverride ?? null,
+        toStyle: style,
+        expiresAt,
+        createdByUserId: req.user!.id
+      }
+    });
+
+    return res.json({
+      ok: true,
+      style,
+      expiresAt,
+      scope
+    });
   }
 );
 
@@ -826,3 +1035,4 @@ router.post(
 );
 
 export default router;
+

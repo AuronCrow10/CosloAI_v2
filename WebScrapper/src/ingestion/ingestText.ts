@@ -30,13 +30,20 @@ export async function ingestTextForClient(params: {
   text: string;
   url: string;
   domain: string;
+  sourceId?: string | null;
   client: Client;
   deps: IngestDeps;
 }): Promise<IngestResult> {
-  const { text, url, domain, client, deps } = params;
+  const { text, url, domain, sourceId, client, deps } = params;
   const { config, db, embeddings } = deps;
 
-  const chunks: TextChunk[] = chunkText(text, url, domain, config.chunking);
+  const chunks: TextChunk[] = chunkText(
+    text,
+    url,
+    domain,
+    config.chunking,
+    sourceId ?? null,
+  );
 
   if (chunks.length === 0) {
     logger.info(`No chunks produced for ${url}`);

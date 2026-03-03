@@ -2,6 +2,10 @@
 
 import { prisma } from "../prisma/prisma";
 import { Bot as DbBot, BotChannel, ChannelType } from "@prisma/client";
+import {
+  KnowledgeRetrievalProfile,
+  resolveKnowledgeRetrievalProfile
+} from "../knowledge/knowledgeRetrievalProfiles";
 
 type WeekdayKey =
   | "monday"
@@ -103,11 +107,27 @@ export type DemoBotConfig = {
   name: string;
   knowledgeSource?: "RAG" | "SHOPIFY";
   knowledgeClientId: string | null;
+  knowledgeRetrievalProfile?: KnowledgeRetrievalProfile;
   domain: string;
   systemPrompt: string;
   booking?: BookingConfig;
   channels?: BotChannels;
   description?: string;
+
+  // Revenue AI settings (DB bots only; demo defaults fall back)
+  revenueAIEnabled?: boolean;
+  revenueAIMode?: "AUTO" | "SOFT" | "CLOSER";
+  revenueAIOfferEveryXMessages?: number;
+  revenueAIMaxOffersPerSession?: number;
+  revenueAICooldownMinutes?: number;
+  revenueAIDedupeHours?: number;
+  revenueAIAttributionWindowHours?: number;
+  revenueAIGuardrailsEnabled?: boolean;
+  revenueAIUpsellDeltaMinPct?: number;
+  revenueAIUpsellDeltaMaxPct?: number;
+  revenueAIMaxRecommendations?: number;
+  revenueAIAggressiveness?: number;
+  revenueAICategoryComplementMap?: any;
 
   // NEW: for usage attribution
   ownerUserId?: string | null;
@@ -123,6 +143,7 @@ const DEMO_BOTS: DemoBotConfig[] = [
     name: "Cosmin Marica Full Stack Developer",
     knowledgeSource: "RAG",
     knowledgeClientId: "fba15b42-da66-402f-84dc-13aafa6ddc38",
+    knowledgeRetrievalProfile: "balanced",
     domain: "cosminmarica.dev",
     systemPrompt:
       "You are the helpful assistant for Cosmin, a full stack web and blockchain developer. Answer only using information from the provided CONTEXT.",
@@ -330,11 +351,40 @@ function mapDbBotToDemoConfig(
     name: dbBot.name,
     knowledgeSource: (dbBot as any).knowledgeSource ?? "RAG",
     knowledgeClientId: dbBot.knowledgeClientId,
+    knowledgeRetrievalProfile: resolveKnowledgeRetrievalProfile(
+      (dbBot as any).knowledgeRetrievalProfile
+    ),
     domain: dbBot.domain || "",
     systemPrompt: dbBot.systemPrompt,
     description: dbBot.description || undefined,
     booking: buildBookingFromDb(dbBot),
     channels: buildChannelsFromDb(dbBot),
+
+    revenueAIEnabled: (dbBot as any).revenueAIEnabled ?? false,
+    revenueAIMode: (dbBot as any).revenueAIMode ?? "AUTO",
+    revenueAIOfferEveryXMessages:
+      (dbBot as any).revenueAIOfferEveryXMessages ?? 6,
+    revenueAIMaxOffersPerSession:
+      (dbBot as any).revenueAIMaxOffersPerSession ?? 2,
+    revenueAICooldownMinutes:
+      (dbBot as any).revenueAICooldownMinutes ?? 15,
+    revenueAIDedupeHours: (dbBot as any).revenueAIDedupeHours ?? 24,
+    revenueAIAttributionWindowHours:
+      (dbBot as any).revenueAIAttributionWindowHours ?? 24,
+    revenueAIGuardrailsEnabled:
+      (dbBot as any).revenueAIGuardrailsEnabled ?? true,
+    revenueAIUpsellDeltaMinPct:
+      (dbBot as any).revenueAIUpsellDeltaMinPct ?? 10,
+    revenueAIUpsellDeltaMaxPct:
+      (dbBot as any).revenueAIUpsellDeltaMaxPct ?? 35,
+    revenueAIMaxRecommendations:
+      (dbBot as any).revenueAIMaxRecommendations ?? 3,
+    revenueAIAggressiveness:
+      typeof (dbBot as any).revenueAIAggressiveness === "number"
+        ? (dbBot as any).revenueAIAggressiveness
+        : 0.5,
+    revenueAICategoryComplementMap:
+      (dbBot as any).revenueAICategoryComplementMap ?? null,
 
     // NEW: link back to DB entities for usage tracking
     ownerUserId: dbBot.userId,

@@ -29,6 +29,7 @@ import accountRouter from "./routes/account";
 import dashboardRouter from "./routes/dashboard";
 import whatsappTemplatesRouter from "./routes/whatsappTemplates";
 import shopifyRouter from "./routes/shopify";
+import revenueAIRouter from "./routes/revenueAI";
 import { prisma } from "./prisma/prisma";
 import { normalizeShopDomain } from "./shopify/shopService";
 
@@ -313,6 +314,7 @@ app.use("/api/account", accountRouter);
 app.use("/api", dashboardRouter);
 app.use("/api", whatsappTemplatesRouter);
 app.use("/api", shopifyRouter);
+app.use("/api", revenueAIRouter);
 app.use("/api", teamRouter);
 
 

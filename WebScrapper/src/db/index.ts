@@ -9,6 +9,7 @@ import {
 } from '../types.js';
 import { logger } from '../logger.js';
 import { EmbeddingModel, getModelDimensions } from '../embeddings/models.js';
+import { buildFallbackTsQuery, resolveFtsConfig } from '../utils/fts.js';
 
 type KnowledgeJobType = 'domain' | 'docs';
 
@@ -599,6 +600,7 @@ export class Database {
           client_id,
           domain,
           url,
+          source_id,
           chunk_index,
           chunk_text,
           chunk_hash,
@@ -606,7 +608,7 @@ export class Database {
         )
         VALUES (
           gen_random_uuid(),
-          $1, $2, $3, $4, $5, $6, $7::vector
+          $1, $2, $3, $4, $5, $6, $7, $8::vector
         )
         ON CONFLICT (client_id, chunk_hash)
         ${supportsActiveFlag ? 'DO UPDATE SET is_active = true' : 'DO NOTHING'}
@@ -616,6 +618,7 @@ export class Database {
           clientId,
           chunk.domain,
           chunk.url,
+          chunk.sourceId ?? null,
           chunk.chunkIndex,
           chunk.text,
           chunk.chunkHash,
@@ -669,6 +672,7 @@ export class Database {
             client_id,
             domain,
             url,
+            source_id,
             chunk_index,
             chunk_text,
             created_at,
@@ -688,6 +692,7 @@ export class Database {
             client_id,
             domain,
             url,
+            source_id,
             chunk_index,
             chunk_text,
             created_at,
@@ -709,6 +714,7 @@ export class Database {
             client_id,
             domain,
             url,
+            source_id,
             chunk_index,
             chunk_text,
             created_at,
@@ -727,6 +733,7 @@ export class Database {
             client_id,
             domain,
             url,
+            source_id,
             chunk_index,
             chunk_text,
             created_at,
@@ -746,6 +753,7 @@ export class Database {
         client_id: string;
         domain: string;
         url: string;
+        source_id: string | null;
         chunk_index: number;
         chunk_text: string;
         created_at: Date;
@@ -759,12 +767,155 @@ export class Database {
           clientId: row.client_id,
           domain: row.domain,
           url: row.url,
+          sourceId: row.source_id ?? null,
           chunkIndex: row.chunk_index,
           text: row.chunk_text,
           createdAt: row.created_at,
           score,
         };
       });
+    } finally {
+      client.release();
+    }
+  }
+
+  async searchClientChunksKeyword(params: {
+    clientId: string;
+    model: EmbeddingModel;
+    query: string;
+    domain?: string;
+    limit: number;
+    ftsLanguage?: string;
+  }): Promise<SearchResult[]> {
+    const { clientId, model, query, domain, limit, ftsLanguage } = params;
+    const { tableName } = this.getTableForModel(model);
+    const supportsActiveFlag = model === 'text-embedding-3-small';
+
+    const cleanedQuery = query.trim();
+    if (!cleanedQuery) return [];
+
+    const resolved = resolveFtsConfig(ftsLanguage);
+    const tsvColumn = resolved.column;
+    const tsConfig = resolved.config;
+    const fallbackQuery = buildFallbackTsQuery(cleanedQuery, resolved.language);
+
+    const client = await this.pool.connect();
+    try {
+      let sql: string;
+      let values: unknown[];
+
+      if (domain) {
+        sql = `
+          SELECT
+            id,
+            client_id,
+            domain,
+            url,
+            source_id,
+            chunk_index,
+            chunk_text,
+            created_at,
+            ts_rank_cd(${tsvColumn}, websearch_to_tsquery($3::regconfig, $4)) AS rank
+          FROM ${tableName}
+          WHERE client_id = $1
+            AND domain = $2
+            ${supportsActiveFlag ? 'AND is_active = true' : ''}
+            AND ${tsvColumn} @@ websearch_to_tsquery($3::regconfig, $4)
+          ORDER BY rank DESC
+          LIMIT $5
+        `;
+        values = [clientId, domain, tsConfig, cleanedQuery, limit];
+      } else {
+        sql = `
+          SELECT
+            id,
+            client_id,
+            domain,
+            url,
+            source_id,
+            chunk_index,
+            chunk_text,
+            created_at,
+            ts_rank_cd(${tsvColumn}, websearch_to_tsquery($2::regconfig, $3)) AS rank
+          FROM ${tableName}
+          WHERE client_id = $1
+            ${supportsActiveFlag ? 'AND is_active = true' : ''}
+            AND ${tsvColumn} @@ websearch_to_tsquery($2::regconfig, $3)
+          ORDER BY rank DESC
+          LIMIT $4
+        `;
+        values = [clientId, tsConfig, cleanedQuery, limit];
+      }
+
+      let res = await client.query<{
+        id: string;
+        client_id: string;
+        domain: string;
+        url: string;
+        source_id: string | null;
+        chunk_index: number;
+        chunk_text: string;
+        created_at: Date;
+        rank: number;
+      }>(sql, values);
+
+      if (res.rows.length === 0 && fallbackQuery) {
+        if (domain) {
+          sql = `
+            SELECT
+              id,
+              client_id,
+              domain,
+              url,
+              source_id,
+              chunk_index,
+              chunk_text,
+              created_at,
+              ts_rank_cd(${tsvColumn}, to_tsquery($3::regconfig, $4)) AS rank
+            FROM ${tableName}
+            WHERE client_id = $1
+              AND domain = $2
+              ${supportsActiveFlag ? 'AND is_active = true' : ''}
+              AND ${tsvColumn} @@ to_tsquery($3::regconfig, $4)
+            ORDER BY rank DESC
+            LIMIT $5
+          `;
+          values = [clientId, domain, tsConfig, fallbackQuery, limit];
+        } else {
+          sql = `
+            SELECT
+              id,
+              client_id,
+              domain,
+              url,
+              source_id,
+              chunk_index,
+              chunk_text,
+              created_at,
+              ts_rank_cd(${tsvColumn}, to_tsquery($2::regconfig, $3)) AS rank
+            FROM ${tableName}
+            WHERE client_id = $1
+              ${supportsActiveFlag ? 'AND is_active = true' : ''}
+              AND ${tsvColumn} @@ to_tsquery($2::regconfig, $3)
+            ORDER BY rank DESC
+            LIMIT $4
+          `;
+          values = [clientId, tsConfig, fallbackQuery, limit];
+        }
+        res = await client.query(sql, values);
+      }
+
+      return res.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        domain: row.domain,
+        url: row.url,
+        sourceId: row.source_id ?? null,
+        chunkIndex: row.chunk_index,
+        text: row.chunk_text,
+        createdAt: row.created_at,
+        score: Number(row.rank ?? 0),
+      }));
     } finally {
       client.release();
     }
@@ -777,6 +928,7 @@ export class Database {
     {
       id: string;
       url: string;
+      sourceId: string | null;
       chunkIndex: number;
       text: string;
       createdAt: Date;
@@ -787,12 +939,13 @@ export class Database {
       const res = await client.query<{
         id: string;
         url: string;
+        source_id: string | null;
         chunk_index: number;
         chunk_text: string;
         created_at: Date;
       }>(
         `
-        SELECT id, url, chunk_index, chunk_text, created_at
+        SELECT id, url, source_id, chunk_index, chunk_text, created_at
         FROM page_chunks_small
         WHERE client_id = $1
           AND domain = $2
@@ -804,6 +957,7 @@ export class Database {
       return res.rows.map((row) => ({
         id: row.id,
         url: row.url,
+        sourceId: row.source_id ?? null,
         chunkIndex: row.chunk_index,
         text: row.chunk_text,
         createdAt: row.created_at,
@@ -820,6 +974,7 @@ export class Database {
     {
       id: string;
       url: string;
+      sourceId: string | null;
       chunkIndex: number;
       text: string;
       createdAt: Date;
@@ -830,12 +985,13 @@ export class Database {
       const res = await client.query<{
         id: string;
         url: string;
+        source_id: string | null;
         chunk_index: number;
         chunk_text: string;
         created_at: Date;
       }>(
         `
-        SELECT id, url, chunk_index, chunk_text, created_at
+        SELECT id, url, source_id, chunk_index, chunk_text, created_at
         FROM page_chunks_small
         WHERE client_id = $1
           AND url = $2
@@ -847,6 +1003,72 @@ export class Database {
       return res.rows.map((row) => ({
         id: row.id,
         url: row.url,
+        sourceId: row.source_id ?? null,
+        chunkIndex: row.chunk_index,
+        text: row.chunk_text,
+        createdAt: row.created_at,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  async listChunksForClientBySourceRange(params: {
+    clientId: string;
+    model: EmbeddingModel;
+    sourceId?: string | null;
+    url?: string;
+    minIndex: number;
+    maxIndex: number;
+  }): Promise<
+    {
+      id: string;
+      clientId: string;
+      domain: string;
+      url: string;
+      sourceId: string | null;
+      chunkIndex: number;
+      text: string;
+      createdAt: Date;
+    }[]
+  > {
+    const { clientId, model, sourceId, url, minIndex, maxIndex } = params;
+    const { tableName } = this.getTableForModel(model);
+    const supportsActiveFlag = model === 'text-embedding-3-small';
+
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{
+        id: string;
+        client_id: string;
+        domain: string;
+        url: string;
+        source_id: string | null;
+        chunk_index: number;
+        chunk_text: string;
+        created_at: Date;
+      }>(
+        `
+        SELECT id, client_id, domain, url, source_id, chunk_index, chunk_text, created_at
+        FROM ${tableName}
+        WHERE client_id = $1
+          AND ${
+            sourceId
+              ? 'source_id = $2'
+              : 'url = $2'
+          }
+          AND chunk_index BETWEEN $3 AND $4
+          ${supportsActiveFlag ? 'AND is_active = true' : ''}
+        ORDER BY chunk_index ASC
+        `,
+        [clientId, sourceId ?? url ?? '', minIndex, maxIndex],
+      );
+      return res.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        domain: row.domain,
+        url: row.url,
+        sourceId: row.source_id ?? null,
         chunkIndex: row.chunk_index,
         text: row.chunk_text,
         createdAt: row.created_at,

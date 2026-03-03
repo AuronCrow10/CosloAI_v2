@@ -14,6 +14,7 @@ export function chunkText(
   url: string,
   domain: string,
   config: ChunkingConfig,
+  sourceId?: string | null,
 ): TextChunk[] {
   const chunkSizeTokens: number = config.chunkSizeTokens;
   const chunkOverlapTokens: number = config.chunkOverlapTokens;
@@ -57,6 +58,7 @@ export function chunkText(
       chunkIndex,
       text: chunkTextStr,
       chunkHash,
+      sourceId: sourceId ?? null,
     };
 
     chunks.push(row);

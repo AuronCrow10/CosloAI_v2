@@ -259,7 +259,6 @@ router.get("/admin/bots", requireAuth, requireRole("ADMIN"), async (req, res) =>
       if (!row.botId) continue;
       bookingsByBotId.set(row.botId, row._count._all ?? 0);
     }
-
     const items: AdminBotListItem[] = bots.map((b) => {
       const sub = b.subscription;
       const plan = sub?.usagePlan ?? null;

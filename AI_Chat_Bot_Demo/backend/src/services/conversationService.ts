@@ -1,4 +1,4 @@
-// services/conversationService.ts
+﻿// services/conversationService.ts
 
 import { prisma } from "../prisma/prisma";
 import { ChannelType, MessageRole, ConversationMode } from "@prisma/client";
@@ -96,7 +96,7 @@ export async function logMessage({
  * Return a token-efficient, ordered list of past messages for a conversation.
  * - Only last MAX_HISTORY_MESSAGES messages
  * - Hard cap on total characters (MAX_HISTORY_CHARS)
- * - Oldest → newest (as expected by OpenAI)
+ * - Oldest â†’ newest (as expected by OpenAI)
  */
 export async function getConversationHistoryAsChatMessages(
   conversationId: string
@@ -140,14 +140,18 @@ export async function getConversationHistoryAsChatMessages(
     selected.push({ role, content });
   }
 
-  // We collected from newest → oldest; reverse to oldest → newest.
+  // We collected from newest â†’ oldest; reverse to oldest â†’ newest.
   return selected.reverse();
 }
 
 
-export const HUMAN_HANDOFF_MESSAGE =
-  "Un operatore sarà da te a breve.";
-
+const HUMAN_HANDOFF_MESSAGES = {
+  it: "Un operatore sara da te a breve.",
+  en: "A human agent will be with you shortly.",
+  es: "Un agente humano estara contigo en breve.",
+  de: "Ein menschlicher Mitarbeiter ist gleich fuer dich da.",
+  fr: "Un agent humain sera avec vous sous peu."
+} as const;
 const HUMAN_KEYWORDS = [
   // English
   "human",
@@ -170,7 +174,38 @@ const HUMAN_KEYWORDS = [
   "assistente umano",
   "operatore umano",
   "persona reale",
-  "parlare con una persona"
+  "parlare con una persona",
+
+  // Spanish
+  "humano",
+  "persona real",
+  "agente",
+  "agente humano",
+  "hablar con un humano",
+  "hablar con una persona",
+  "hablar con un agente",
+  "operador",
+
+  // German
+  "mensch",
+  "echter mensch",
+  "echte person",
+  "mit einem menschen sprechen",
+  "mit einer person sprechen",
+  "mit einem mitarbeiter sprechen",
+  "mit einem agenten sprechen",
+  "operator",
+  "mitarbeiter",
+
+  // French
+  "humain",
+  "vraie personne",
+  "agent",
+  "agent humain",
+  "parler a un humain",
+  "parler a une personne",
+  "parler a un agent",
+  "operateur"
 ];
 
 function normalizeText(raw: string): string {
@@ -187,3 +222,28 @@ export function shouldSwitchToHumanMode(raw: string): boolean {
   // any keyword appearing anywhere is enough
   return HUMAN_KEYWORDS.some((kw) => text.includes(kw));
 }
+function detectHumanLanguage(message: string): keyof typeof HUMAN_HANDOFF_MESSAGES {
+  const text = normalizeText(message);
+  if (!text) return "en";
+
+  const itSignals = ["operatore", "persona reale", "parlare con"];
+  const esSignals = ["humano", "persona real", "agente", "operador", "hablar con"];
+  const deSignals = ["mensch", "mitarbeiter", "agent", "mit einem", "mit einer"];
+  const frSignals = ["humain", "agent", "operateur", "parler a", "parler avec", "vraie personne"];
+
+  if (itSignals.some((s) => text.includes(s))) return "it";
+  if (esSignals.some((s) => text.includes(s))) return "es";
+  if (deSignals.some((s) => text.includes(s))) return "de";
+  if (frSignals.some((s) => text.includes(s))) return "fr";
+  return "en";
+}
+
+export function getHumanHandoffMessage(message: string): string {
+  const lang = detectHumanLanguage(message);
+  return HUMAN_HANDOFF_MESSAGES[lang] || HUMAN_HANDOFF_MESSAGES.en;
+}
+
+
+
+
+

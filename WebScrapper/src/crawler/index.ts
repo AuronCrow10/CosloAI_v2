@@ -7,6 +7,7 @@ import { EmbeddingService } from '../embeddings/index.js';
 import { parseHtmlToText } from '../parser/index.js';
 import { logger } from '../logger.js';
 import { ingestTextForClient } from '../ingestion/ingestText.js';
+import { buildSourceId } from '../utils/sourceId.js';
 import { fetchSitemapUrls } from './sitemaps.js';
 import { shouldSkipCrawlUrl } from './filters.js';
 
@@ -251,6 +252,11 @@ export async function crawlDomain(
             text: parsed.cleanedText,
             url: parsed.url,
             domain: parsed.domain,
+            sourceId: buildSourceId({
+              clientId: clientInfo.id,
+              jobId: job?.id ?? null,
+              url: parsed.url,
+            }),
             client: clientInfo,
             deps: { config, db, embeddings },
           });

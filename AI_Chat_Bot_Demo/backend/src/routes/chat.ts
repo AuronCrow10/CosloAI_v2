@@ -136,9 +136,12 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
     }
 
     // --- Call chat service (only when in AI mode) ---
-    const reply = await generateBotReplyForSlug(slug, effectiveMessage, {
-      conversationId: dbConversationId ?? convId
+    const result = await generateBotReplyForSlug(slug, effectiveMessage, {
+      conversationId: dbConversationId ?? convId,
+      channel: "WEB",
+      sessionId: externalUserId
     });
+    const reply = result.reply;
     console.log("[RAW REPLY]", reply);
 
     try {
@@ -199,8 +202,10 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
     }
 
     return res.json({
-      conversationId: convId,
-      reply
+      conversationId: dbConversationId ?? convId,
+      reply,
+      suggestion: result.suggestion ?? null,
+      clerk: result.clerk ?? null
     });
   } catch (err: any) {
     if (err instanceof ChatServiceError) {

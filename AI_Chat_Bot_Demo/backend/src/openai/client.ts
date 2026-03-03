@@ -45,6 +45,7 @@ export async function createChatCompletionWithUsage(params: {
   messages: ChatMessage[];
   model?: string;
   maxTokens?: number;
+  temperature?: number;
   tools?: ChatTool[];
   toolChoice?: any;
   usageContext?: UsageContextInput;
@@ -53,6 +54,7 @@ export async function createChatCompletionWithUsage(params: {
     messages,
     model = "gpt-4.1-mini",
     maxTokens = 200,
+    temperature,
     tools,
     toolChoice,
     usageContext
@@ -64,6 +66,7 @@ export async function createChatCompletionWithUsage(params: {
     model,
     messages,
     max_tokens: maxTokens,
+    ...(typeof temperature === "number" ? { temperature } : {}),
     tools,
     tool_choice: toolChoice
   } as any);
@@ -80,6 +83,14 @@ export async function createChatCompletionWithUsage(params: {
       messageCount: messages.length
     };
     console.log("[OpenAI usage]", info);
+    if (normCtx?.operation === "shop_catalog_context") {
+      console.log("[ShopCatalogContext usage]", {
+        model,
+        promptTokens: info.promptTokens,
+        completionTokens: info.completionTokens,
+        totalTokens: info.totalTokens
+      });
+    }
 
     if (normCtx) {
       await recordOpenAIUsage({
@@ -106,47 +117,77 @@ export async function getChatCompletion(params: {
   model?: string;
   maxTokens?: number;
   usageContext?: UsageContextInput;
+  maxContinuations?: number;
 }): Promise<string> {
   const {
     messages,
     model = "gpt-4.1-mini",
     maxTokens = 200,
-    usageContext
+    usageContext,
+    maxContinuations = 3
   } = params;
 
-  const completion = await createChatCompletionWithUsage({
-    messages,
-    model,
-    maxTokens,
-    usageContext
-  });
+  let combined = "";
+  let currentMessages = messages.slice();
+  let continuations = 0;
 
-  const choice = completion.choices[0];
-  const content = (choice as any)?.message?.content;
+  while (true) {
+    const completion = await createChatCompletionWithUsage({
+      messages: currentMessages,
+      model,
+      maxTokens,
+      usageContext
+    });
 
-  // Extra debug log for tricky cases
-  console.log(
-    "[getChatCompletion] model=",
-    model,
-    " rawChoiceContent=",
-    JSON.stringify(content)?.slice(0, 500)
-  );
+    const choice = completion.choices[0];
+    const content = (choice as any)?.message?.content;
+    const finishReason = (choice as any)?.finish_reason;
 
-  if (content == null) {
-    throw new Error("No content returned from OpenAI");
+    // Extra debug log for tricky cases
+    console.log(
+      "[getChatCompletion] model=",
+      model,
+      " finish_reason=",
+      finishReason,
+      " rawChoiceContent=",
+      JSON.stringify(content)?.slice(0, 500)
+    );
+
+    if (content == null) {
+      throw new Error("No content returned from OpenAI");
+    }
+
+    const text = Array.isArray(content)
+      ? content
+          .map((part: any) =>
+            typeof part === "string"
+              ? part
+              : part?.text?.value ?? part?.text ?? ""
+          )
+          .join("")
+      : (content as string);
+
+    combined += text;
+
+    if (finishReason !== "length") {
+      break;
+    }
+
+    if (continuations >= maxContinuations) {
+      console.warn(
+        "[getChatCompletion] hit maxContinuations",
+        { model, maxContinuations }
+      );
+      break;
+    }
+
+    continuations += 1;
+    currentMessages = [
+      ...currentMessages,
+      { role: "assistant", content: text },
+      { role: "user", content: "Continue from where you left off." }
+    ];
   }
 
-  // If some model ever returns array-of-parts style content
-  if (Array.isArray(content)) {
-    const joined = content
-      .map((part: any) =>
-        typeof part === "string"
-          ? part
-          : part?.text?.value ?? part?.text ?? ""
-      )
-      .join("");
-    return joined;
-  }
-
-  return content as string;
+  return combined;
 }

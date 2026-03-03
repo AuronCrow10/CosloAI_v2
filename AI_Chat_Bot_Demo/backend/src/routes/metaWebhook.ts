@@ -1,4 +1,4 @@
-// src/routes/metaWebhook.ts
+﻿// src/routes/metaWebhook.ts
 import { Router, Request, Response } from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -9,7 +9,7 @@ import {
   refreshPageAccessTokenForChannel,
   isMetaTokenErrorNeedingRefresh
 } from "../services/metaTokenService";
-import { findOrCreateConversation, logMessage, HUMAN_HANDOFF_MESSAGE, shouldSwitchToHumanMode } from "../services/conversationService";
+import { findOrCreateConversation, logMessage, getHumanHandoffMessage, shouldSwitchToHumanMode } from "../services/conversationService";
 import { generateBotReplyForSlug } from "../services/chatService";
 import {
   checkConversationRateLimit,
@@ -46,7 +46,7 @@ function emitConversationMessages(
 const router = Router();
 
 /** -----------------------------
- *  Readable “review” logger
+ *  Readable â€œreviewâ€ logger
  *  ----------------------------- */
 type Level = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -67,12 +67,12 @@ function shortId(v: unknown, keepStart = 6, keepEnd = 4) {
   if (typeof v !== "string") return v;
   const s = v.trim();
   if (s.length <= keepStart + keepEnd + 3) return s;
-  return `${s.slice(0, keepStart)}…${s.slice(-keepEnd)}`;
+  return `${s.slice(0, keepStart)}â€¦${s.slice(-keepEnd)}`;
 }
 
 function safeSnippet(text: string, maxLen = 90) {
   const oneLine = text.replace(/\s+/g, " ").trim();
-  const cut = oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
+  const cut = oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}â€¦` : oneLine;
   return cut;
 }
 
@@ -765,7 +765,7 @@ router.post("/", async (req: Request, res: Response) => {
     ? (body as any).entry.length
     : 0;
 
-  logLine("INFO", "META", "⇢ webhook received", {
+  logLine("INFO", "META", "â‡¢ webhook received", {
     req: requestId,
     object: objectType,
     entries: entryCount
@@ -884,7 +884,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     const assistantMsg = await logMessage({
       conversationId: convo.id,
       role: "ASSISTANT",
-      content: HUMAN_HANDOFF_MESSAGE
+      content: getHumanHandoffMessage(text)
     });
 
     emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
@@ -905,7 +905,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     channel.id,
     pageId,
     userId,
-    HUMAN_HANDOFF_MESSAGE,
+    getHumanHandoffMessage(text),
     { botId: bot.id, conversationId: convo.id }
   );
 
@@ -919,7 +919,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     refreshed: send.refreshedToken
   });
 
-  // 🔴 NEW: notify mobile clients via Socket.IO
+  // ðŸ”´ NEW: notify mobile clients via Socket.IO
   try {
     const io = req.app.get("io") as SocketIOServer | undefined;
 
@@ -1059,9 +1059,11 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
           }
 
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, {
-            conversationId: convo.id
+          const result = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id,
+            channel: "FACEBOOK"
           });
+          const reply = result.reply;
           const chatMs = Date.now() - t0;
   const replyForLog =
     stripUrls(stripMarkdownLinks(stripImageMarkdown(reply))) ||
@@ -1278,7 +1280,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     const assistantMsg = await logMessage({
       conversationId: convo.id,
       role: "ASSISTANT",
-      content: HUMAN_HANDOFF_MESSAGE
+      content: getHumanHandoffMessage(text)
     });
 
     emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
@@ -1299,7 +1301,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     channel.id,
     graphTargetId,
     userId,
-    HUMAN_HANDOFF_MESSAGE,
+    getHumanHandoffMessage(text),
     { botId: bot.id, conversationId: convo.id }
   );
 
@@ -1313,7 +1315,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     refreshed: send.refreshedToken
   });
 
-  // 🔴 NEW: Socket.IO emit
+  // ðŸ”´ NEW: Socket.IO emit
   try {
     const io = req.app.get("io") as SocketIOServer | undefined;
 
@@ -1454,9 +1456,11 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
           }
 
           const t0 = Date.now();
-          const reply = await generateBotReplyForSlug(bot.slug, text, {
-            conversationId: convo.id
+          const result = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id,
+            channel: "INSTAGRAM"
           });
+          const reply = result.reply;
           const chatMs = Date.now() - t0;
   const replyForLog =
     stripUrls(stripMarkdownLinks(stripImageMarkdown(reply))) ||
@@ -1528,7 +1532,7 @@ try {
       });
     }
   } catch (err: unknown) {
-    // 🔴 NEW: full details at ERROR level so you see them with LOG_LEVEL=INFO
+    // ðŸ”´ NEW: full details at ERROR level so you see them with LOG_LEVEL=INFO
     const normalized = normalizeAxiosError(err);
     const base: any = {
       req: requestId,
@@ -1551,7 +1555,7 @@ try {
     logLine("ERROR", "META", "webhook error", base);
   }
 
-  logLine("INFO", "META", "⇠ done", {
+  logLine("INFO", "META", "â‡  done", {
     req: requestId,
     ms: Date.now() - startedAt
   });
@@ -1560,3 +1564,4 @@ try {
 });
 
 export default router;
+

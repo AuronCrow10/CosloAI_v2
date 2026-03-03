@@ -43,6 +43,14 @@ const upload = multer({
   }
 });
 
+const BOT_KNOWLEDGE_DEBUG =
+  String(process.env.BOT_KNOWLEDGE_DEBUG || "").toLowerCase() === "true";
+
+function logBotKnowledge(label: string, data: Record<string, unknown>) {
+  if (!BOT_KNOWLEDGE_DEBUG) return;
+  console.log("[BotKnowledge]", label, data);
+}
+
 // -----------------------------
 // Authenticated routes
 // -----------------------------
@@ -81,6 +89,11 @@ router.post("/bots/:id/knowledge/estimate-crawl", async (req: Request, res: Resp
     const botId = req.params.id;
     const userId = req.user!.id;
     const overrideDomain: string | undefined = req.body?.domain;
+    logBotKnowledge("estimate-crawl", {
+      botId,
+      userId,
+      overrideDomain: overrideDomain ?? null
+    });
 
     const { bot } = await ensureKnowledgeClient(botId, userId);
 
@@ -108,6 +121,11 @@ router.get("/bots/:id/knowledge/estimate-crawl-status", async (req: Request, res
     const botId = req.params.id;
     const userId = req.user!.id;
     const estimateId = String(req.query.estimateId || "").trim();
+    logBotKnowledge("estimate-crawl-status", {
+      botId,
+      userId,
+      estimateId
+    });
 
     if (!estimateId) return res.status(400).json({ error: "estimateId is required" });
 
@@ -168,6 +186,13 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
     const overrideDomain: string | undefined = req.body?.domain;
     const confirmed: boolean = req.body?.confirm === true;
     const estimateId: string | undefined = req.body?.estimateId;
+    logBotKnowledge("crawl-domain", {
+      botId,
+      userId,
+      overrideDomain: overrideDomain ?? null,
+      confirmed,
+      estimateId: estimateId ?? null
+    });
 
     const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
 

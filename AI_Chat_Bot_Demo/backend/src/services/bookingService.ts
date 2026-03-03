@@ -44,6 +44,8 @@ export interface BookingResult {
   end?: string;
   addToCalendarUrl?: string;
   errorMessage?: string;
+  errorCode?: string;
+  errorMeta?: Record<string, any>;
 
   confirmationEmailSent?: boolean;
   confirmationEmailError?: string;
@@ -690,7 +692,8 @@ export async function handleBookAppointment(
   if (!botConfig) {
     const result: BookingResult = {
       success: false,
-      errorMessage: "Bot not found for this booking."
+      errorMessage: "Bot not found for this booking.",
+      errorCode: "bot_not_found"
     };
     console.warn("?? [Booking] Rejected - bot not found", {
       requestId,
@@ -703,7 +706,8 @@ export async function handleBookAppointment(
   if (!bookingCfg) {
     const result: BookingResult = {
       success: false,
-      errorMessage: "Booking is not enabled for this bot."
+      errorMessage: "Booking is not enabled for this bot.",
+      errorCode: "booking_disabled"
     };
     console.warn("?? [Booking] Rejected - booking disabled or misconfigured", {
       requestId,
@@ -734,7 +738,9 @@ export async function handleBookAppointment(
   if (missing.length > 0) {
     const result: BookingResult = {
       success: false,
-      errorMessage: `Missing required booking fields: ${missing.join(", ")}.`
+      errorMessage: `Missing required booking fields: ${missing.join(", ")}.`,
+      errorCode: "missing_fields",
+      errorMeta: { missing }
     };
     console.warn("?? [Booking] Rejected - missing fields by config", {
       requestId,
@@ -748,7 +754,8 @@ export async function handleBookAppointment(
   if (!args.name || !args.datetime || !args.email) {
     const result: BookingResult = {
       success: false,
-      errorMessage: "Missing required booking fields."
+      errorMessage: "Missing required booking fields.",
+      errorCode: "missing_fields"
     };
     console.warn("?? [Booking] Rejected - missing core fields", {
       requestId,
@@ -764,7 +771,8 @@ export async function handleBookAppointment(
     const result: BookingResult = {
       success: false,
       errorMessage:
-        "The email address doesn?t look valid. Please check it and try again."
+        "The email address doesn?t look valid. Please check it and try again.",
+      errorCode: "invalid_email"
     };
     console.warn("?? [Booking] Rejected - invalid email", {
       requestId,
@@ -801,6 +809,13 @@ export async function handleBookAppointment(
     return {
       success: false,
       errorMessage: `${reasonMessage}${suggestionText}`,
+      errorCode:
+        serviceResolution.reason === "ambiguous"
+          ? "service_ambiguous"
+          : serviceResolution.reason === "missing"
+          ? "service_missing"
+          : "service_not_found",
+      errorMeta: suggestions.length ? { suggestions } : undefined,
       suggestedServices: suggestions.length ? suggestions : undefined
     };
   }
@@ -821,7 +836,8 @@ export async function handleBookAppointment(
     const result: BookingResult = {
       success: false,
       errorMessage:
-        "The date/time you provided is not a valid format. Please try again."
+        "The date/time you provided is not a valid format. Please try again.",
+      errorCode: "invalid_datetime"
     };
     console.warn("?? [Booking] Rejected - invalid datetime", {
       requestId,
@@ -850,6 +866,7 @@ export async function handleBookAppointment(
       success: false,
       errorMessage:
         "The requested time is in the past. Please choose another time.",
+      errorCode: "time_in_past",
       suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
     };
     console.warn("?? [Booking] Rejected - time in the past", {
@@ -879,6 +896,8 @@ export async function handleBookAppointment(
       const result: BookingResult = {
         success: false,
         errorMessage: `Bookings must be made at least ${minLeadHours} hour(s) in advance.`,
+        errorCode: "min_lead_hours",
+        errorMeta: { minLeadHours },
         suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
       console.warn("?? [Booking] Rejected - below min lead hours", {
@@ -910,6 +929,8 @@ export async function handleBookAppointment(
       const result: BookingResult = {
         success: false,
         errorMessage: `Bookings cannot be made more than ${maxAdvanceDays} day(s) in advance.`,
+        errorCode: "max_advance_days",
+        errorMeta: { maxAdvanceDays },
         suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
       console.warn("?? [Booking] Rejected - beyond max advance days", {
@@ -947,6 +968,7 @@ export async function handleBookAppointment(
       success: false,
       errorMessage:
         "That time is outside of the business's opening hours. Please choose another time within the available schedule.",
+      errorCode: "outside_opening_hours",
       suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
     };
 
@@ -994,6 +1016,7 @@ export async function handleBookAppointment(
         success: false,
         errorMessage:
           "That time slot is fully booked. Please choose another time.",
+        errorCode: "fully_booked",
         suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
     }
@@ -1038,6 +1061,7 @@ export async function handleBookAppointment(
           success: false,
           errorMessage:
             "That time slot is fully booked. Please choose another time.",
+          errorCode: "fully_booked",
           suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
         };
       }
@@ -1072,7 +1096,8 @@ export async function handleBookAppointment(
     return {
       success: false,
       errorMessage:
-        "We couldn't create the appointment in the calendar due to an internal error."
+        "We couldn't create the appointment in the calendar due to an internal error.",
+      errorCode: "calendar_create_failed"
     };
   }
 
@@ -1193,7 +1218,8 @@ export async function handleUpdateAppointment(
     return {
       success: false,
       action: "updated",
-      errorMessage: "Bot not found for this booking."
+      errorMessage: "Bot not found for this booking.",
+      errorCode: "bot_not_found"
     };
   }
 
@@ -1202,7 +1228,8 @@ export async function handleUpdateAppointment(
     return {
       success: false,
       action: "updated",
-      errorMessage: "Booking is not enabled for this bot."
+      errorMessage: "Booking is not enabled for this bot.",
+      errorCode: "booking_disabled"
     };
   }
 
@@ -1214,7 +1241,8 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage:
-        "To update a booking I need your email, the original date/time, and the new date/time."
+        "To update a booking I need your email, the original date/time, and the new date/time.",
+      errorCode: "missing_fields"
     };
   }
 
@@ -1226,7 +1254,8 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage:
-        "The original date/time you provided is not a valid format. Please try again."
+        "The original date/time you provided is not a valid format. Please try again.",
+      errorCode: "invalid_datetime"
     };
   }
 
@@ -1247,7 +1276,8 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage:
-        "I couldn't find an existing booking with that email and date/time. Please check your details."
+        "I couldn't find an existing booking with that email and date/time. Please check your details.",
+      errorCode: "booking_not_found"
     };
   }
 
@@ -1279,6 +1309,13 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage: `${reasonMessage}${suggestionText}`,
+      errorCode:
+        serviceResolution.reason === "ambiguous"
+          ? "service_ambiguous"
+          : serviceResolution.reason === "missing"
+          ? "service_missing"
+          : "service_not_found",
+      errorMeta: suggestions.length ? { suggestions } : undefined,
       suggestedServices: suggestions.length ? suggestions : undefined
     };
   }
@@ -1298,7 +1335,8 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage:
-        "Changing to a different service requires a new booking. Please cancel and book again with the new service."
+        "Changing to a different service requires a new booking. Please cancel and book again with the new service.",
+      errorCode: "service_change_requires_new_booking"
     };
   }
 
@@ -1313,7 +1351,8 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage:
-        "The new date/time you provided is not a valid format. Please try again."
+        "The new date/time you provided is not a valid format. Please try again.",
+      errorCode: "invalid_datetime"
     };
   }
 
@@ -1336,6 +1375,7 @@ export async function handleUpdateAppointment(
       action: "updated",
       errorMessage:
         "The new requested time is in the past. Please choose another time.",
+      errorCode: "time_in_past",
       suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
     };
   }
@@ -1358,6 +1398,8 @@ export async function handleUpdateAppointment(
         success: false,
         action: "updated",
         errorMessage: `Bookings must be made at least ${minLeadHours} hour(s) in advance.`,
+        errorCode: "min_lead_hours",
+        errorMeta: { minLeadHours },
         suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
     }
@@ -1381,6 +1423,8 @@ export async function handleUpdateAppointment(
         success: false,
         action: "updated",
         errorMessage: `Bookings cannot be moved more than ${maxAdvanceDays} day(s) in advance.`,
+        errorCode: "max_advance_days",
+        errorMeta: { maxAdvanceDays },
         suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
     }
@@ -1410,6 +1454,7 @@ export async function handleUpdateAppointment(
       action: "updated",
       errorMessage:
         "The new time is outside of the business's opening hours. Please choose another time within the available schedule.",
+      errorCode: "outside_opening_hours",
       suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
     };
   }
@@ -1447,6 +1492,7 @@ export async function handleUpdateAppointment(
         action: "updated",
         errorMessage:
           "That time slot is fully booked. Please choose another time.",
+        errorCode: "fully_booked",
         suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
       };
     }
@@ -1488,6 +1534,7 @@ export async function handleUpdateAppointment(
           action: "updated",
           errorMessage:
             "That time slot is fully booked. Please choose another time.",
+          errorCode: "fully_booked",
           suggestedSlots: suggestedSlots.length ? suggestedSlots : undefined
         };
       }
@@ -1525,7 +1572,8 @@ export async function handleUpdateAppointment(
       success: false,
       action: "updated",
       errorMessage:
-        "We couldn't update the appointment in the calendar due to an internal error."
+        "We couldn't update the appointment in the calendar due to an internal error.",
+      errorCode: "calendar_update_failed"
     };
   }
 
@@ -1630,7 +1678,8 @@ export async function handleCancelAppointment(
     return {
       success: false,
       action: "cancelled",
-      errorMessage: "Bot not found for this booking."
+      errorMessage: "Bot not found for this booking.",
+      errorCode: "bot_not_found"
     };
   }
 
@@ -1639,7 +1688,8 @@ export async function handleCancelAppointment(
     return {
       success: false,
       action: "cancelled",
-      errorMessage: "Booking is not enabled for this bot."
+      errorMessage: "Booking is not enabled for this bot.",
+      errorCode: "booking_disabled"
     };
   }
 
@@ -1650,7 +1700,8 @@ export async function handleCancelAppointment(
       success: false,
       action: "cancelled",
       errorMessage:
-        "To cancel a booking I need your email and the original date/time."
+        "To cancel a booking I need your email and the original date/time.",
+      errorCode: "missing_fields"
     };
   }
 
@@ -1660,7 +1711,8 @@ export async function handleCancelAppointment(
       success: false,
       action: "cancelled",
       errorMessage:
-        "The original date/time you provided is not a valid format. Please try again."
+        "The original date/time you provided is not a valid format. Please try again.",
+      errorCode: "invalid_datetime"
     };
   }
 
@@ -1681,7 +1733,8 @@ export async function handleCancelAppointment(
       success: false,
       action: "cancelled",
       errorMessage:
-        "I couldn't find an existing booking with that email and date/time. Please check your details."
+        "I couldn't find an existing booking with that email and date/time. Please check your details.",
+      errorCode: "booking_not_found"
     };
   }
 
@@ -1703,7 +1756,8 @@ export async function handleCancelAppointment(
       success: false,
       action: "cancelled",
       errorMessage:
-        "We couldn't cancel the appointment in the calendar due to an internal error."
+        "We couldn't cancel the appointment in the calendar due to an internal error.",
+      errorCode: "calendar_delete_failed"
     };
   }
 
@@ -1725,7 +1779,8 @@ export async function handleCancelAppointment(
       success: false,
       action: "cancelled",
       errorMessage:
-        "We cancelled the calendar event, but failed to update the booking record."
+        "We cancelled the calendar event, but failed to update the booking record.",
+      errorCode: "booking_update_failed"
     };
   }
 

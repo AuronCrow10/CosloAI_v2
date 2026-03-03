@@ -169,9 +169,11 @@ export async function handleFacebookMessageEvent(params: {
       text: trimmedText
     });
 
-    const reply = await generateBotReplyForSlug(botSlug, trimmedText, {
-      conversationId: draftConversationId
+    const result = await generateBotReplyForSlug(botSlug, trimmedText, {
+      conversationId: draftConversationId,
+      channel: "FACEBOOK"
     });
+    const reply = result.reply;
 
     // Log the conversation if we have a DB conversation
     if (conversationId) {
@@ -332,9 +334,11 @@ export async function handleInstagramMessageEvent(params: {
       text: trimmedText
     });
 
-    const reply = await generateBotReplyForSlug(botSlug, trimmedText, {
-      conversationId: draftConversationId
+    const result = await generateBotReplyForSlug(botSlug, trimmedText, {
+      conversationId: draftConversationId,
+      channel: "INSTAGRAM"
     });
+    const reply = result.reply;
 
     if (conversationId) {
       try {

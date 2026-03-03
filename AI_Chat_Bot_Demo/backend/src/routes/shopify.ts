@@ -23,6 +23,15 @@ import { resolveWidgetConfig } from "../shopify/widgetService";
 import { verifyWebhookHmac } from "../shopify/crypto";
 import { registerShopifyWebhooks } from "../shopify/webhookService";
 import {
+  buildShopCatalogSchema,
+  getShopCatalogSchema
+} from "../services/catalogIntelligenceService";
+import {
+  buildShopCatalogContext,
+  getShopCatalogContext,
+  updateShopCatalogContext
+} from "../services/shopCatalogContextService";
+import {
   insertShopifyEvent,
   isValidWidgetToken,
   buildEventId,
@@ -69,6 +78,11 @@ const shopListSchema = z.object({
 
 const shopLookupSchema = z.object({
   shop: z.string().min(1)
+});
+
+const catalogSchemaQuery = z.object({
+  shopDomain: z.string().optional(),
+  botId: z.string().optional()
 });
 
 const shopifyEventSchema = z.object({
@@ -580,6 +594,57 @@ router.post("/shopify/webhooks/orders-create", async (req: Request, res: Respons
             : 0
         }
       });
+
+      // Revenue AI attribution (conservative last-touch)
+      if (conversationId) {
+        try {
+          const botSettings = await prisma.bot.findUnique({
+            where: { id: botId },
+            select: { revenueAIAttributionWindowHours: true }
+          });
+          const windowHours =
+            botSettings?.revenueAIAttributionWindowHours ?? 24;
+          const since = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+
+          const existingPurchase = await prisma.revenueAIOfferAction.findFirst({
+            where: { orderId, action: "PURCHASE" }
+          });
+
+          if (!existingPurchase) {
+            const lastTouch = await prisma.revenueAIOfferAction.findFirst({
+              where: {
+                botId,
+                conversationId,
+                action: { in: ["CLICK", "ADD_TO_CART", "CHECKOUT"] },
+                timestamp: { gte: since }
+              },
+              orderBy: { timestamp: "desc" }
+            });
+
+            if (lastTouch) {
+              await prisma.revenueAIOfferAction.create({
+                data: {
+                  id: crypto.randomUUID(),
+                  eventId: lastTouch.eventId,
+                  botId,
+                  conversationId,
+                  action: "PURCHASE",
+                  orderId,
+                  revenueCents: revenueCents ?? null,
+                  currency: currency ?? null,
+                  meta: {
+                    attribution: "last_touch",
+                    windowHours
+                  },
+                  timestamp: new Date()
+                }
+              });
+            }
+          }
+        } catch (attrErr) {
+          console.error("Revenue AI attribution failed", attrErr);
+        }
+      }
     }
   } catch (err) {
     console.error("Failed to track Shopify purchase", err);
@@ -740,6 +805,196 @@ router.get("/shopify/widget-config", async (req: Request, res: Response) => {
 });
 
 router.use("/shopify", requireAuth);
+
+router.get("/shopify/catalog-schema", async (req: Request, res: Response) => {
+  const parsed = catalogSchemaQuery.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { shopDomain: rawDomain, botId: rawBotId } = parsed.data;
+  let shopDomain = rawDomain || null;
+  let botId = rawBotId || null;
+
+  if (shopDomain) {
+    try {
+      shopDomain = normalizeShopDomain(shopDomain);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || "Invalid shop domain" });
+    }
+    const shop = await requireShopOwnerAccess(req, shopDomain);
+    botId = shop.botId || botId;
+    if (!botId) {
+      return res.status(404).json({ error: "Shop not linked to a bot" });
+    }
+  }
+
+  if (!shopDomain && botId) {
+    const bot = await prisma.bot.findFirst({
+      where: { id: botId, userId: req.user!.id }
+    });
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    const shop = await prisma.shopifyShop.findFirst({
+      where: { botId: bot.id, isActive: true },
+      select: { shopDomain: true }
+    });
+    if (!shop?.shopDomain) {
+      return res.status(404).json({ error: "Shop not found" });
+    }
+    shopDomain = shop.shopDomain;
+  }
+
+  if (!shopDomain || !botId) {
+    return res.status(400).json({ error: "Provide shopDomain or botId" });
+  }
+
+  const schema = await getShopCatalogSchema({ botId, shopDomain });
+  return res.json({ schema });
+});
+
+router.post("/shopify/catalog-schema/rebuild", async (req: Request, res: Response) => {
+  const parsed = catalogSchemaQuery.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { shopDomain: rawDomain, botId: rawBotId } = parsed.data;
+  let shopDomain = rawDomain || null;
+  let botId = rawBotId || null;
+
+  if (shopDomain) {
+    try {
+      shopDomain = normalizeShopDomain(shopDomain);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || "Invalid shop domain" });
+    }
+    const shop = await requireShopOwnerAccess(req, shopDomain);
+    botId = shop.botId || botId;
+    if (!botId) {
+      return res.status(404).json({ error: "Shop not linked to a bot" });
+    }
+  }
+
+  if (!shopDomain && botId) {
+    const bot = await prisma.bot.findFirst({
+      where: { id: botId, userId: req.user!.id }
+    });
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+    const shop = await prisma.shopifyShop.findFirst({
+      where: { botId: bot.id, isActive: true },
+      select: { shopDomain: true }
+    });
+    if (!shop?.shopDomain) {
+      return res.status(404).json({ error: "Shop not found" });
+    }
+    shopDomain = shop.shopDomain;
+  }
+
+  if (!shopDomain || !botId) {
+    return res.status(400).json({ error: "Provide shopDomain or botId" });
+  }
+
+  const schema = await buildShopCatalogSchema(botId, shopDomain);
+  return res.json({ schema });
+});
+
+router.get("/shopify/catalog-context", async (req: Request, res: Response) => {
+  const parsed = catalogSchemaQuery.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { shopDomain: rawDomain, botId: rawBotId } = parsed.data;
+  let shopDomain = rawDomain || null;
+  let botId = rawBotId || null;
+
+  if (shopDomain) {
+    try {
+      shopDomain = normalizeShopDomain(shopDomain);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || "Invalid shop domain" });
+    }
+    const shop = await requireShopOwnerAccess(req, shopDomain);
+    botId = shop.botId || botId;
+    if (!botId) {
+      return res.status(404).json({ error: "Shop not linked to a bot" });
+    }
+  }
+  if (!shopDomain || !botId) {
+    return res.status(400).json({ error: "Provide shopDomain or botId" });
+  }
+
+  const context = await getShopCatalogContext({ botId, shopDomain });
+  return res.json({ context });
+});
+
+router.post("/shopify/catalog-context/rebuild", async (req: Request, res: Response) => {
+  const parsed = catalogSchemaQuery.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { shopDomain: rawDomain, botId: rawBotId } = parsed.data;
+  let shopDomain = rawDomain || null;
+  let botId = rawBotId || null;
+
+  if (shopDomain) {
+    try {
+      shopDomain = normalizeShopDomain(shopDomain);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || "Invalid shop domain" });
+    }
+    const shop = await requireShopOwnerAccess(req, shopDomain);
+    botId = shop.botId || botId;
+    if (!botId) {
+      return res.status(404).json({ error: "Shop not linked to a bot" });
+    }
+  }
+  if (!shopDomain || !botId) {
+    return res.status(400).json({ error: "Provide shopDomain or botId" });
+  }
+
+  const context = await buildShopCatalogContext(botId, shopDomain);
+  return res.json({ context });
+});
+
+router.patch("/shopify/catalog-context", async (req: Request, res: Response) => {
+  const parsed = catalogSchemaQuery.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const { shopDomain: rawDomain, botId: rawBotId } = parsed.data;
+  let shopDomain = rawDomain || null;
+  let botId = rawBotId || null;
+
+  if (shopDomain) {
+    try {
+      shopDomain = normalizeShopDomain(shopDomain);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || "Invalid shop domain" });
+    }
+    const shop = await requireShopOwnerAccess(req, shopDomain);
+    botId = shop.botId || botId;
+    if (!botId) {
+      return res.status(404).json({ error: "Shop not linked to a bot" });
+    }
+  }
+  if (!shopDomain || !botId) {
+    return res.status(400).json({ error: "Provide shopDomain or botId" });
+  }
+
+  try {
+    const context = await updateShopCatalogContext({
+      botId,
+      shopDomain,
+      patch: req.body || {}
+    });
+    return res.json({ context });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || "Failed to update context" });
+  }
+});
 
 router.get("/shopify/shops/lookup", async (req: Request, res: Response) => {
   const parsed = shopLookupSchema.safeParse(req.query);

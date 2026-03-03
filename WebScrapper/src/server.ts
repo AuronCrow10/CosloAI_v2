@@ -10,6 +10,7 @@ import { loadConfig } from './config/index.js';
 import { Database } from './db/index.js';
 import { EmbeddingService } from './embeddings/index.js';
 import { searchClientContent } from './search/service.js';
+import { buildSearchHttpResponse } from './search/response.js';
 import { crawlDomain, normalizeDomainToStartUrl, extractDomain } from './crawler/index.js';
 import { fetchSitemapUrls } from './crawler/sitemaps.js';
 import { shouldSkipCrawlUrl } from './crawler/filters.js';
@@ -18,6 +19,7 @@ import { extractTextFromBuffer } from './documents/extract.js';
 import { ingestTextForClient } from './ingestion/ingestText.js';
 import { chunkText } from './chunker/index.js';
 import { tokenize } from './tokenizer/index.js';
+import { buildSourceId } from './utils/sourceId.js';
 
 import { logger } from './logger.js';
 import {
@@ -338,7 +340,7 @@ async function estimateDomainTokensWithBrowser(params: {
         host,
       );
       if (parsed.cleanedText && parsed.cleanedText.length >= config.crawl.minChars) {
-        const chunks = chunkText(parsed.cleanedText, request.url, host, config.chunking);
+        const chunks = chunkText(parsed.cleanedText, request.url, host, config.chunking, null);
         for (const c of chunks) totalTokens += tokenize(c.text).length;
         pagesCounted += 1;
         pages.push({
@@ -422,6 +424,11 @@ async function ingestCachedPages(params: {
         text: page.cleanedText,
         url: page.url,
         domain: page.domain,
+        sourceId: buildSourceId({
+          clientId: client.id,
+          jobId: job?.id ?? null,
+          url: page.url,
+        }),
         client,
         deps: { config, db, embeddings },
       });
@@ -935,7 +942,7 @@ app.post('/estimate/docs', requireInternalAuth, upload.array('files', 10), async
       }
 
       const fakeUrl = `file://local/${encodeURIComponent(f.originalname)}`;
-      const chunks = chunkText(cleaned, fakeUrl, namespaceDomain, config.chunking);
+      const chunks = chunkText(cleaned, fakeUrl, namespaceDomain, config.chunking, null);
 
       let fileTokens = 0;
       for (const c of chunks) fileTokens += tokenize(c.text).length;
@@ -1042,13 +1049,18 @@ app.post('/ingest-docs', requireInternalAuth, upload.array('files', 10), async (
           continue;
         }
 
-        const { chunksCreated, chunksStored } = await ingestTextForClient({
-          text: cleanedText,
+      const { chunksCreated, chunksStored } = await ingestTextForClient({
+        text: cleanedText,
+        url: startUrl,
+        domain: namespaceDomain,
+        sourceId: buildSourceId({
+          clientId: client.id,
+          jobId: job.id,
           url: startUrl,
-          domain: namespaceDomain,
-          client,
-          deps: { config, db, embeddings },
-        });
+        }),
+        client,
+        deps: { config, db, embeddings },
+      });
 
         await db.updateCrawlJobProgress({
           jobId: job.id,
@@ -1160,6 +1172,11 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
       text: cleanedText,
       url: startUrl,
       domain: namespaceDomain,
+      sourceId: buildSourceId({
+        clientId: client.id,
+        jobId: job.id,
+        url: startUrl,
+      }),
       client,
       deps: { config, db, embeddings },
     });
@@ -1191,7 +1208,30 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
 // --- Search ---
 app.post('/search', requireInternalAuth, async (req, res) => {
   try {
-    const { clientId, query, domainInput, limit } = req.body;
+    const {
+      clientId,
+      query,
+      domainInput,
+      limit,
+      strategy,
+      candidateLimit,
+      finalLimit,
+      returnDebug,
+      ftsLanguage,
+      includeAdjacent,
+      adjacentWindow,
+      stitchChunks,
+      dedupeResults,
+      diversifySources,
+      maxPerSource,
+      nearDuplicateThreshold,
+      adaptiveLimit,
+      minLimit,
+      maxLimit,
+      contextTokenBudget,
+      minConfidenceLevel,
+      noAnswerOnLowConfidence,
+    } = req.body;
     if (!clientId || !query) {
       return res.status(400).json({ error: 'clientId and query are required' });
     }
@@ -1202,15 +1242,55 @@ app.post('/search', requireInternalAuth, async (req, res) => {
 
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    const results = await searchClientContent({
+    const serviceResponse = await searchClientContent({
       db,
       embeddings,
       client,
       query,
-      options: { domain, limit },
+      options: {
+        domain,
+        limit: typeof limit === 'number' ? limit : undefined,
+        strategy:
+          strategy === 'hybrid' || strategy === 'vector' ? strategy : undefined,
+        candidateLimit:
+          typeof candidateLimit === 'number' ? candidateLimit : undefined,
+        finalLimit: typeof finalLimit === 'number' ? finalLimit : undefined,
+        returnDebug: returnDebug === true,
+        ftsLanguage: typeof ftsLanguage === 'string' ? ftsLanguage : undefined,
+        includeAdjacent: includeAdjacent === true,
+        adjacentWindow:
+          typeof adjacentWindow === 'number' ? adjacentWindow : undefined,
+        stitchChunks:
+          typeof stitchChunks === 'boolean' ? stitchChunks : undefined,
+        dedupeResults: dedupeResults === true,
+        diversifySources: diversifySources === true,
+        maxPerSource: typeof maxPerSource === 'number' ? maxPerSource : undefined,
+        nearDuplicateThreshold:
+          typeof nearDuplicateThreshold === 'number'
+            ? nearDuplicateThreshold
+            : undefined,
+        adaptiveLimit: adaptiveLimit === true,
+        minLimit: typeof minLimit === 'number' ? minLimit : undefined,
+        maxLimit: typeof maxLimit === 'number' ? maxLimit : undefined,
+        contextTokenBudget:
+          typeof contextTokenBudget === 'number'
+            ? contextTokenBudget
+            : undefined,
+        minConfidenceLevel:
+          minConfidenceLevel === 'high' ||
+          minConfidenceLevel === 'medium' ||
+          minConfidenceLevel === 'low'
+            ? minConfidenceLevel
+            : undefined,
+        noAnswerOnLowConfidence: noAnswerOnLowConfidence === true,
+      },
     });
 
-    return res.json({ results });
+    const payload = buildSearchHttpResponse({
+      serviceResponse,
+      returnDebug: returnDebug === true,
+    });
+    return res.json(payload);
   } catch (err) {
     logger.error('Error in /search', err);
     return res.status(500).json({ error: 'Internal error' });

@@ -12,6 +12,11 @@ import {
   WHATSAPP_MESSAGE_TOKEN_COST,
   getPlanUsageForBot
 } from "../services/planUsageService";
+import {
+  buildProductFunnels,
+  buildSessionImpactFromRows,
+  computeStyleRates
+} from "../services/revenueAIMetrics";
 
 const router = Router();
 
@@ -1579,6 +1584,434 @@ router.get(
         purchases: purchaseSeries
       },
       perBot
+    });
+  }
+);
+
+/**
+ * GET /api/dashboard/revenue-ai?days=30&botId=...
+ * Revenue AI metrics (impressions, actions, influenced revenue).
+ */
+router.get(
+  "/dashboard/revenue-ai",
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = req.user!.id;
+    const days = parseRangeDays(req, 30);
+    const botId = typeof req.query.botId === "string" ? req.query.botId : null;
+
+    const today = startOfDay(new Date());
+    const rangeStart = subDays(today, days - 1);
+    const rangeEnd = addDays(today, 1);
+
+    const bots = await prisma.bot.findMany({
+      where: { userId },
+      select: { id: true, name: true }
+    });
+
+    const botIds = botId ? bots.filter((b) => b.id === botId).map((b) => b.id) : bots.map((b) => b.id);
+
+    if (botIds.length === 0) {
+      res.json({
+        rangeDays: days,
+        totals: {
+          impressions: 0,
+          clicks: 0,
+          addToCart: 0,
+          checkout: 0,
+          purchases: 0,
+          revenueCents: 0
+        },
+        series: { dates: [], impressions: [], clicks: [], addToCart: [], checkout: [], purchases: [], revenueCents: [] },
+        funnel: { impressions: 0, clicks: 0, addToCart: 0, checkout: 0, purchases: 0 },
+        byStyle: [],
+        topProducts: [],
+        sessions: { withSuggestion: 0, withoutSuggestion: 0, total: 0 }
+      });
+      return;
+    }
+
+    const totalsEvents = (await prisma.$queryRaw`
+      SELECT COUNT(*)::int AS impressions
+      FROM "RevenueAIOfferEvent"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+    `) as Array<{ impressions: number }>;
+
+    const totalsActions = (await prisma.$queryRaw`
+      SELECT "action", COUNT(*)::int AS count, COALESCE(SUM("revenueCents"), 0)::int AS revenue_cents
+      FROM "RevenueAIOfferAction"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+      GROUP BY "action"
+    `) as Array<{ action: string; count: number; revenue_cents: number }>;
+
+    const totalsMap = new Map<string, { count: number; revenue: number }>();
+    totalsActions.forEach((row) => {
+      totalsMap.set(row.action, {
+        count: row.count,
+        revenue: row.revenue_cents
+      });
+    });
+
+    const impressions = totalsEvents[0]?.impressions ?? 0;
+    const clicks = totalsMap.get("CLICK")?.count || 0;
+    const addToCart = totalsMap.get("ADD_TO_CART")?.count || 0;
+    const checkout = totalsMap.get("CHECKOUT")?.count || 0;
+    const purchases = totalsMap.get("PURCHASE")?.count || 0;
+    const revenueCents = totalsMap.get("PURCHASE")?.revenue || 0;
+
+    const dayEvents = (await prisma.$queryRaw`
+      SELECT DATE_TRUNC('day', "timestamp") AS day, COUNT(*)::int AS impressions
+      FROM "RevenueAIOfferEvent"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+      GROUP BY day
+      ORDER BY day ASC
+    `) as Array<{ day: Date; impressions: number }>;
+
+    const dayActions = (await prisma.$queryRaw`
+      SELECT DATE_TRUNC('day', "timestamp") AS day, "action", COUNT(*)::int AS count, COALESCE(SUM("revenueCents"), 0)::int AS revenue_cents
+      FROM "RevenueAIOfferAction"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+      GROUP BY day, "action"
+      ORDER BY day ASC
+    `) as Array<{ day: Date; action: string; count: number; revenue_cents: number }>;
+
+    const toDayString = (d: Date): string => d.toISOString().slice(0, 10);
+    const dates: string[] = [];
+    const impressionsSeries: number[] = [];
+    const clicksSeries: number[] = [];
+    const addSeries: number[] = [];
+    const checkoutSeries: number[] = [];
+    const purchaseSeries: number[] = [];
+    const revenueSeries: number[] = [];
+
+    const eventMap = new Map<string, number>();
+    dayEvents.forEach((row) => {
+      eventMap.set(toDayString(row.day), row.impressions);
+    });
+
+    const actionMap = new Map<string, { click: number; add: number; checkout: number; purchase: number; revenue: number }>();
+    dayActions.forEach((row) => {
+      const key = toDayString(row.day);
+      const entry = actionMap.get(key) || { click: 0, add: 0, checkout: 0, purchase: 0, revenue: 0 };
+      if (row.action === "CLICK") entry.click += row.count;
+      if (row.action === "ADD_TO_CART") entry.add += row.count;
+      if (row.action === "CHECKOUT") entry.checkout += row.count;
+      if (row.action === "PURCHASE") {
+        entry.purchase += row.count;
+        entry.revenue += row.revenue_cents;
+      }
+      actionMap.set(key, entry);
+    });
+
+    for (let i = days - 1; i >= 0; i--) {
+      const d = startOfDay(subDays(today, i));
+      const key = toDayString(d);
+      const eventCount = eventMap.get(key) || 0;
+      const action = actionMap.get(key) || { click: 0, add: 0, checkout: 0, purchase: 0, revenue: 0 };
+      dates.push(key);
+      impressionsSeries.push(eventCount);
+      clicksSeries.push(action.click);
+      addSeries.push(action.add);
+      checkoutSeries.push(action.checkout);
+      purchaseSeries.push(action.purchase);
+      revenueSeries.push(action.revenue);
+    }
+
+    const byStyleRows = (await prisma.$queryRaw`
+      SELECT "styleUsed", COUNT(*)::int AS impressions
+      FROM "RevenueAIOfferEvent"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+      GROUP BY "styleUsed"
+    `) as Array<{ styleUsed: string; impressions: number }>;
+
+    const byStyleMap = new Map<
+      string,
+      {
+        impressions: number;
+        clicks: number;
+        addToCart: number;
+        checkout: number;
+        purchases: number;
+        revenueCents: number;
+      }
+    >();
+    byStyleRows.forEach((row) => {
+      byStyleMap.set(row.styleUsed, {
+        impressions: row.impressions,
+        clicks: 0,
+        addToCart: 0,
+        checkout: 0,
+        purchases: 0,
+        revenueCents: 0
+      });
+    });
+
+    const byStyleActions = (await prisma.$queryRaw`
+      SELECT e."styleUsed" as style, a."action" as action, COUNT(*)::int AS count, COALESCE(SUM(a."revenueCents"), 0)::int AS revenue_cents
+      FROM "RevenueAIOfferAction" a
+      JOIN "RevenueAIOfferEvent" e ON e.id = a."eventId"
+      WHERE a."botId" = ANY(${botIds})
+        AND a."timestamp" >= ${rangeStart}
+        AND a."timestamp" < ${rangeEnd}
+      GROUP BY e."styleUsed", a."action"
+    `) as Array<{ style: string; action: string; count: number; revenue_cents: number }>;
+
+    byStyleActions.forEach((row) => {
+      const entry =
+        byStyleMap.get(row.style) || {
+          impressions: 0,
+          clicks: 0,
+          addToCart: 0,
+          checkout: 0,
+          purchases: 0,
+          revenueCents: 0
+        };
+      if (row.action === "CLICK") entry.clicks += row.count;
+      if (row.action === "ADD_TO_CART") entry.addToCart += row.count;
+      if (row.action === "CHECKOUT") entry.checkout += row.count;
+      if (row.action === "PURCHASE") {
+        entry.purchases += row.count;
+        entry.revenueCents += row.revenue_cents;
+      }
+      byStyleMap.set(row.style, entry);
+    });
+
+    const byStyle = Array.from(byStyleMap.entries()).map(([style, values]) => ({
+      style,
+      ...values,
+      ...computeStyleRates({
+        impressions: values.impressions,
+        clicks: values.clicks,
+        addToCart: values.addToCart,
+        checkout: values.checkout,
+        purchases: values.purchases
+      })
+    }));
+
+    const productRows = (await prisma.$queryRaw`
+      SELECT e."suggestedProductId" as product_id,
+             p."title" as title,
+             p."imageUrl" as image_url,
+             COUNT(*)::int AS impressions,
+             COALESCE(SUM(CASE WHEN a."action" = 'CLICK' THEN 1 ELSE 0 END), 0)::int AS clicks,
+             COALESCE(SUM(CASE WHEN a."action" = 'ADD_TO_CART' THEN 1 ELSE 0 END), 0)::int AS add_to_cart,
+             COALESCE(SUM(CASE WHEN a."action" = 'CHECKOUT' THEN 1 ELSE 0 END), 0)::int AS checkout,
+             COALESCE(SUM(CASE WHEN a."action" = 'PURCHASE' THEN 1 ELSE 0 END), 0)::int AS purchases,
+             COALESCE(SUM(CASE WHEN a."action" = 'PURCHASE' THEN a."revenueCents" ELSE 0 END), 0)::int AS revenue_cents
+      FROM "RevenueAIOfferEvent" e
+      LEFT JOIN "RevenueAIOfferAction" a
+        ON a."eventId" = e.id
+      LEFT JOIN "ShopifyProduct" p
+        ON p."productId" = e."suggestedProductId"
+      WHERE e."botId" = ANY(${botIds})
+        AND e."timestamp" >= ${rangeStart}
+        AND e."timestamp" < ${rangeEnd}
+      GROUP BY e."suggestedProductId", p."title", p."imageUrl"
+    `) as Array<{
+      product_id: string | null;
+      title: string | null;
+      image_url: string | null;
+      impressions: number;
+      clicks: number;
+      add_to_cart: number;
+      checkout: number;
+      purchases: number;
+      revenue_cents: number;
+    }>;
+
+    const productFunnels = buildProductFunnels(productRows);
+
+    const impactRows = (await prisma.$queryRaw`
+      WITH offer_sessions AS (
+        SELECT DISTINCT COALESCE("sessionId", "conversationId") AS session_key
+        FROM "RevenueAIOfferEvent"
+        WHERE "botId" = ANY(${botIds})
+          AND "timestamp" >= ${rangeStart}
+          AND "timestamp" < ${rangeEnd}
+          AND COALESCE("sessionId", "conversationId") IS NOT NULL
+      ),
+      commerce_sessions AS (
+        SELECT DISTINCT COALESCE(session_id, conversation_id) AS session_key
+        FROM shopify_analytics_event
+        WHERE bot_id = ANY(${botIds})
+          AND created_at >= ${rangeStart}
+          AND created_at < ${rangeEnd}
+          AND event_type IN ('view_product','add_to_cart','checkout_initiated','purchase')
+          AND COALESCE(session_id, conversation_id) IS NOT NULL
+      ),
+      session_events AS (
+        SELECT COALESCE(session_id, conversation_id) AS session_key,
+               MAX(CASE WHEN event_type = 'add_to_cart' THEN 1 ELSE 0 END)::int AS has_add_to_cart,
+               MAX(CASE WHEN event_type = 'checkout_initiated' THEN 1 ELSE 0 END)::int AS has_checkout,
+               MAX(CASE WHEN event_type = 'purchase' THEN 1 ELSE 0 END)::int AS has_purchase,
+               COALESCE(SUM(CASE WHEN event_type = 'purchase' THEN revenue_cents ELSE 0 END), 0)::int AS revenue_cents,
+               COUNT(CASE WHEN event_type = 'purchase' THEN 1 END)::int AS purchase_count
+        FROM shopify_analytics_event
+        WHERE bot_id = ANY(${botIds})
+          AND created_at >= ${rangeStart}
+          AND created_at < ${rangeEnd}
+        GROUP BY COALESCE(session_id, conversation_id)
+      ),
+      session_groups AS (
+        SELECT 'with_offer'::text AS group_key, session_key FROM offer_sessions
+        UNION ALL
+        SELECT 'without_offer'::text AS group_key, session_key
+        FROM commerce_sessions
+        WHERE session_key NOT IN (SELECT session_key FROM offer_sessions)
+      )
+      SELECT
+        sg.group_key,
+        COUNT(*)::int AS sessions,
+        COALESCE(SUM(se.has_add_to_cart), 0)::int AS add_to_cart_sessions,
+        COALESCE(SUM(se.has_checkout), 0)::int AS checkout_sessions,
+        COALESCE(SUM(se.has_purchase), 0)::int AS purchase_sessions,
+        COALESCE(SUM(se.revenue_cents), 0)::int AS revenue_cents,
+        COALESCE(SUM(se.purchase_count), 0)::int AS purchase_count
+      FROM session_groups sg
+      LEFT JOIN session_events se ON se.session_key = sg.session_key
+      GROUP BY sg.group_key
+    `) as Array<{
+      group_key: string;
+      sessions: number;
+      add_to_cart_sessions: number;
+      checkout_sessions: number;
+      purchase_sessions: number;
+      revenue_cents: number;
+      purchase_count: number;
+    }>;
+
+    const { withOffer, withoutOffer, uplift } = buildSessionImpactFromRows(impactRows);
+
+    const sessionsWithSuggestion = (await prisma.$queryRaw`
+      SELECT COUNT(DISTINCT COALESCE("sessionId", "conversationId"))::int AS count
+      FROM "RevenueAIOfferEvent"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+    `) as Array<{ count: number }>;
+
+    const totalSessions = ((await prisma.$queryRaw`
+      SELECT COUNT(DISTINCT COALESCE(session_id, conversation_id))::int AS count
+      FROM shopify_analytics_event
+      WHERE bot_id = ANY(${botIds})
+        AND created_at >= ${rangeStart}
+        AND created_at < ${rangeEnd}
+    `) as Array<{ count: number }>)[0]?.count ?? 0;
+
+    const withSuggestion = sessionsWithSuggestion[0]?.count ?? 0;
+
+    const perBotEventRows = (await prisma.$queryRaw`
+      SELECT "botId", COUNT(*)::int AS impressions
+      FROM "RevenueAIOfferEvent"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+      GROUP BY "botId"
+    `) as Array<{ botId: string; impressions: number }>;
+
+    const perBotActionRows = (await prisma.$queryRaw`
+      SELECT "botId", "action", COUNT(*)::int AS count, COALESCE(SUM("revenueCents"), 0)::int AS revenue_cents
+      FROM "RevenueAIOfferAction"
+      WHERE "botId" = ANY(${botIds})
+        AND "timestamp" >= ${rangeStart}
+        AND "timestamp" < ${rangeEnd}
+      GROUP BY "botId", "action"
+    `) as Array<{ botId: string; action: string; count: number; revenue_cents: number }>;
+
+    const perBotMap = new Map<string, any>();
+    perBotEventRows.forEach((row) => {
+      perBotMap.set(row.botId, {
+        botId: row.botId,
+        impressions: row.impressions,
+        clicks: 0,
+        addToCart: 0,
+        checkout: 0,
+        purchases: 0,
+        revenueCents: 0
+      });
+    });
+
+    perBotActionRows.forEach((row) => {
+      const entry =
+        perBotMap.get(row.botId) || {
+          botId: row.botId,
+          impressions: 0,
+          clicks: 0,
+          addToCart: 0,
+          checkout: 0,
+          purchases: 0,
+          revenueCents: 0
+        };
+      if (row.action === "CLICK") entry.clicks += row.count;
+      if (row.action === "ADD_TO_CART") entry.addToCart += row.count;
+      if (row.action === "CHECKOUT") entry.checkout += row.count;
+      if (row.action === "PURCHASE") {
+        entry.purchases += row.count;
+        entry.revenueCents += row.revenue_cents;
+      }
+      perBotMap.set(row.botId, entry);
+    });
+
+    const botNameMap = new Map(bots.map((b) => [b.id, b.name]));
+    const perBot = Array.from(perBotMap.values()).map((row) => ({
+      ...row,
+      botName: botNameMap.get(row.botId) || row.botId
+    }));
+
+    res.json({
+      rangeDays: days,
+      totals: {
+        impressions,
+        clicks,
+        addToCart,
+        checkout,
+        purchases,
+        revenueCents
+      },
+      series: {
+        dates,
+        impressions: impressionsSeries,
+        clicks: clicksSeries,
+        addToCart: addSeries,
+        checkout: checkoutSeries,
+        purchases: purchaseSeries,
+        revenueCents: revenueSeries
+      },
+      funnel: {
+        impressions,
+        clicks,
+        addToCart,
+        checkout,
+        purchases
+      },
+      byStyle,
+      impact: {
+        withOffer,
+        withoutOffer,
+        uplift
+      },
+      productFunnels,
+      topProducts: productFunnels.slice(0, 10).map((row) => ({
+        productId: row.productId,
+        count: row.impressions,
+        title: row.title,
+        imageUrl: row.imageUrl
+      })),
+      perBot,
+      sessions: {
+        withSuggestion,
+        withoutSuggestion: Math.max(totalSessions - withSuggestion, 0),
+        total: totalSessions
+      }
     });
   }
 );

@@ -139,13 +139,14 @@ router.get("/admin/bookings", requireAuth, requireRole("ADMIN"), async (req, res
       where.start = startFilter;
     }
 
+    const takeAll = page * pageSize;
+
     const [total, bookings] = await Promise.all([
       prisma.booking.count({ where }),
       prisma.booking.findMany({
         where,
         orderBy: { start: "desc" },
-        skip,
-        take: pageSize,
+        take: takeAll,
         include: {
           bot: {
             select: {
@@ -216,8 +217,11 @@ router.get("/admin/bookings", requireAuth, requireRole("ADMIN"), async (req, res
       }
     }));
 
+    const sorted = items.sort((a, b) => b.start.localeCompare(a.start));
+    const paged = sorted.slice(skip, skip + pageSize);
+
     const response: AdminBookingListResponse = {
-      items,
+      items: paged,
       page,
       pageSize,
       total

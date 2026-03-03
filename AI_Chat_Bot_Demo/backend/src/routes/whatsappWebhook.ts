@@ -1,11 +1,11 @@
-// routes/whatsappWebhook.ts
+﻿// routes/whatsappWebhook.ts
 import { Router, Request, Response } from "express";
 import axios from "axios";
 import crypto from "crypto";
 import util from "node:util";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
-import { findOrCreateConversation, logMessage, HUMAN_HANDOFF_MESSAGE, shouldSwitchToHumanMode } from "../services/conversationService";
+import { findOrCreateConversation, logMessage, getHumanHandoffMessage, shouldSwitchToHumanMode } from "../services/conversationService";
 import { generateBotReplyForSlug } from "../services/chatService";
 import { checkConversationRateLimit, buildRateLimitMessage } from "../services/rateLimitService";
 
@@ -37,7 +37,7 @@ function emitConversationMessages(
 const router = Router();
 
 /** -----------------------------
- *  Readable “review” logger
+ *  Readable â€œreviewâ€ logger
  *  ----------------------------- */
 type Level = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -58,23 +58,12 @@ function shortId(v: unknown, keepStart = 6, keepEnd = 4) {
   if (typeof v !== "string") return v;
   const s = v.trim();
   if (s.length <= keepStart + keepEnd + 3) return s;
-  return `${s.slice(0, keepStart)}…${s.slice(-keepEnd)}`;
+  return `${s.slice(0, keepStart)}â€¦${s.slice(-keepEnd)}`;
 }
 
-function safeStatusErrors(errs: unknown) {
-  if (!Array.isArray(errs)) return errs;
-  return errs.slice(0, 3).map((e) => {
-    const item: any = e;
-    return {
-      code: item?.code,
-      title: item?.title,
-      details: item?.details
-    };
-  });
-}
 function safeSnippet(text: string, maxLen = 90) {
   const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}…` : oneLine;
+  return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen)}â€¦` : oneLine;
 }
 
 function formatVal(v: unknown): string {
@@ -256,7 +245,7 @@ router.post("/", async (req: Request, res: Response) => {
   const body: unknown = req.body;
   const entryCount = Array.isArray((body as any)?.entry) ? (body as any).entry.length : 0;
 
-  logLine("INFO", "WA", "⇢ webhook received", { req: requestId, entries: entryCount });
+  logLine("INFO", "WA", "â‡¢ webhook received", { req: requestId, entries: entryCount });
 
   if (!body || typeof body !== "object" || !(body as any).entry) {
     logLine("DEBUG", "WA", "ignored", { req: requestId, reason: "missing body/entry" });
@@ -271,23 +260,6 @@ router.post("/", async (req: Request, res: Response) => {
         const value = change?.value;
         const metadata = value?.metadata;
         const phoneNumberId: string | undefined = metadata?.phone_number_id;
-
-        const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
-        if (statuses.length > 0) {
-          for (const st of statuses) {
-            logLine("INFO", "WA", "message status", {
-              req: requestId,
-              phone: shortId(phoneNumberId),
-              id: shortId(st?.id),
-              status: st?.status,
-              recipient: shortId(st?.recipient_id),
-              ts: st?.timestamp,
-              errors: safeStatusErrors(st?.errors),
-              conversation: st?.conversation,
-              pricing: st?.pricing
-            });
-          }
-        }
 
         const messages = Array.isArray(value?.messages) ? value.messages : [];
         if (!phoneNumberId || messages.length === 0) continue;
@@ -371,7 +343,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     const assistantMsg = await logMessage({
       conversationId: convo.id,
       role: "ASSISTANT",
-      content: HUMAN_HANDOFF_MESSAGE
+      content: getHumanHandoffMessage(text)
     });
 
     emitConversationMessages(io, bot.userId, convo.id, bot.id, userMsg, assistantMsg);
@@ -458,7 +430,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
       {
         messaging_product: "whatsapp",
         to: userWaId,
-        text: { body: HUMAN_HANDOFF_MESSAGE }
+        text: { body: getHumanHandoffMessage(text) }
       },
       {
         headers: {
@@ -497,7 +469,7 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
     }
   }
 
-  // 🔴 NEW: Socket.IO emit (normal path)
+  // ðŸ”´ NEW: Socket.IO emit (normal path)
   try {
     const io = req.app.get("io") as SocketIOServer | undefined;
 
@@ -649,9 +621,11 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
           }
 
           const t0 = Date.now();
-          const replyRaw = await generateBotReplyForSlug(bot.slug, text, {
-            conversationId: convo.id
+          const result = await generateBotReplyForSlug(bot.slug, text, {
+            conversationId: convo.id,
+            channel: "WHATSAPP"
           });
+          const replyRaw = result.reply;
           const chatMs = Date.now() - t0;
           const imageUrls = extractImageUrls(replyRaw);
           const replySansImages = stripImageMarkdown(replyRaw);
@@ -766,8 +740,10 @@ try {
     logLine("DEBUG", "WA", "webhook error details", { req: requestId, details: err });
   }
 
-  logLine("INFO", "WA", "⇠ done", { req: requestId, ms: Date.now() - startedAt });
+  logLine("INFO", "WA", "â‡  done", { req: requestId, ms: Date.now() - startedAt });
   return res.sendStatus(200);
 });
 
 export default router;
+
+

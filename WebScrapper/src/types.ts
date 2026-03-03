@@ -54,6 +54,7 @@ export interface TextChunk {
   text: string;
   /** Global deduplication hash (SHA-256 of chunk_text) */
   chunkHash: string;
+  sourceId?: string | null;
 }
 
 export interface ChunkWithEmbedding extends TextChunk {
@@ -79,10 +80,16 @@ export interface SearchResult {
   clientId: string;
   domain: string;
   url: string;
+  sourceId?: string | null;
   chunkIndex: number;
   text: string;
   score: number; // higher = more similar
   createdAt: Date;
+  // Optional metadata when adjacent stitching is enabled
+  anchorChunkId?: string;
+  chunkRangeStart?: number;
+  chunkRangeEnd?: number;
+  stitchedChunkIds?: string[];
 }
 
 export type CrawlJobStatus = 'queued' | 'running' | 'completed' | 'failed';

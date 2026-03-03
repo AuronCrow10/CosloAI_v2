@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "crawl": "node dist/cli/crawl.js",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "npm run build && node --test dist/**/*.test.js"
   },
   "dependencies": {
     "@crawlee/playwright": "^3.9.2",

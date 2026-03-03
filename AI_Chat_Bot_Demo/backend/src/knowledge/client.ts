@@ -1,6 +1,7 @@
 import axios from "axios";
 import FormData from "form-data";
 import { config } from "../config";
+import { KnowledgeSearchParams } from "./knowledgeRetrievalProfiles";
 
 export interface KnowledgeSearchResult {
   id: string;
@@ -15,6 +16,13 @@ export interface KnowledgeSearchResult {
 
 export interface KnowledgeSearchResponse {
   results: KnowledgeSearchResult[];
+  retrievalStatus?: "ok" | "low_confidence";
+  noAnswerRecommended?: boolean;
+  confidence?: {
+    level?: "high" | "medium" | "low";
+    score?: number;
+  };
+  debug?: Record<string, unknown>;
 }
 
 const client = axios.create({
@@ -25,24 +33,44 @@ const client = axios.create({
   }
 });
 
-export async function searchKnowledge(params: {
+export type SearchKnowledgeParams = {
   clientId: string;
   query: string;
   domain?: string;
   limit?: number;
-}): Promise<KnowledgeSearchResult[]> {
-  const { clientId, query, domain, limit = 5 } = params;
+} & KnowledgeSearchParams;
+
+export function buildKnowledgeSearchPayload(params: SearchKnowledgeParams) {
+  const { clientId, query, domain, limit, ...rest } = params;
+  const payload: Record<string, unknown> = {
+    clientId,
+    query,
+    ...(domain ? { domainInput: domain } : {}),
+    ...rest
+  };
+
+  const hasRetrievalParams = Object.keys(rest).length > 0;
+  if (typeof limit === "number") {
+    payload.limit = limit;
+  } else if (!hasRetrievalParams) {
+    payload.limit = 5;
+  }
+
+  return payload;
+}
+
+export async function searchKnowledgeWithMeta(
+  params: SearchKnowledgeParams
+): Promise<KnowledgeSearchResponse> {
+  const payload = buildKnowledgeSearchPayload(params);
+  const logDebug =
+    String(process.env.KNOWLEDGE_DEBUG || "").toLowerCase() === "true";
 
   const url = `${config.knowledgeBaseUrl}/search`;
 
   const response = await axios.post<KnowledgeSearchResponse>(
     url,
-    {
-      clientId,
-      query,
-      domain,
-      limit
-    },
+    payload,
     {
       headers: {
         "Content-Type": "application/json",
@@ -56,7 +84,23 @@ export async function searchKnowledge(params: {
     throw new Error("Invalid response from Knowledge Backend");
   }
 
-  return response.data.results;
+  if (logDebug) {
+    const meta = {
+      retrievalStatus: response.data.retrievalStatus,
+      noAnswerRecommended: response.data.noAnswerRecommended,
+      confidence: response.data.confidence
+    };
+    console.log("[KnowledgeSearch] response meta", meta);
+  }
+
+  return response.data;
+}
+
+export async function searchKnowledge(
+  params: SearchKnowledgeParams
+): Promise<KnowledgeSearchResult[]> {
+  const response = await searchKnowledgeWithMeta(params);
+  return response.results;
 }
 
 export async function createKnowledgeClient(params: {

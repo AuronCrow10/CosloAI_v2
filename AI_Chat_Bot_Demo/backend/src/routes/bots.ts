@@ -1,11 +1,14 @@
 // src/routes/bots.ts
 import { Router, Request, Response } from "express";
+import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
 import { listAccessibleBots } from "../services/teamAccessService";
 import { updateBotSubscriptionForFeatureChange } from "../services/billingService";
 import { deleteKnowledgeClient } from "../services/knowledgeClient";
+import { computeAssignedStyle } from "../services/revenueAIService";
+import { resolveKnowledgeRetrievalProfile } from "../knowledge/knowledgeRetrievalProfiles";
 
 const router = Router();
 
@@ -66,6 +69,7 @@ const botCreateSchema = z.object({
   domain: z.string().url().optional().nullable(),
 
   knowledgeSource: z.enum(["RAG", "SHOPIFY"]).optional().default("RAG"),
+  knowledgeRetrievalProfile: z.string().optional().nullable(),
   useDomainCrawler: z.boolean().optional().default(false),
   usePdfCrawler: z.boolean().optional().default(false),
   channelWeb: z.boolean().optional().default(true),
@@ -127,11 +131,41 @@ const botCreateSchema = z.object({
 
   leadWhatsappMessages200: z.boolean().optional().default(false),
   leadWhatsappMessages500: z.boolean().optional().default(false),
-  leadWhatsappMessages1000: z.boolean().optional().default(false)
+  leadWhatsappMessages1000: z.boolean().optional().default(false),
+
+  // Revenue AI settings
+  revenueAIEnabled: z.boolean().optional().default(false),
+  revenueAIMode: z.enum(["AUTO", "SOFT", "CLOSER"]).optional().default("AUTO"),
+  revenueAIOfferEveryXMessages: z.number().int().positive().optional(),
+  revenueAIMaxOffersPerSession: z.number().int().positive().optional(),
+  revenueAICooldownMinutes: z.number().int().min(0).optional(),
+  revenueAIDedupeHours: z.number().int().min(0).optional(),
+  revenueAIAttributionWindowHours: z.number().int().min(1).optional(),
+  revenueAIGuardrailsEnabled: z.boolean().optional(),
+  revenueAIUpsellDeltaMinPct: z.number().int().min(1).optional(),
+  revenueAIUpsellDeltaMaxPct: z.number().int().min(1).optional(),
+  revenueAIMaxRecommendations: z.number().int().min(1).optional(),
+  revenueAIAggressiveness: z.number().min(0).max(1).optional(),
+  revenueAICategoryComplementMap: z.any().optional()
 });
 
 const botUpdateSchema = botCreateSchema.partial().omit({ slug: true });
 
+const revenueAISettingsSchema = z.object({
+  revenueAIEnabled: z.boolean().optional(),
+  revenueAIMode: z.enum(["AUTO", "SOFT", "CLOSER"]).optional(),
+  revenueAIOfferEveryXMessages: z.number().int().positive().optional(),
+  revenueAIMaxOffersPerSession: z.number().int().positive().optional(),
+  revenueAICooldownMinutes: z.number().int().min(0).optional(),
+  revenueAIDedupeHours: z.number().int().min(0).optional(),
+  revenueAIAttributionWindowHours: z.number().int().min(1).optional(),
+  revenueAIGuardrailsEnabled: z.boolean().optional(),
+  revenueAIUpsellDeltaMinPct: z.number().int().min(1).optional(),
+  revenueAIUpsellDeltaMaxPct: z.number().int().min(1).optional(),
+  revenueAIMaxRecommendations: z.number().int().min(1).optional(),
+  revenueAIAggressiveness: z.number().min(0).max(1).optional(),
+  revenueAICategoryComplementMap: z.any().optional()
+});
 
 const metaLeadAutomationSchema = z.object({
   phoneFieldName: z.string().min(1),
@@ -238,6 +272,9 @@ router.post("/bots", async (req: Request, res: Response) => {
   }
   const data = parsed.data;
   const knowledgeSource = data.knowledgeSource ?? "RAG";
+  const knowledgeRetrievalProfile = resolveKnowledgeRetrievalProfile(
+    data.knowledgeRetrievalProfile
+  );
 
   const useDomainCrawler =
     knowledgeSource === "SHOPIFY" ? false : data.useDomainCrawler;
@@ -275,6 +312,7 @@ if (selectedCount > 1) {
       description: data.description ?? null,
       systemPrompt: data.systemPrompt || DEFAULT_SYSTEM_PROMPT,
       knowledgeSource,
+      knowledgeRetrievalProfile,
       knowledgeClientId: null, // <-- created later on first crawl/upload
       domain: data.domain ?? null,
       useDomainCrawler,
@@ -332,7 +370,34 @@ if (selectedCount > 1) {
       leadWhatsappMessages200: lead200,
       leadWhatsappMessages500: lead500,
       leadWhatsappMessages1000: lead1000,
-    }
+
+      revenueAIEnabled: data.revenueAIEnabled ?? false,
+      revenueAIMode: data.revenueAIMode ?? "AUTO",
+      revenueAIOfferEveryXMessages:
+        data.revenueAIOfferEveryXMessages ?? 6,
+      revenueAIMaxOffersPerSession:
+        data.revenueAIMaxOffersPerSession ?? 2,
+      revenueAICooldownMinutes: data.revenueAICooldownMinutes ?? 15,
+      revenueAIDedupeHours: data.revenueAIDedupeHours ?? 24,
+      revenueAIAttributionWindowHours:
+        data.revenueAIAttributionWindowHours ?? 24,
+      revenueAIGuardrailsEnabled:
+        typeof data.revenueAIGuardrailsEnabled === "boolean"
+          ? data.revenueAIGuardrailsEnabled
+          : true,
+      revenueAIUpsellDeltaMinPct:
+        data.revenueAIUpsellDeltaMinPct ?? 10,
+      revenueAIUpsellDeltaMaxPct:
+        data.revenueAIUpsellDeltaMaxPct ?? 35,
+      revenueAIMaxRecommendations:
+        data.revenueAIMaxRecommendations ?? 3,
+      revenueAIAggressiveness:
+        typeof data.revenueAIAggressiveness === "number"
+          ? data.revenueAIAggressiveness
+          : 0.5,
+      revenueAICategoryComplementMap:
+        data.revenueAICategoryComplementMap ?? null,
+    } as any
   });
 
   if (data.bookingServices && data.bookingServices.length > 0) {
@@ -513,6 +578,12 @@ if (selectedCount > 1) {
     leadWhatsappMessages1000: lead1000
   };
 
+  if (typeof data.knowledgeRetrievalProfile !== "undefined") {
+    updateData.knowledgeRetrievalProfile = resolveKnowledgeRetrievalProfile(
+      data.knowledgeRetrievalProfile
+    );
+  }
+
   if (nextKnowledgeSource === "SHOPIFY") {
     updateData.useDomainCrawler = false;
     updateData.usePdfCrawler = false;
@@ -570,6 +641,111 @@ router.get("/bots/:id", async (req: Request, res: Response) => {
   if (!bot) return res.status(404).json({ error: "Not found" });
   res.json(bot);
 });
+
+// Revenue AI settings (per bot)
+router.get("/bots/:id/revenue-ai", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id },
+    select: {
+      id: true,
+      revenueAIEnabled: true,
+      revenueAIMode: true,
+      revenueAIOfferEveryXMessages: true,
+      revenueAIMaxOffersPerSession: true,
+      revenueAICooldownMinutes: true,
+      revenueAIDedupeHours: true,
+      revenueAIAttributionWindowHours: true,
+      revenueAIGuardrailsEnabled: true,
+      revenueAIUpsellDeltaMinPct: true,
+      revenueAIUpsellDeltaMaxPct: true,
+      revenueAIMaxRecommendations: true,
+      revenueAIAggressiveness: true,
+      revenueAICategoryComplementMap: true
+    }
+  });
+
+  if (!bot) return res.status(404).json({ error: "Not found" });
+  res.json(bot);
+});
+
+router.put("/bots/:id/revenue-ai", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const parsed = revenueAISettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id }
+  });
+  if (!bot) return res.status(404).json({ error: "Not found" });
+
+  const updated = await prisma.bot.update({
+    where: { id: bot.id },
+    data: parsed.data
+  });
+
+  res.json(updated);
+});
+
+router.put("/bots/:id/revenue-ai/override", async (req: Request, res: Response) => {
+  if (req.user?.role === "TEAM_MEMBER") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const schema = z.object({
+    conversationId: z.string().min(1),
+    styleOverride: z.enum(["SOFT", "CLOSER"]).nullable()
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const bot = await prisma.bot.findFirst({
+    where: { id: req.params.id, userId: req.user!.id }
+  });
+  if (!bot) return res.status(404).json({ error: "Not found" });
+
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: parsed.data.conversationId, botId: bot.id }
+  });
+  if (!conversation) {
+    return res.status(404).json({ error: "Conversation not found" });
+  }
+
+  const existing = await prisma.revenueAISession.findUnique({
+    where: { conversationId: conversation.id }
+  });
+
+  const assignedStyle = existing?.assignedStyle || computeAssignedStyle(conversation.id);
+
+  const session = existing
+    ? await prisma.revenueAISession.update({
+        where: { id: existing.id },
+        data: { styleOverride: parsed.data.styleOverride }
+      })
+    : await prisma.revenueAISession.create({
+        data: {
+          id: crypto.randomUUID(),
+          botId: bot.id,
+          conversationId: conversation.id,
+          assignedStyle,
+          styleOverride: parsed.data.styleOverride
+        }
+      });
+
+  res.json(session);
+});
+
 
 // Delete bot (hard delete with slug confirmation and full cascade)
 router.delete("/bots/:id", async (req: Request, res: Response) => {
