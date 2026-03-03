@@ -149,6 +149,7 @@ model Bot {
   description            String?
   systemPrompt           String
   knowledgeSource        KnowledgeSource @default(RAG)
+  knowledgeRetrievalProfile KnowledgeRetrievalProfile @default(balanced)
   knowledgeClientId      String?
   domain                 String?
   useDomainCrawler       Boolean   @default(false)
@@ -255,6 +256,35 @@ model Bot {
 
   // NEW: Shopify integrations
   shopifyShops ShopifyShop[]
+
+  // =========================
+  // REVENUE AI (NEW)
+  // =========================
+
+  revenueAIEnabled               Boolean @default(false)
+  revenueAIMode                  String  @default("AUTO") // AUTO | SOFT | CLOSER
+  revenueAIOfferEveryXMessages   Int     @default(6)
+  revenueAIMaxOffersPerSession   Int     @default(2)
+  revenueAICooldownMinutes       Int     @default(15)
+  revenueAIDedupeHours           Int     @default(24)
+  revenueAIAttributionWindowHours Int    @default(24)
+  revenueAIGuardrailsEnabled     Boolean @default(true)
+  revenueAIUpsellDeltaMinPct     Int     @default(10)
+  revenueAIUpsellDeltaMaxPct     Int     @default(35)
+  revenueAIMaxRecommendations    Int     @default(3)
+  revenueAIAggressiveness        Float   @default(0.5)
+  revenueAICategoryComplementMap Json?
+
+  revenueAISessions     RevenueAISession[]
+  revenueAIOfferEvents  RevenueAIOfferEvent[]
+  revenueAIOfferActions RevenueAIOfferAction[]
+  revenueAIStyleOverrides RevenueAIStyleOverride[]
+  revenueAIStyleOverrideAudits RevenueAIStyleOverrideAudit[]
+
+  shopCatalogSchemas ShopCatalogSchema[]
+  shopCatalogContexts ShopCatalogContext[]
+  shopifyClerkStates ShopifyClerkState[]
+  shoppingSessionStates ShoppingSessionState[]
 }
 
 model BookingService {
@@ -289,6 +319,12 @@ enum BotStatus {
 enum KnowledgeSource {
   RAG
   SHOPIFY
+}
+
+enum KnowledgeRetrievalProfile {
+  balanced
+  precise
+  broad
 }
 
 model BotChannel {
@@ -378,6 +414,12 @@ model Conversation {
   messages Message[]
   evals    ConversationEval[]
 
+  revenueAISession    RevenueAISession?
+  revenueAIOfferEvents  RevenueAIOfferEvent[]
+  revenueAIOfferActions RevenueAIOfferAction[]
+  revenueAIStyleOverrides RevenueAIStyleOverride[]
+  revenueAIStyleOverrideAudits RevenueAIStyleOverrideAudit[]
+
   @@unique([botId, channel, externalUserId], name: "botId_channel_externalUserId")
 }
 
@@ -389,6 +431,8 @@ model Message {
   content          String
   channelMessageId String?
   createdAt        DateTime     @default(now())
+
+  revenueAIOfferEvents RevenueAIOfferEvent[]
 
   @@index([conversationId])
 }
@@ -1036,6 +1080,80 @@ model ShopifyPolicy {
   @@index([shopId])
 }
 
+model ShopCatalogSchema {
+  id         String @id @default(uuid())
+  botId      String
+  bot        Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  shopDomain String
+  schemaJson Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([botId, shopDomain], name: "ShopCatalogSchema_botId_shopDomain_unique")
+  @@index([botId])
+  @@index([shopDomain])
+}
+
+model ShopCatalogContext {
+  id         String @id @default(uuid())
+  botId      String
+  bot        Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  shopDomain String
+  contextJson Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([botId, shopDomain], name: "ShopCatalogContext_botId_shopDomain_unique")
+  @@index([botId])
+  @@index([shopDomain])
+}
+
+model ShopifyClerkState {
+  id                String  @id @default(uuid())
+  botId             String
+  bot               Bot     @relation(fields: [botId], references: [id], onDelete: Cascade)
+  shopDomain        String
+  sessionId         String?
+  conversationId    String?
+  language          String?
+  awaitingBroaden   Boolean @default(false)
+  pendingQuestions  Json?
+  collectedFilters  Json?
+  lastShortlist     Json?
+  rejectedProductIds Json?
+  lastShortlistAt   DateTime?
+  selectedProductId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([botId, sessionId], name: "ShopifyClerkState_botId_sessionId_unique")
+  @@unique([botId, conversationId], name: "ShopifyClerkState_botId_conversationId_unique")
+  @@index([botId])
+  @@index([sessionId])
+  @@index([conversationId])
+}
+
+model ShoppingSessionState {
+  id             String   @id @default(uuid())
+  botId          String
+  bot            Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  conversationId String?
+  sessionId      String?
+  stateJson      Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([botId])
+  @@index([conversationId])
+  @@index([sessionId])
+  @@unique([botId, conversationId], name: "ShoppingSessionState_bot_conversation_unique")
+  @@unique([botId, sessionId], name: "ShoppingSessionState_bot_session_unique")
+}
+
 model ShopifyDataEvent {
   id            String       @id @default(uuid())
   shopId        String?
@@ -1051,4 +1169,124 @@ model ShopifyDataEvent {
   @@index([shopId])
   @@index([shopDomain])
   @@index([eventType])
+}
+
+// =========================
+// REVENUE AI (NEW)
+// =========================
+
+model RevenueAISession {
+  id             String       @id @default(uuid())
+  botId          String
+  bot            Bot          @relation(fields: [botId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  assignedStyle   String
+  styleOverride   String?
+  offersShownCount Int        @default(0)
+  lastOfferMessageIndex Int?
+  lastOfferAt     DateTime?
+  lastSuggestedProductIds String[] @default([])
+  lastSuggestedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  offerEvents RevenueAIOfferEvent[]
+
+  @@unique([conversationId])
+  @@index([botId])
+}
+
+model RevenueAIOfferEvent {
+  id             String       @id @default(uuid())
+  botId          String
+  bot            Bot          @relation(fields: [botId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId      String?
+  message        Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  sessionId      String?
+  session        RevenueAISession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  offerType         String
+  stage             String
+  suggestedProductId String
+  baseProductId     String?
+  styleUsed         String
+  meta              Json?
+  timestamp         DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  actions   RevenueAIOfferAction[]
+
+  @@index([botId])
+  @@index([timestamp])
+  @@index([conversationId])
+  @@index([offerType])
+}
+
+model RevenueAIOfferAction {
+  id             String       @id @default(uuid())
+  eventId        String
+  event          RevenueAIOfferEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  botId          String
+  bot            Bot          @relation(fields: [botId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  action       String
+  idempotencyKey String?
+  orderId      String?
+  revenueCents Int?
+  currency     String?
+  meta         Json?
+  timestamp    DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  @@index([botId])
+  @@index([timestamp])
+  @@index([action])
+  @@index([eventId])
+  @@unique([idempotencyKey])
+}
+
+model RevenueAIStyleOverride {
+  id              String   @id @default(uuid())
+  botId           String
+  bot             Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  conversationId  String?
+  conversation    Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sessionId       String?
+  styleOverride   String
+  expiresAt       DateTime?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([botId])
+  @@index([conversationId])
+  @@index([sessionId])
+  @@index([expiresAt])
+}
+
+model RevenueAIStyleOverrideAudit {
+  id              String   @id @default(uuid())
+  botId           String
+  bot             Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  conversationId  String?
+  conversation    Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sessionId       String?
+  fromStyle       String?
+  toStyle         String?
+  expiresAt       DateTime?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  @@index([botId])
+  @@index([conversationId])
+  @@index([sessionId])
+  @@index([createdAt])
 }
