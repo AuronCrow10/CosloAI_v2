@@ -160,8 +160,12 @@ export class Database {
       };
     } catch (err: any) {
       if (err?.code === '23505') {
-        const e = new Error('DUPLICATE_MAIN_DOMAIN');
-        (e as any).code = 'DUPLICATE_MAIN_DOMAIN';
+        const constraint = String(err?.constraint || '');
+        const code = constraint.includes('idx_clients_name')
+          ? 'DUPLICATE_CLIENT_NAME'
+          : 'DUPLICATE_MAIN_DOMAIN';
+        const e = new Error(code);
+        (e as any).code = code;
         throw e;
       }
       throw err;

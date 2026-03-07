@@ -472,7 +472,6 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
     };
 
     if (!name) return res.status(400).json({ error: 'name is required' });
-    if (!mainDomain) return res.status(400).json({ error: 'mainDomain is required' });
 
     const model =
       embeddingModel === 'text-embedding-3-large'
@@ -480,9 +479,16 @@ app.post('/clients', requireInternalAuth, async (req, res) => {
         : 'text-embedding-3-small';
 
     try {
-      const client = await db.createClient({ name, embeddingModel: model, mainDomain });
+      const client = await db.createClient({
+        name,
+        embeddingModel: model,
+        mainDomain: mainDomain || null,
+      });
       return res.status(201).json({ client, created: true });
     } catch (err: any) {
+      if (err?.code === 'DUPLICATE_CLIENT_NAME') {
+        return res.status(409).json({ error: 'client name already exists' });
+      }
       if (err?.code === 'DUPLICATE_MAIN_DOMAIN') {
         return res.status(409).json({ error: 'mainDomain already exists for another client' });
       }
