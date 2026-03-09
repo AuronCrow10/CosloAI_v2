@@ -282,7 +282,8 @@
 
     var hintTimeoutId = null;
     var hintIntervalId = null;
-    var HINT_GAP_PX = 12;
+    // Keep hint close to the visible icon (many GIFs include transparent padding).
+    var HINT_GAP_PX = -6;
 
     function positionHintBubble() {
       var launcherRect = launcher.getBoundingClientRect();
