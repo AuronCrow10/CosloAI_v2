@@ -28,7 +28,7 @@
     var slug = script.getAttribute("data-bot-slug");
     var iconUrl = script.getAttribute("data-bot-icon");
     var defaultIconUrl = "https://i.ibb.co/cczVssVz/test.gif";
-    var position = script.getAttribute("data-bot-position") || "bottom-left";
+    var position = script.getAttribute("data-bot-position") || "bottom-right";
 
     // NEW: optional language parameter (default: "en")
     var lang = script.getAttribute("data-bot-lang") || "en";
@@ -278,18 +278,36 @@
     hintBubble.style.transition =
       "opacity 0.25s ease-out, transform 0.25s ease-out";
 
-    if (position === "bottom-left") {
-      hintBubble.style.left = "90px";
-      hintBubble.style.bottom = "32px";
-    } else {
-      hintBubble.style.right = "90px";
-      hintBubble.style.bottom = "32px";
-    }
-
     document.body.appendChild(hintBubble);
 
     var hintTimeoutId = null;
     var hintIntervalId = null;
+    var HINT_GAP_PX = 12;
+
+    function positionHintBubble() {
+      var launcherRect = launcher.getBoundingClientRect();
+      var centerY = launcherRect.top + launcherRect.height / 2;
+      var estimatedHintHeight = 36;
+      var bottom = Math.max(
+        12,
+        Math.round(window.innerHeight - centerY - estimatedHintHeight / 2)
+      );
+      hintBubble.style.bottom = bottom + "px";
+
+      if (position === "bottom-left") {
+        // launcher on left -> hint appears on its right
+        hintBubble.style.left = Math.round(launcherRect.right + HINT_GAP_PX) + "px";
+        hintBubble.style.right = "auto";
+      } else {
+        // launcher on right -> hint appears on its left
+        hintBubble.style.right =
+          Math.round(window.innerWidth - launcherRect.left + HINT_GAP_PX) + "px";
+        hintBubble.style.left = "auto";
+      }
+    }
+
+    positionHintBubble();
+    window.addEventListener("resize", positionHintBubble);
 
     function hideHint() {
       hintBubble.style.opacity = "0";
@@ -306,6 +324,7 @@
 
       var msg = hints[Math.floor(Math.random() * hints.length)];
       hintBubble.textContent = msg;
+      positionHintBubble();
       hintBubble.style.opacity = "1";
       hintBubble.style.transform = "translateY(0)";
 
