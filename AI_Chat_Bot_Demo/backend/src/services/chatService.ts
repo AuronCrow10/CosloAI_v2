@@ -219,6 +219,198 @@ function detectQuickMessageLanguage(message: string): "it" | "en" | "es" | "de" 
   return detectQuickMessageLanguageHint(message) ?? "en";
 }
 
+const AFFIRMATIVE_SHORT_REPLIES = new Set([
+  "ok",
+  "okay",
+  "k",
+  "yes",
+  "yep",
+  "yeah",
+  "sure",
+  "of course",
+  "definitely",
+  "absolutely",
+  "certainly",
+  "si",
+  "s",
+  "ovvio",
+  "va bene",
+  "d accordo",
+  "accordo",
+  "perfetto",
+  "certo",
+  "continua",
+  "prosegui",
+  "esatto",
+  "claro",
+  "por supuesto",
+  "desde luego",
+  "vale",
+  "de acuerdo",
+  "si claro",
+  "oui",
+  "bien sur",
+  "d accord",
+  "tout a fait",
+  "oui bien sur",
+  "ja",
+  "natuerlich",
+  "klar",
+  "sicher",
+  "einverstanden",
+  "ja klar",
+  "selbstverstaendlich"
+]);
+
+const NEGATIVE_SHORT_REPLIES = new Set([
+  "no",
+  "nope",
+  "not now",
+  "not really",
+  "nah",
+  "non ora",
+  "non",
+  "niente",
+  "claro que no",
+  "para nada",
+  "ahora no",
+  "no gracias",
+  "non merci",
+  "pas maintenant",
+  "pas vraiment",
+  "nein",
+  "nicht jetzt",
+  "eher nicht",
+  "nein danke",
+  "stop",
+  "basta"
+]);
+
+const GENERIC_SHORT_REPLIES = new Set([
+  ...Array.from(AFFIRMATIVE_SHORT_REPLIES),
+  ...Array.from(NEGATIVE_SHORT_REPLIES),
+  "thanks",
+  "thank you",
+  "thx",
+  "thanks a lot",
+  "cool",
+  "great",
+  "awesome",
+  "nice",
+  "sounds good",
+  "alright",
+  "fine",
+  "gracias",
+  "merci",
+  "danke",
+  "ok merci",
+  "vale gracias",
+  "ok gracias",
+  "ok danke",
+  "grazie",
+  "perfetto grazie"
+]);
+
+function normalizeShortReplyToken(message: string): string {
+  return foldContextText(message)
+    .replace(/[^a-z0-9\s'-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getLastAssistantContent(historyMessages: ChatMessage[]): string | null {
+  for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
+    const msg = historyMessages[i];
+    if (msg.role !== "assistant") continue;
+    const content = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (content) return content;
+  }
+  return null;
+}
+
+function assistantMessageEndsWithQuestion(content: string | null): boolean {
+  if (!content) return false;
+  return /[?][\s"'”’)]*$/.test(content.trim());
+}
+
+function assistantAskedForPersonalField(content: string | null): boolean {
+  if (!content) return false;
+  const folded = foldContextText(content);
+  return /\b(name|nome|come ti chiami|email|telefono|phone|contatt|contact)\b/i.test(
+    folded
+  );
+}
+
+function isWeakLanguageSignalMessage(message: string): boolean {
+  const normalized = normalizeShortReplyToken(message);
+  if (!normalized) return true;
+  if (GENERIC_SHORT_REPLIES.has(normalized)) return true;
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && words[0].length <= 3) return true;
+  return false;
+}
+
+type ShortAffirmativeFollowUpContext = {
+  normalizedReply: string;
+  previousQuestion: string;
+  resolvedKnowledgeQuery: string;
+};
+
+function extractLastAssistantQuestion(content: string | null): string | null {
+  if (!content) return null;
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+
+  const matches = compact.match(/[^?]+[?]/g);
+  if (!matches || matches.length === 0) return null;
+
+  const question = matches[matches.length - 1].replace(/\s+/g, " ").trim();
+  if (question.length < 8) return null;
+  return question;
+}
+
+function resolveShortAffirmativeFollowUpContext(params: {
+  message: string;
+  historyMessages: ChatMessage[];
+  bookingFlowActive: boolean;
+}): ShortAffirmativeFollowUpContext | null {
+  const { message, historyMessages, bookingFlowActive } = params;
+  if (bookingFlowActive) return null;
+
+  const normalizedReply = normalizeShortReplyToken(message);
+  if (!AFFIRMATIVE_SHORT_REPLIES.has(normalizedReply)) {
+    return null;
+  }
+
+  const previousQuestion = extractLastAssistantQuestion(
+    getLastAssistantContent(historyMessages)
+  );
+  if (!previousQuestion) return null;
+
+  const resolvedKnowledgeQuery = previousQuestion.replace(/[?]+$/, "").trim();
+  if (!resolvedKnowledgeQuery) return null;
+
+  return {
+    normalizedReply,
+    previousQuestion,
+    resolvedKnowledgeQuery
+  };
+}
+
+function buildShortAffirmativeFollowUpSystemHint(
+  context: ShortAffirmativeFollowUpContext
+): string {
+  return (
+    "Short-confirmation follow-up rule:\n" +
+    `- The user replied with a short affirmative ("${context.normalizedReply}") to your previous question.\n` +
+    "- You MUST answer strictly within the scope of that previous question.\n" +
+    "- Cover all options explicitly offered in that question when possible.\n" +
+    "- Do NOT introduce extra topics, assumptions, ROI claims, or unrelated business facts.\n" +
+    `Previous assistant question: ${context.previousQuestion}`
+  );
+}
+
 function isSupportedLanguage(value: string | null | undefined): value is SupportedLanguage {
   return (
     value === "it" ||
@@ -1793,7 +1985,7 @@ function shouldEnableBookingForTurn(message: string, shopifyEnabled: boolean): b
   if (hasBookingSignal) return true;
 
   const hasShopifySignal = shopifySignals.some((s) => lower.includes(s));
-  const hasPriceSignal = /[\d,.]+\s?(â‚¬|\$|eur|usd)/i.test(lower);
+  const hasPriceSignal = /[\d,.]+\s?(\$|eur|usd|euro)\b/i.test(lower);
 
   if (hasShopifySignal || hasPriceSignal) {
     return false;
@@ -1802,22 +1994,66 @@ function shouldEnableBookingForTurn(message: string, shopifyEnabled: boolean): b
   return true;
 }
 
+const BOOKING_FLOW_SIGNAL_REGEX =
+  /\b(prenot|appunt|appointment|book|booking|reserve|reservation|buch|buchung|termin|reservier|rendez|rdv|schedule|calendario|slot|disponibilit|dispo)\b/i;
+
+function isBookingFlowActiveForTurn(params: {
+  message: string;
+  historyMessages: ChatMessage[];
+  bookingEnabled: boolean;
+  shopifyEnabled: boolean;
+}): boolean {
+  const { message, historyMessages, bookingEnabled, shopifyEnabled } = params;
+  if (!bookingEnabled) return false;
+
+  const lastAssistant = getLastAssistantContent(historyMessages);
+  if (assistantAskedForPersonalField(lastAssistant)) {
+    return true;
+  }
+
+  if (!shopifyEnabled) {
+    if (BOOKING_FLOW_SIGNAL_REGEX.test(foldContextText(message))) {
+      return true;
+    }
+  } else if (shouldEnableBookingForTurn(message, shopifyEnabled)) {
+    return true;
+  }
+
+  const recentWindow = historyMessages
+    .slice(-6)
+    .map((msg) => (typeof msg.content === "string" ? msg.content : ""))
+    .join(" ");
+  return BOOKING_FLOW_SIGNAL_REGEX.test(foldContextText(recentWindow));
+}
+
 /**
  * Decide whether we really need to hit the knowledge backend for this turn.
  */
 function shouldUseKnowledgeForTurn(
   message: string,
-  historyMessages: ChatMessage[]
+  historyMessages: ChatMessage[],
+  options?: { bookingFlowActive?: boolean }
 ): boolean {
   const normalized = message.trim().toLowerCase();
+  const normalizedReply = normalizeShortReplyToken(message);
+  const lastAssistantContent = getLastAssistantContent(historyMessages);
+  const lastAssistantAskedQuestion =
+    assistantMessageEndsWithQuestion(lastAssistantContent);
+  const lastAssistantAskedPersonalField =
+    assistantAskedForPersonalField(lastAssistantContent);
+  const bookingFlowActive = options?.bookingFlowActive === true;
 
   // Always use knowledge for the first turn (no history yet)
   if (historyMessages.length === 0) return true;
 
   // Very short acknowledgements / small talk
-  const pureAckRegex =
-    /^(ok|okay|k|thanks|thank you|cool|great|awesome|nice|sounds good|sure|yes|no|alright|fine)[.!]?$/;
-  if (pureAckRegex.test(normalized)) {
+  if (GENERIC_SHORT_REPLIES.has(normalizedReply)) {
+    if (
+      lastAssistantAskedQuestion &&
+      AFFIRMATIVE_SHORT_REPLIES.has(normalizedReply)
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -1853,11 +2089,35 @@ function shouldUseKnowledgeForTurn(
       /\b([01]?\d|2[0-3]):[0-5]\d\b/.test(message) ||
       /\b(1[0-2]|0?[1-9])\s?(am|pm)\b/i.test(message);
 
+    const folded = foldContextText(message);
     const words = normalized.split(/\s+/).filter(Boolean);
+    const originalWords = message.trim().split(/\s+/).filter(Boolean);
+    const hasDirectiveVerb =
+      /\b(show|list|give|tell|provide|dimmi|dammi|elenca|mostra|indica|dime|quiero|muestrame|liste|zeige|gib|montre|donne)\b/i.test(
+        normalized
+      );
+    const hasKnowledgeQueryToken =
+      /\b(price|prices|pricing|prezzo|prezzi|costo|costi|cost|costs|acquisto|noleggio|buy|rent|vendita|finanzi|financing|details|dettagli|info|informazioni|contatti|contact|modelli|versioni)\b/i.test(
+        folded
+      );
+    const hasConnectorWord =
+      /\b(di|de|del|della|dello|da|per|for|con|su|a|al|la|le|lo|el|los|las|the|of)\b/i.test(
+        folded
+      );
+    const hasCapitalizedToken = originalWords.some((word) =>
+      /^[A-ZÀ-Ý]/.test(word)
+    );
+    const isNameLikeTokenSet = originalWords.every((word) =>
+      /^[A-Za-zÀ-ÖØ-öø-ÿ.'-]+$/.test(word)
+    );
     const looksLikeName =
       words.length > 0 &&
-      words.length <= 4 &&
-      /^[a-zÃ -Ãº.'-]+\s?[a-zÃ -Ãº.'-]*\s?[a-zÃ -Ãº.'-]*$/i.test(message) &&
+      words.length <= 3 &&
+      isNameLikeTokenSet &&
+      (hasCapitalizedToken || lastAssistantAskedPersonalField) &&
+      !hasDirectiveVerb &&
+      !hasKnowledgeQueryToken &&
+      !hasConnectorWord &&
       !looksLikeEmail &&
       !looksLikeDateWord &&
       !looksLikeTime;
@@ -1867,7 +2127,7 @@ function shouldUseKnowledgeForTurn(
       looksLikePhone ||
       looksLikeDateWord ||
       looksLikeTime ||
-      looksLikeName
+      (bookingFlowActive && looksLikeName)
     ) {
       return false;
     }
@@ -1875,6 +2135,57 @@ function shouldUseKnowledgeForTurn(
 
   // Default: use knowledge
   return true;
+}
+
+function resolveAssistantMaxTokens(params: {
+  message: string;
+  useKnowledge: boolean;
+  knowledgeIntent?: string | null;
+  knowledgePolicyMode?: string | null;
+  knowledgeResponseStrategy?: string | null;
+}): number {
+  const {
+    message,
+    useKnowledge,
+    knowledgeIntent = null,
+    knowledgePolicyMode = null,
+    knowledgeResponseStrategy = null
+  } = params;
+
+  const normalized = ` ${foldContextText(message)} `;
+  const hasListSignal =
+    /\b(list|lista|elenco|catalog|catalogo|catalogue|enumerate|enumera|elenca|mostra|show|full|complete|completo|completa|intero|intera|tutti|tutte|all|every|todo|todos|todas|gesamt|vollstaendig|complet)\b/i.test(
+      normalized
+    );
+  const hasPriceSignal =
+    /\b(price|prices|pricing|prezzo|prezzi|costo|costi|tariff|cost|kosten|preis|preise|prix)\b/i.test(
+      normalized
+    ) || /[\d,.]+\s?(\$|eur|usd|euro)\b/i.test(message);
+  const hasCompletenessSignal =
+    /\b(all|every|tutti|tutte|todo|todos|todas|complete|completo|completa|full|entire|intero|intera|gesamt|vollstaendig|complet)\b/i.test(
+      normalized
+    );
+
+  let maxTokens = 200;
+
+  if (useKnowledge) {
+    if (knowledgePolicyMode === "overview") maxTokens = Math.max(maxTokens, 260);
+    if (knowledgeIntent === "specific") maxTokens = Math.max(maxTokens, 220);
+
+    if (
+      knowledgeResponseStrategy === "clarify" ||
+      knowledgeResponseStrategy === "insufficient_info"
+    ) {
+      maxTokens = Math.min(maxTokens, 180);
+    }
+  }
+
+  if (hasListSignal) maxTokens = Math.max(maxTokens, 320);
+  if (hasListSignal && hasCompletenessSignal) maxTokens = Math.max(maxTokens, 380);
+  if (hasListSignal && hasPriceSignal) maxTokens = Math.max(maxTokens, 440);
+  if (hasPriceSignal && hasCompletenessSignal) maxTokens = Math.max(maxTokens, 380);
+
+  return Math.min(520, Math.max(160, maxTokens));
 }
 
 function hasAnyBookingDraftData(draft: BookingDraft | null | undefined): boolean {
@@ -2137,6 +2448,23 @@ export async function generateBotReplyForSlug(
     await maybeUpdateConversationMemorySummary(slug, options.conversationId);
   }
 
+  // Booking config for chat (normalized)
+  const botBookingCfg = normalizeBookingConfigForChat(botConfig.booking);
+  const bookingEnabled = !!botBookingCfg;
+  const bookingFlowActiveForKnowledge = isBookingFlowActiveForTurn({
+    message,
+    historyMessages,
+    bookingEnabled,
+    shopifyEnabled
+  });
+  const shortAffirmativeFollowUp = resolveShortAffirmativeFollowUpContext({
+    message,
+    historyMessages,
+    bookingFlowActive: bookingFlowActiveForKnowledge
+  });
+  const knowledgeInputMessage =
+    shortAffirmativeFollowUp?.resolvedKnowledgeQuery ?? message;
+
   const memorySummary =
     options.conversationId != null
       ? await getConversationMemorySummary(options.conversationId)
@@ -2144,7 +2472,9 @@ export async function generateBotReplyForSlug(
 
   const useKnowledge =
     knowledgeSource === "RAG" &&
-    shouldUseKnowledgeForTurn(message, historyMessages);
+    shouldUseKnowledgeForTurn(message, historyMessages, {
+      bookingFlowActive: bookingFlowActiveForKnowledge
+    });
 
   const tokenDebug =
     String(process.env.TOKEN_DEBUG || "").toLowerCase() === "true";
@@ -2163,6 +2493,9 @@ export async function generateBotReplyForSlug(
   // 1) Build the RAG or no-RAG system message
   let contextSystemMessage: ChatMessage;
   let knowledgeEarlyReply: string | null = null;
+  let knowledgeIntentForBudget: string | null = null;
+  let knowledgePolicyModeForBudget: string | null = null;
+  let knowledgeResponseStrategyForBudget: string | null = null;
 
   if (useKnowledge) {
     if (!botConfig.knowledgeClientId) {
@@ -2172,11 +2505,12 @@ export async function generateBotReplyForSlug(
     }
 
     const intentResult = await classifyKnowledgeIntent({
-      message,
+      message: knowledgeInputMessage,
       usageContext: usageBase
     });
+    knowledgeIntentForBudget = intentResult.intent;
 
-    const contactDetection = detectContactQuery(message);
+    const contactDetection = detectContactQuery(knowledgeInputMessage);
 
     const profile = resolveKnowledgeRetrievalProfile(
       botConfig.knowledgeRetrievalProfile
@@ -2191,7 +2525,7 @@ export async function generateBotReplyForSlug(
       : retrievalParams;
 
     const knowledgeLanguage = await detectKnowledgeLanguage({
-      message,
+      message: knowledgeInputMessage,
       lockedLanguage: shoppingState?.language ?? null,
       routedLanguage: routerResult?.language ?? null,
       botId: botConfig.botId ?? null
@@ -2223,14 +2557,14 @@ export async function generateBotReplyForSlug(
             domain: botConfig.domain,
             ftsLanguage,
             retrievalParams: effectiveRetrievalParams,
-            rawQuery: message,
+            rawQuery: knowledgeInputMessage,
             includeRawQuery: true,
             preferPartnerSources: contactDetection.requestedFields.partner
           })
         }
       : await runKnowledgeRetrieval({
           intent: intentResult.intent,
-          message,
+          message: knowledgeInputMessage,
           clientId: botConfig.knowledgeClientId,
           domain: botConfig.domain,
           ftsLanguage,
@@ -2280,6 +2614,8 @@ export async function generateBotReplyForSlug(
       retrieval: retrievalMeta,
       resultsCount: results.length
     });
+    knowledgePolicyModeForBudget = policy.mode;
+    knowledgeResponseStrategyForBudget = policy.responseStrategy;
 
     if (logDebug) {
       console.log("[KnowledgeIntent] result", {
@@ -2486,7 +2822,7 @@ export async function generateBotReplyForSlug(
       const rawText = r.text || "";
       const trimmedText = buildContextSnippet({
         rawText,
-        message,
+        message: knowledgeInputMessage,
         maxChars: MAX_CONTEXT_CHARS_PER_CHUNK
       });
 
@@ -2549,11 +2885,7 @@ export async function generateBotReplyForSlug(
     };
   }
 
-  // 2) Booking config for chat (normalized)
-  const botBookingCfg = normalizeBookingConfigForChat(botConfig.booking);
-  const bookingEnabled = !!botBookingCfg;
-
-  // 3) Base messages for OpenAI
+  // 2) Base messages for OpenAI
   const messages: ChatMessage[] = [
     {
       role: "system",
@@ -2606,8 +2938,9 @@ export async function generateBotReplyForSlug(
     botId: botConfig.botId ?? null
   });
   const quickDetectedLanguage = detectQuickMessageLanguageHint(message);
-  const effectiveDetectedLanguage =
-    detectedReplyLanguage ?? quickDetectedLanguage ?? historyDetectedLanguage;
+  const effectiveDetectedLanguage = isWeakLanguageSignalMessage(message)
+    ? historyDetectedLanguage ?? quickDetectedLanguage ?? detectedReplyLanguage
+    : detectedReplyLanguage ?? quickDetectedLanguage ?? historyDetectedLanguage;
   const detectedLanguageHint = languageHintFromDetected(effectiveDetectedLanguage);
   if (detectedLanguageHint) {
     messages.push({
@@ -2657,10 +2990,12 @@ export async function generateBotReplyForSlug(
     content: typeof (msg as any).content === "string" ? ((msg as any).content as string) : null
   }));
 
-  const shouldAskClarifier = shouldAskClarifyingQuestion({
-    message,
-    history: historyForIntent
-  });
+  const shouldAskClarifier =
+    !shortAffirmativeFollowUp &&
+    shouldAskClarifyingQuestion({
+      message,
+      history: historyForIntent
+    });
   
   if (shouldAskClarifier) {
     messages.push({
@@ -3192,6 +3527,23 @@ export async function generateBotReplyForSlug(
     }
   }
 
+  if (shortAffirmativeFollowUp) {
+    const followUpHint = buildShortAffirmativeFollowUpSystemHint(
+      shortAffirmativeFollowUp
+    );
+    messages.push({
+      role: "system",
+      content: followUpHint
+    });
+    if (tokenDebug) {
+      console.log("[TokenDebug] shortAffirmativeFollowUpHint", {
+        botId: botConfig.botId,
+        chars: countChars(followUpHint),
+        previousQuestion: shortAffirmativeFollowUp.previousQuestion
+      });
+    }
+  }
+
   // 5) Current user turn
   messages.push({
     role: "user",
@@ -3211,10 +3563,18 @@ export async function generateBotReplyForSlug(
   }
 
   // 6) If no tools, simple path
+  const chatBasicMaxTokens = resolveAssistantMaxTokens({
+    message: knowledgeInputMessage,
+    useKnowledge,
+    knowledgeIntent: knowledgeIntentForBudget,
+    knowledgePolicyMode: knowledgePolicyModeForBudget,
+    knowledgeResponseStrategy: knowledgeResponseStrategyForBudget
+  });
+
   if (tools.length === 0) {
     const reply = await getChatCompletion({
       messages,
-      maxTokens: 200,
+      maxTokens: chatBasicMaxTokens,
       usageContext: {
         ...usageBase,
         operation: "chat_basic"

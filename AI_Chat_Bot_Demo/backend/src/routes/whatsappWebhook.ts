@@ -161,7 +161,6 @@ function extractImageUrls(text: string): string[] {
 function stripImageMarkdown(text: string): string {
   return text
     .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/gi, "")
-    .replace(/\s{2,}/g, " ")
     .trim();
 }
 
@@ -190,6 +189,38 @@ function stripActionLines(text: string): string {
 
 function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").trim();
+}
+
+function expandMarkdownLinks(text: string): string {
+  return text.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, "$1: $2");
+}
+
+function hasShopifyStyleReplySignals(reply: string): boolean {
+  const hasProductUrl = /https?:\/\/\S*\/products\/\S*/i.test(reply);
+  const hasAddToCartUrl = /https?:\/\/\S*\/cart\/add\S*/i.test(reply);
+  if (hasProductUrl || hasAddToCartUrl) return true;
+  if (
+    /\[(view product|add to cart|vedi prodotto|aggiungi al carrello|ver producto|agregar al carrito)\]\(https?:\/\/[^)]+\)/i.test(
+      reply
+    )
+  ) {
+    return true;
+  }
+  return /^(view product|add to cart|vedi prodotto|aggiungi al carrello|ver producto|agregar al carrito)$/im.test(
+    reply
+  );
+}
+
+function formatWhatsappReplyText(reply: string, shopifyStyle: boolean): string {
+  const replySansImages = stripImageMarkdown(reply);
+  if (shopifyStyle) {
+    return (
+      stripUrls(stripMarkdownLinks(stripActionLines(replySansImages))) ||
+      replySansImages ||
+      reply
+    );
+  }
+  return expandMarkdownLinks(replySansImages).trim() || replySansImages || reply;
 }
 
 export async function markWhatsAppNeedsReconnect(requestId: string, channelId: string, context: string) {
@@ -628,11 +659,10 @@ if (wantsHuman && convo.mode !== ConversationMode.HUMAN) {
           const replyRaw = result.reply;
           const chatMs = Date.now() - t0;
           const imageUrls = extractImageUrls(replyRaw);
-          const replySansImages = stripImageMarkdown(replyRaw);
-          const reply =
-            stripUrls(stripMarkdownLinks(stripActionLines(replySansImages))) ||
-            replySansImages ||
-            replyRaw;
+          const reply = formatWhatsappReplyText(
+            replyRaw,
+            hasShopifyStyleReplySignals(stripImageMarkdown(replyRaw))
+          );
 
           logLine("INFO", "WA", "reply generated", {
             req: requestId,

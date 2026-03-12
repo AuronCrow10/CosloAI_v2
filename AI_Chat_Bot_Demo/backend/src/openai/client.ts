@@ -37,6 +37,65 @@ function normalizeUsageContext(
   };
 }
 
+function extractTextContent(content: any): string {
+  if (content == null) return "";
+  if (Array.isArray(content)) {
+    return content
+      .map((part: any) =>
+        typeof part === "string"
+          ? part
+          : part?.text?.value ?? part?.text ?? ""
+      )
+      .join("");
+  }
+  return String(content);
+}
+
+function buildContinuationPrompt(params: {
+  combined: string;
+  duplicateRetry: boolean;
+}): string {
+  const tailAnchor = params.combined.slice(-220);
+  return (
+    "Continue the assistant reply EXACTLY from where it stopped.\n" +
+    "Rules:\n" +
+    "- Continue with only NEW text that has not already been written.\n" +
+    "- Do not repeat or paraphrase previously generated lines.\n" +
+    "- Preserve the same language, format, and list structure.\n" +
+    "- Return only the continuation text.\n" +
+    (params.duplicateRetry
+      ? "- Your previous continuation repeated existing text; produce only the missing remainder.\n"
+      : "") +
+    `Already generated tail (for anchor):\n<<<${tailAnchor}>>>`
+  );
+}
+
+function mergeContinuationText(combined: string, chunk: string): string {
+  if (!chunk) return combined;
+  if (!combined) return chunk;
+
+  const next = chunk.replace(/^\s+/, "");
+  if (!next) return combined;
+
+  const tailWindow = combined.slice(-1400);
+  if (tailWindow.includes(next)) {
+    return combined;
+  }
+
+  const maxOverlap = Math.min(700, combined.length, next.length);
+  const minOverlap = Math.min(40, maxOverlap);
+  for (let k = maxOverlap; k >= minOverlap; k -= 1) {
+    if (combined.slice(-k) === next.slice(0, k)) {
+      return combined + next.slice(k);
+    }
+  }
+
+  if (!/[ \n\t]$/.test(combined) && !/^[ \n\t.,;:!?)]/.test(next)) {
+    return `${combined}\n${next}`;
+  }
+  return combined + next;
+}
+
 /**
  * Low-level helper: calls OpenAI and records usage if usageContext is provided.
  * Always uses the Chat Completions API (no Responses API).
@@ -128,8 +187,9 @@ export async function getChatCompletion(params: {
   } = params;
 
   let combined = "";
-  let currentMessages = messages.slice();
   let continuations = 0;
+  let duplicateRetries = 0;
+  let currentMessages = messages.slice();
 
   while (true) {
     const completion = await createChatCompletionWithUsage({
@@ -157,20 +217,19 @@ export async function getChatCompletion(params: {
       throw new Error("No content returned from OpenAI");
     }
 
-    const text = Array.isArray(content)
-      ? content
-          .map((part: any) =>
-            typeof part === "string"
-              ? part
-              : part?.text?.value ?? part?.text ?? ""
-          )
-          .join("")
-      : (content as string);
-
-    combined += text;
+    const text = extractTextContent(content);
+    const merged = mergeContinuationText(combined, text);
+    const mergedChanged = merged !== combined;
+    combined = merged;
 
     if (finishReason !== "length") {
       break;
+    }
+
+    if (!mergedChanged && duplicateRetries < 1) {
+      duplicateRetries += 1;
+    } else {
+      duplicateRetries = 0;
     }
 
     if (continuations >= maxContinuations) {
@@ -183,9 +242,15 @@ export async function getChatCompletion(params: {
 
     continuations += 1;
     currentMessages = [
-      ...currentMessages,
-      { role: "assistant", content: text },
-      { role: "user", content: "Continue from where you left off." }
+      ...messages,
+      { role: "assistant", content: combined },
+      {
+        role: "user",
+        content: buildContinuationPrompt({
+          combined,
+          duplicateRetry: duplicateRetries > 0
+        })
+      }
     ];
   }
 

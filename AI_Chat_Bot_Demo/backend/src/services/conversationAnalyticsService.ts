@@ -6,6 +6,7 @@ import { ChatMessage, getChatCompletion } from "../openai/client";
 import { getBotConfigBySlug } from "../bots/config";
 
 const MIN_MESSAGES_FOR_MEMORY_SUMMARY = 6; // ~3 user+assistant turns
+const MIN_NEW_MESSAGES_FOR_MEMORY_SUMMARY_REFRESH = 4;
 const MIN_MESSAGES_FOR_EVAL = 4; // at least a bit of back-and-forth
 
 export async function getConversationMemorySummary(
@@ -39,9 +40,21 @@ export async function maybeUpdateConversationMemorySummary(
     return;
   }
 
-  // For now: only create the memory summary once per conversation.
-  if (conversation.memorySummary) {
-    return;
+  if (conversation.memorySummary && conversation.memorySummaryUpdatedAt) {
+    const newMessagesSinceSummary = conversation.messages.filter(
+      (msg) => msg.createdAt > conversation.memorySummaryUpdatedAt!
+    ).length;
+    if (newMessagesSinceSummary < MIN_NEW_MESSAGES_FOR_MEMORY_SUMMARY_REFRESH) {
+      return;
+    }
+
+    console.log(
+      `[Summary] Refreshing memory summary for conversation ${conversationId}: ${newMessagesSinceSummary} new messages`
+    );
+  } else if (conversation.memorySummary) {
+    console.log(
+      `[Summary] Refreshing memory summary for conversation ${conversationId}: summary timestamp missing`
+    );
   }
 
   console.log(
