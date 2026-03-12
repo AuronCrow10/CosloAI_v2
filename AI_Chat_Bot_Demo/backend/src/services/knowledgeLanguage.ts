@@ -9,12 +9,59 @@ type LlmLanguageResult = {
 
 const LLM_LANGUAGE_CACHE = new Map<string, KnowledgeLanguage>();
 
+function stripCodeFences(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("```")) {
+    return trimmed.replace(/^```[a-zA-Z0-9]*\n?/, "").replace(/```$/, "").trim();
+  }
+  return trimmed;
+}
+
+function extractJsonObject(raw: string): string | null {
+  const text = stripCodeFences(raw);
+  if (text.startsWith("{") && text.endsWith("}")) return text;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return text.slice(start, end + 1);
+  }
+  return null;
+}
+
+function normalizeLanguageTag(input: unknown): KnowledgeLanguage | null {
+  if (typeof input !== "string") return null;
+  const value = input.trim().toLowerCase();
+
+  if (
+    value === "en" ||
+    value === "it" ||
+    value === "es" ||
+    value === "de" ||
+    value === "fr"
+  ) {
+    return value;
+  }
+
+  if (value.startsWith("it")) return "it";
+  if (value.startsWith("es")) return "es";
+  if (value.startsWith("de")) return "de";
+  if (value.startsWith("fr")) return "fr";
+  if (value.startsWith("en")) return "en";
+
+  return null;
+}
+
+function foldDiacritics(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
 async function detectLanguageWithLLM(
   message: string,
   botId?: string | null
 ): Promise<KnowledgeLanguage | null> {
   const trimmed = message.trim();
   if (!trimmed) return null;
+
   const cacheKey = trimmed.toLowerCase();
   const cached = LLM_LANGUAGE_CACHE.get(cacheKey);
   if (cached) return cached;
@@ -40,32 +87,59 @@ async function detectLanguageWithLLM(
         operation: "language_detect"
       }
     });
-    const parsed = JSON.parse(raw) as Partial<LlmLanguageResult>;
-    const lang = parsed.language;
-    if (
-      lang === "en" ||
-      lang === "it" ||
-      lang === "es" ||
-      lang === "de" ||
-      lang === "fr"
-    ) {
-      LLM_LANGUAGE_CACHE.set(cacheKey, lang);
-      return lang;
+
+    const jsonText = extractJsonObject(raw);
+    if (jsonText) {
+      const parsed = JSON.parse(jsonText) as Partial<LlmLanguageResult>;
+      const lang = normalizeLanguageTag(parsed.language);
+      if (lang) {
+        LLM_LANGUAGE_CACHE.set(cacheKey, lang);
+        return lang;
+      }
     }
+
+    const directLang = normalizeLanguageTag(raw);
+    if (directLang) {
+      LLM_LANGUAGE_CACHE.set(cacheKey, directLang);
+      return directLang;
+    }
+
+    const inlineMatch = raw.match(/\b(en|it|es|de|fr)\b/i);
+    if (inlineMatch) {
+      const inlineLang = normalizeLanguageTag(inlineMatch[1]);
+      if (inlineLang) {
+        LLM_LANGUAGE_CACHE.set(cacheKey, inlineLang);
+        return inlineLang;
+      }
+    }
+
     return null;
   } catch {
     return null;
   }
 }
 
-export async function detectKnowledgeLanguage(params: {
+type ResolveLanguageParams = {
   message: string;
   lockedLanguage?: string | null;
   routedLanguage?: string | null;
   botId?: string | null;
   allowLLM?: boolean;
-}): Promise<KnowledgeLanguage> {
-  const { message, lockedLanguage, routedLanguage, botId, allowLLM = true } = params;
+  defaultLanguage?: KnowledgeLanguage | null;
+};
+
+async function resolveKnowledgeLanguage(
+  params: ResolveLanguageParams
+): Promise<KnowledgeLanguage | null> {
+  const {
+    message,
+    lockedLanguage,
+    routedLanguage,
+    botId,
+    allowLLM = true,
+    defaultLanguage = null
+  } = params;
+
   if (
     lockedLanguage === "it" ||
     lockedLanguage === "es" ||
@@ -75,6 +149,7 @@ export async function detectKnowledgeLanguage(params: {
   ) {
     return lockedLanguage;
   }
+
   if (
     routedLanguage === "it" ||
     routedLanguage === "es" ||
@@ -85,9 +160,10 @@ export async function detectKnowledgeLanguage(params: {
     return routedLanguage;
   }
 
-  const lower = message.trim().toLowerCase();
+  const lower = foldDiacritics(message.trim().toLowerCase());
   if (lower) {
-    if (/[Â¿Â¡]/.test(lower)) return "es";
+    if (/[��]/.test(message)) return "es";
+
     const itHints = [
       "cosa",
       "che",
@@ -95,7 +171,6 @@ export async function detectKnowledgeLanguage(params: {
       "dove",
       "quando",
       "perche",
-      "perchÃ©",
       "quali",
       "servizi",
       "offrite",
@@ -106,15 +181,12 @@ export async function detectKnowledgeLanguage(params: {
     ];
     const esHints = [
       "que",
-      "quÃ©",
       "quien",
-      "quiÃ©n",
       "donde",
-      "dÃ³nde",
       "cuando",
-      "cuÃ¡ndo",
       "como",
-      "cÃ³mo"
+      "precio",
+      "servicios"
     ];
     const deHints = [
       "was",
@@ -131,7 +203,6 @@ export async function detectKnowledgeLanguage(params: {
       "quoi",
       "qui",
       "ou",
-      "oÃ¹",
       "quand",
       "pourquoi",
       "comment",
@@ -140,6 +211,7 @@ export async function detectKnowledgeLanguage(params: {
       "quels",
       "quelles"
     ];
+
     if (itHints.some((token) => new RegExp(`\\b${token}\\b`, "i").test(lower))) {
       return "it";
     }
@@ -157,36 +229,17 @@ export async function detectKnowledgeLanguage(params: {
       "ciao",
       "grazie",
       "vorrei",
-      "carrello",
       "prezzo",
-      "quanto costa"
+      "quanto costa",
+      "inviamela",
+      "va bene",
+      "perfetto",
+      "daccordo"
     ];
-    const esSignals = [
-      "hola",
-      "gracias",
-      "quiero",
-      "carrito",
-      "precio",
-      "por favor"
-    ];
-    const deSignals = [
-      "hallo",
-      "danke",
-      "ich moechte",
-      "warenkorb",
-      "preis",
-      "bitte"
-    ];
-    const frSignals = [
-      "bonjour",
-      "salut",
-      "merci",
-      "je veux",
-      "panier",
-      "prix",
-      "s'il vous plait",
-      "svp"
-    ];
+    const esSignals = ["hola", "gracias", "quiero", "precio", "por favor"];
+    const deSignals = ["hallo", "danke", "ich moechte", "preis", "bitte"];
+    const frSignals = ["bonjour", "salut", "merci", "je veux", "prix", "svp"];
+
     if (itSignals.some((token) => lower.includes(token))) return "it";
     if (esSignals.some((token) => lower.includes(token))) return "es";
     if (deSignals.some((token) => lower.includes(token))) return "de";
@@ -198,5 +251,33 @@ export async function detectKnowledgeLanguage(params: {
     if (llmLang) return llmLang;
   }
 
-  return "en";
+  return defaultLanguage;
+}
+
+export async function detectKnowledgeLanguage(params: {
+  message: string;
+  lockedLanguage?: string | null;
+  routedLanguage?: string | null;
+  botId?: string | null;
+  allowLLM?: boolean;
+  defaultLanguage?: KnowledgeLanguage;
+}): Promise<KnowledgeLanguage> {
+  const resolved = await resolveKnowledgeLanguage({
+    ...params,
+    defaultLanguage: params.defaultLanguage ?? "en"
+  });
+  return resolved ?? "en";
+}
+
+export async function detectKnowledgeLanguageHint(params: {
+  message: string;
+  lockedLanguage?: string | null;
+  routedLanguage?: string | null;
+  botId?: string | null;
+  allowLLM?: boolean;
+}): Promise<KnowledgeLanguage | null> {
+  return resolveKnowledgeLanguage({
+    ...params,
+    defaultLanguage: null
+  });
 }

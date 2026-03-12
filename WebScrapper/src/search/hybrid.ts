@@ -8,6 +8,7 @@ export interface HybridScoreBreakdown {
   vectorRank: number | null;
   keywordRank: number | null;
   rrfScore: number;
+  normalizedScore: number;
 }
 
 type Candidate = {
@@ -35,6 +36,7 @@ export function buildHybridResults(params: {
   rrfK?: number;
 }): { results: SearchResult[]; breakdown: HybridScoreBreakdown[] } {
   const rrfK = params.rrfK ?? DEFAULT_RRF_K;
+  const maxPossibleRrf = 2 / (rrfK + 1);
   const merged = new Map<string, Candidate>();
 
   const vectorRanks = new Map<string, number>();
@@ -78,6 +80,10 @@ export function buildHybridResults(params: {
     const vScore = vRank ? 1 / (rrfK + vRank) : 0;
     const kScore = kRank ? 1 / (rrfK + kRank) : 0;
     const rrfScore = vScore + kScore;
+    const normalizedScore = Math.max(
+      0,
+      Math.min(1, maxPossibleRrf > 0 ? rrfScore / maxPossibleRrf : 0),
+    );
 
     scored.push({ candidate: c, rrfScore });
     breakdown.push({
@@ -85,13 +91,24 @@ export function buildHybridResults(params: {
       vectorRank: vRank,
       keywordRank: kRank,
       rrfScore,
+      normalizedScore,
     });
   }
 
-  scored.sort((a, b) => b.rrfScore - a.rrfScore);
-  breakdown.sort((a, b) => b.rrfScore - a.rrfScore);
+  breakdown.sort((a, b) => b.normalizedScore - a.normalizedScore);
 
-  const results = scored.slice(0, params.finalLimit).map(({ candidate, rrfScore }) => ({
+  const scoreById = new Map<string, number>();
+  for (const row of breakdown) {
+    scoreById.set(row.id, row.normalizedScore);
+  }
+
+  scored.sort((a, b) => {
+    const aScore = scoreById.get(a.candidate.id) ?? 0;
+    const bScore = scoreById.get(b.candidate.id) ?? 0;
+    return bScore - aScore;
+  });
+
+  const results = scored.slice(0, params.finalLimit).map(({ candidate }) => ({
     id: candidate.id,
     clientId: candidate.clientId,
     domain: candidate.domain,
@@ -100,7 +117,7 @@ export function buildHybridResults(params: {
     chunkIndex: candidate.chunkIndex,
     text: candidate.text,
     createdAt: candidate.createdAt,
-    score: rrfScore,
+    score: scoreById.get(candidate.id) ?? 0,
   }));
 
   return { results, breakdown: breakdown.slice(0, params.finalLimit) };

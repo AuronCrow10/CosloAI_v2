@@ -31,10 +31,11 @@ export async function ingestTextForClient(params: {
   url: string;
   domain: string;
   sourceId?: string | null;
+  jobId?: string | null;
   client: Client;
   deps: IngestDeps;
 }): Promise<IngestResult> {
-  const { text, url, domain, sourceId, client, deps } = params;
+  const { text, url, domain, sourceId, jobId, client, deps } = params;
   const { config, db, embeddings } = deps;
 
   const chunks: TextChunk[] = chunkText(
@@ -79,7 +80,7 @@ export async function ingestTextForClient(params: {
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i];
     const embedding = vectors[i];
-    const row: ChunkWithEmbedding = { ...chunk, embedding };
+    const row: ChunkWithEmbedding = { ...chunk, jobId: jobId ?? null, embedding };
 
     try {
       await db.insertChunkForClient(client.id, client.embeddingModel, row);

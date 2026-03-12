@@ -257,6 +257,7 @@ export async function crawlDomain(
               jobId: job?.id ?? null,
               url: parsed.url,
             }),
+            jobId: job?.id ?? null,
             client: clientInfo,
             deps: { config, db, embeddings },
           });

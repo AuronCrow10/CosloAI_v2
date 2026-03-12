@@ -19,7 +19,7 @@ function makeResult(params: Partial<SearchResult> & { id: string; score: number 
 test('high confidence on strong top score and gap', () => {
   const results = [
     makeResult({ id: 'a', score: 0.95 }),
-    makeResult({ id: 'b', score: 0.7 }),
+    makeResult({ id: 'b', score: 0.86 }),
     makeResult({ id: 'c', score: 0.4 }),
   ];
   const conf = computeConfidence({ results, includeSignals: true });
@@ -34,6 +34,16 @@ test('low confidence on weak/flat results', () => {
   ];
   const conf = computeConfidence({ results, includeSignals: true });
   assert.equal(conf.level, 'low');
+});
+
+test('medium confidence when top scores are strong with meaningful spread to third', () => {
+  const results = [
+    makeResult({ id: 'a', score: 0.91 }),
+    makeResult({ id: 'b', score: 0.90 }),
+    makeResult({ id: 'c', score: 0.84 }),
+  ];
+  const conf = computeConfidence({ results, includeSignals: true });
+  assert.equal(conf.level, 'medium');
 });
 
 test('low confidence on empty results', () => {

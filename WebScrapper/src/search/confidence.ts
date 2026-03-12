@@ -77,11 +77,15 @@ export function computeConfidence(params: {
 
   const reasons: ConfidenceReason[] = [];
   if (topScore < config.mediumTopScore) reasons.push('LOW_TOP_SCORE');
-  if (gap13 < config.minGapMedium) reasons.push('FLAT_SCORE_DISTRIBUTION');
+  if (gap12 < config.minGapMedium && gap13 < config.minGapMedium) {
+    reasons.push('FLAT_SCORE_DISTRIBUTION');
+  }
   if (resultCount < 2) reasons.push('TOO_FEW_RESULTS');
   if (keywordPresent === false) reasons.push('NO_KEYWORD_MATCH');
 
   let level: ConfidenceLevel = 'low';
+  const hasSpreadForMedium =
+    gap12 >= config.minGapMedium || gap13 >= config.minGapMedium;
   if (
     topScore >= config.highTopScore &&
     gap12 >= config.minGapHigh &&
@@ -90,7 +94,7 @@ export function computeConfidence(params: {
     level = 'high';
   } else if (
     topScore >= config.mediumTopScore &&
-    gap12 >= config.minGapMedium &&
+    hasSpreadForMedium &&
     strongCount >= config.minStrongMedium
   ) {
     level = 'medium';

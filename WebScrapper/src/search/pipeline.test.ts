@@ -69,5 +69,5 @@ test('low confidence keeps results but flags status when noAnswer disabled', () 
 
   assert.equal(out.retrievalStatus, 'low_confidence');
   assert.equal(out.results.length, 1);
-  assert.equal(out.noAnswerRecommended, true);
+  assert.equal(out.noAnswerRecommended, false);
 });

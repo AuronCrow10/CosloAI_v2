@@ -55,6 +55,7 @@ export interface TextChunk {
   /** Global deduplication hash (SHA-256 of chunk_text) */
   chunkHash: string;
   sourceId?: string | null;
+  jobId?: string | null;
 }
 
 export interface ChunkWithEmbedding extends TextChunk {

@@ -429,6 +429,7 @@ async function ingestCachedPages(params: {
           jobId: job?.id ?? null,
           url: page.url,
         }),
+        jobId: job?.id ?? null,
         client,
         deps: { config, db, embeddings },
       });
@@ -1064,6 +1065,7 @@ app.post('/ingest-docs', requireInternalAuth, upload.array('files', 10), async (
           jobId: job.id,
           url: startUrl,
         }),
+        jobId: job.id,
         client,
         deps: { config, db, embeddings },
       });
@@ -1183,6 +1185,7 @@ app.post('/upload-document', requireInternalAuth, upload.single('file'), async (
         jobId: job.id,
         url: startUrl,
       }),
+      jobId: job.id,
       client,
       deps: { config, db, embeddings },
     });
@@ -1325,18 +1328,25 @@ app.get('/chunks/by-job', requireInternalAuth, async (req, res) => {
     }
 
     const jobType = inferJobType(job.startUrl);
-    let chunks;
-    if (jobType === 'docs') {
-      chunks = await db.listChunksForClientByUrl({
-        clientId,
-        url: job.startUrl,
-      });
-    } else {
-      const normalizedDomain = extractDomain(job.domain || job.startUrl);
-      chunks = await db.listChunksForClientByDomain({
-        clientId,
-        domain: normalizedDomain,
-      });
+    let chunks = await db.listChunksForClientByJobId({
+      clientId,
+      jobId: job.id,
+    });
+
+    // Legacy fallback for data without job_id backfill.
+    if (chunks.length === 0) {
+      if (jobType === 'docs') {
+        chunks = await db.listChunksForClientByUrl({
+          clientId,
+          url: job.startUrl,
+        });
+      } else {
+        const normalizedDomain = extractDomain(job.domain || job.startUrl);
+        chunks = await db.listChunksForClientByDomain({
+          clientId,
+          domain: normalizedDomain,
+        });
+      }
     }
 
     return res.json({ jobId, jobType, chunks });

@@ -26,6 +26,8 @@ export function buildKnowledgeOverviewPrompt(params: OverviewPromptParams): stri
     `- ${coverageLine}\n` +
     `- ${caution}\n` +
     (lowConfidenceLine ? `- ${lowConfidenceLine}\n` : "") +
+    "- Do NOT claim you can perform real-world actions (send emails, place calls, complete payments, or execute external workflows) unless such an action result is explicitly provided in this conversation.\n" +
+    "- Do NOT offer to send documents/files by email (or perform call/payment actions) unless that capability is explicitly confirmed by a tool result in this conversation.\n" +
     "- Keep it short and human-like.\n" +
     "- Invite the user to ask a more specific question.\n" +
     "- Reply in the user's language.\n" +

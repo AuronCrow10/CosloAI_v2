@@ -2,7 +2,7 @@
 
 import { getBotConfigBySlug, BookingConfig } from "../bots/config";
 import { getOverviewCoverageQueries } from "../knowledge/overviewCoverageQueries";
-import { detectKnowledgeLanguage } from "./knowledgeLanguage";
+import { detectKnowledgeLanguage, detectKnowledgeLanguageHint } from "./knowledgeLanguage";
 import { getKnowledgeOverviewNoResultsMessage } from "./knowledgeFallbacks";
 import { runKnowledgeRetrieval } from "./knowledgeOrchestration";
 import { detectContactQuery } from "../knowledge/contactQueryDetection";
@@ -85,10 +85,450 @@ import {
 import { evaluateClerkEligibility } from "./shopifyClerkEligibility";
 
 const MAX_MESSAGE_LENGTH = 2000;
-const MAX_CONTEXT_CHARS_PER_CHUNK = 800;
+const MAX_CONTEXT_CHARS_PER_CHUNK = 1000;
 const HISTORY_TURNS_TO_KEEP = 2; // 2 user+assistant turns = 4 messages total
 
+const CONTEXT_TOKEN_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "that",
+  "this",
+  "what",
+  "have",
+  "sono",
+  "come",
+  "dove",
+  "quando",
+  "quale",
+  "quali",
+  "dimmi",
+  "dammi",
+  "info",
+  "please",
+  "pero",
+  "about",
+  "from",
+  "will",
+  "your",
+  "ciao",
+  "grazie"
+]);
+
 const BASE_BOOKING_FIELDS = ["name", "email", "phone", "service", "datetime"] as const;
+
+type UnsupportedActionType = "email" | "call" | "payment";
+type SupportedLanguage = "it" | "en" | "es" | "de" | "fr";
+
+function detectQuickMessageLanguageHint(
+  message: string
+): SupportedLanguage | null {
+  const lower = ` ${foldContextText(message)} `;
+  const checks: Array<{ lang: SupportedLanguage; tokens: string[] }> = [
+    {
+      lang: "it",
+      tokens: [
+        " il ",
+        " che ",
+        " per ",
+        " non ",
+        " sono ",
+        " puoi ",
+        " vorrei ",
+        " prezzo ",
+        " prezzi ",
+        " contatti ",
+        " grazie "
+      ]
+    },
+    {
+      lang: "es",
+      tokens: [
+        " el ",
+        " que ",
+        " para ",
+        " no ",
+        " precio ",
+        " precios ",
+        " quieres ",
+        " puedo ",
+        " enviar ",
+        " correo ",
+        " gracias "
+      ]
+    },
+    {
+      lang: "de",
+      tokens: [
+        " der ",
+        " die ",
+        " und ",
+        " nicht ",
+        " kann ",
+        " bitte ",
+        " preis ",
+        " danke "
+      ]
+    },
+    {
+      lang: "fr",
+      tokens: [
+        " le ",
+        " et ",
+        " pas ",
+        " peux ",
+        " prix ",
+        " merci ",
+        " envoyer "
+      ]
+    },
+    {
+      lang: "en",
+      tokens: [
+        " the ",
+        " and ",
+        " for ",
+        " not ",
+        " can ",
+        " send ",
+        " email ",
+        " price ",
+        " prices ",
+        " thanks "
+      ]
+    }
+  ];
+
+  let best: SupportedLanguage | null = null;
+  let bestScore = 0;
+  for (const check of checks) {
+    let score = 0;
+    for (const token of check.tokens) {
+      if (lower.includes(token)) score += 1;
+    }
+    if (score > bestScore) {
+      best = check.lang;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+function detectQuickMessageLanguage(message: string): "it" | "en" | "es" | "de" | "fr" {
+  return detectQuickMessageLanguageHint(message) ?? "en";
+}
+
+function isSupportedLanguage(value: string | null | undefined): value is SupportedLanguage {
+  return (
+    value === "it" ||
+    value === "en" ||
+    value === "es" ||
+    value === "de" ||
+    value === "fr"
+  );
+}
+
+async function detectHistoryLanguageHint(params: {
+  historyMessages: ChatMessage[];
+  botId?: string | null;
+}): Promise<SupportedLanguage | null> {
+  const { historyMessages, botId } = params;
+  if (!historyMessages.length) return null;
+
+  const pickFrom = async (roles: Array<"user" | "assistant">): Promise<SupportedLanguage | null> => {
+    for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
+      const msg = historyMessages[i];
+      if (!roles.includes(msg.role as "user" | "assistant")) continue;
+      const content = typeof msg.content === "string" ? msg.content.trim() : "";
+      if (!content) continue;
+
+      const quick = detectQuickMessageLanguageHint(content);
+      if (quick) return quick;
+
+      const heuristic = await detectKnowledgeLanguageHint({
+        message: content,
+        lockedLanguage: null,
+        routedLanguage: null,
+        botId: botId ?? null,
+        allowLLM: false
+      });
+      if (heuristic && isSupportedLanguage(heuristic)) return heuristic;
+    }
+    return null;
+  };
+
+  const userFirst = await pickFrom(["user"]);
+  if (userFirst) return userFirst;
+  return pickFrom(["assistant"]);
+}
+
+function detectUnsupportedExternalAction(message: string): UnsupportedActionType | null {
+  const lower = foldContextText(message);
+  const emailVerb =
+    /\b(invia|inviami|inviamela|manda|mandami|send|email me|enviar|envia|schick|envoyer)\b/.test(
+      lower
+    ) && /\b(email|e-mail|mail|correo|posta)\b/.test(lower);
+
+  if (emailVerb) return "email";
+
+  const callVerb = /\b(call|chiam|telefon|llama|anruf|appeler)\b/.test(lower);
+  if (callVerb) return "call";
+
+  const paymentVerb =
+    /\b(pay|payment|pagamento|pagare|pago|pagar|zahlung|bezahlen|paiement|payer)\b/.test(
+      lower
+    ) && /\b(fai|effettua|completa|make|do|realiza|completa|durchfuhren|effectuer)\b/.test(lower);
+  if (paymentVerb) return "payment";
+
+  return null;
+}
+
+function buildUnsupportedActionReply(
+  action: UnsupportedActionType,
+  lang: "it" | "en" | "es" | "de" | "fr"
+): string {
+  if (lang === "it") {
+    if (action === "email") {
+      return "Non posso inviare email direttamente. Posso però prepararti il testo da inviare e aiutarti a renderlo completo.";
+    }
+    if (action === "call") {
+      return "Non posso effettuare chiamate direttamente. Posso però aiutarti a preparare un messaggio o indicarti i contatti più adatti.";
+    }
+    return "Non posso eseguire pagamenti direttamente. Posso però spiegarti i passaggi e guidarti al canale corretto per completare il pagamento.";
+  }
+  if (lang === "es") {
+    if (action === "email") {
+      return "No puedo enviar correos directamente. Puedo ayudarte a preparar el texto para enviarlo.";
+    }
+    if (action === "call") {
+      return "No puedo realizar llamadas directamente. Puedo ayudarte a preparar un mensaje o indicar el contacto correcto.";
+    }
+    return "No puedo realizar pagos directamente. Puedo explicarte los pasos para completarlo en el canal adecuado.";
+  }
+  if (lang === "de") {
+    if (action === "email") {
+      return "Ich kann keine E-Mails direkt senden. Ich kann dir aber helfen, den Text vorzubereiten.";
+    }
+    if (action === "call") {
+      return "Ich kann keine Anrufe direkt durchfuhren. Ich kann dir aber bei einer Nachricht oder den richtigen Kontaktdaten helfen.";
+    }
+    return "Ich kann keine Zahlungen direkt ausfuhren. Ich kann dir aber die Schritte fur den richtigen Kanal erklaren.";
+  }
+  if (lang === "fr") {
+    if (action === "email") {
+      return "Je ne peux pas envoyer d'e-mails directement. Je peux toutefois t'aider a preparer le texte.";
+    }
+    if (action === "call") {
+      return "Je ne peux pas passer d'appels directement. Je peux toutefois t'aider a preparer un message ou le bon contact.";
+    }
+    return "Je ne peux pas effectuer de paiements directement. Je peux toutefois t'expliquer les etapes a suivre.";
+  }
+
+  if (action === "email") {
+    return "I can’t send emails directly. I can help you draft the message so you can send it quickly.";
+  }
+  if (action === "call") {
+    return "I can’t place phone calls directly. I can help you prepare a message or the right contact details.";
+  }
+  return "I can’t complete payments directly. I can guide you through the correct steps to complete payment.";
+}
+
+function hasUnsupportedActionRefusal(text: string): boolean {
+  return /\b(non posso|cannot|can't|unable to|no puedo|ich kann nicht|je ne peux pas)\b/i.test(
+    text
+  );
+}
+
+function detectUnsupportedActionProposalInReply(
+  text: string
+): UnsupportedActionType | null {
+  if (!text || hasUnsupportedActionRefusal(text)) return null;
+  const lower = foldContextText(text);
+
+  const emailDirect =
+    /\b(posso|i can|puedo|ich kann|je peux|vamos a|te)\b.{0,28}\b(invia|invier|send|email|correo|mail|envia|schick|envoy)\b/.test(
+      lower
+    ) && /\b(email|e-mail|mail|correo|posta)\b/.test(lower);
+  if (emailDirect) return "email";
+
+  const genericSendDocument =
+    /\b(posso|i can|puedo|ich kann|je peux|vuoi che|quieres que)\b.{0,40}\b(invia|invier|send|enviar|envoyer|schick|pass|pasar|pasa|passa|fornir)\b/.test(
+      lower
+    ) &&
+    /\b(scheda|ficha|brochure|pdf|document|documento|details|dettagli|info|informazioni)\b/.test(
+      lower
+    ) &&
+    !/\b(qui|in chat|here|aqui|hier|ici)\b/.test(lower);
+  if (genericSendDocument) return "email";
+
+  const callProposal =
+    /\b(posso|i can|puedo|ich kann|je peux)\b.{0,28}\b(chiam|call|telefon|llama|anruf|appeler)\b/.test(
+      lower
+    );
+  if (callProposal) return "call";
+
+  const paymentProposal =
+    /\b(posso|i can|puedo|ich kann|je peux)\b.{0,28}\b(pay|payment|pagamento|pagare|pagar|zahlung|payer)\b/.test(
+      lower
+    );
+  if (paymentProposal) return "payment";
+
+  return null;
+}
+
+async function rewriteReplyToLanguage(params: {
+  reply: string;
+  targetLanguage: "it" | "en" | "es" | "de" | "fr";
+  usageContext: { userId?: string | null; botId?: string | null };
+}): Promise<string | null> {
+  const { reply, targetLanguage, usageContext } = params;
+  const languageLabel =
+    targetLanguage === "it"
+      ? "Italian"
+      : targetLanguage === "es"
+      ? "Spanish"
+      : targetLanguage === "de"
+      ? "German"
+      : targetLanguage === "fr"
+      ? "French"
+      : "English";
+
+  try {
+    const rewritten = await getChatCompletion({
+      model: "gpt-4.1-mini",
+      maxTokens: 260,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Rewrite the assistant reply in the target language.\n" +
+            "Rules:\n" +
+            "- Preserve all factual meaning.\n" +
+            "- Do not add new facts, promises, or capabilities.\n" +
+            "- Keep tone concise and natural.\n" +
+            "- Return only the rewritten reply text.\n"
+        },
+        {
+          role: "user",
+          content:
+            `Target language: ${languageLabel}\n` +
+            "Reply to rewrite:\n" +
+            reply
+        }
+      ],
+      usageContext: {
+        ...usageContext,
+        operation: "chat_language_rewrite"
+      }
+    });
+    return rewritten?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolvePolicyTargetLanguage(params: {
+  lockedLanguage: string | null;
+  routedLanguage: string | null;
+  detectedLanguage: SupportedLanguage | null;
+  historyLanguage: SupportedLanguage | null;
+  quickLanguage: SupportedLanguage | null;
+}): SupportedLanguage | null {
+  const {
+    lockedLanguage,
+    routedLanguage,
+    detectedLanguage,
+    historyLanguage,
+    quickLanguage
+  } = params;
+  if (isSupportedLanguage(lockedLanguage)) {
+    return lockedLanguage;
+  }
+  if (isSupportedLanguage(routedLanguage)) {
+    return routedLanguage;
+  }
+  if (detectedLanguage) return detectedLanguage;
+  if (historyLanguage) return historyLanguage;
+  return quickLanguage;
+}
+
+function buildLanguageConsistencyFallback(
+  lang: "it" | "en" | "es" | "de" | "fr"
+): string {
+  if (lang === "it") {
+    return "Ti rispondo in italiano. Dimmi il dettaglio specifico che vuoi e ti rispondo in modo preciso.";
+  }
+  if (lang === "es") {
+    return "Te respondo en espanol. Dime el detalle especifico que necesitas y te respondo con precision.";
+  }
+  if (lang === "de") {
+    return "Ich antworte auf Deutsch. Nenne mir bitte das genaue Detail, dann antworte ich praezise.";
+  }
+  if (lang === "fr") {
+    return "Je reponds en francais. Dis-moi le detail precis dont tu as besoin et je te repondrai clairement.";
+  }
+  return "I will reply in English. Tell me the exact detail you need and I will answer precisely.";
+}
+
+function foldContextText(input: string): string {
+  return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function extractContextQueryTokens(message: string): string[] {
+  const normalized = foldContextText(message);
+  const tokens = normalized
+    .split(/[^a-z0-9]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && !CONTEXT_TOKEN_STOPWORDS.has(t));
+  return Array.from(new Set(tokens)).slice(0, 10);
+}
+
+function clipWithEllipsis(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return text.slice(0, Math.max(0, maxChars - 1)).trimEnd() + "…";
+}
+
+function buildContextSnippet(params: {
+  rawText: string;
+  message: string;
+  maxChars: number;
+}): string {
+  const raw = (params.rawText || "").trim();
+  if (!raw) return "";
+  if (raw.length <= params.maxChars) return raw;
+
+  const loweredRaw = foldContextText(raw);
+  const queryTokens = extractContextQueryTokens(params.message);
+
+  let tokenPos = -1;
+  for (const token of queryTokens) {
+    const pos = loweredRaw.indexOf(token);
+    if (pos >= 0 && (tokenPos < 0 || pos < tokenPos)) {
+      tokenPos = pos;
+    }
+  }
+
+  if (tokenPos >= 0) {
+    const targetWindow = Math.max(500, Math.floor(params.maxChars * 0.82));
+    let start = Math.max(0, tokenPos - Math.floor(targetWindow * 0.35));
+    let end = Math.min(raw.length, start + targetWindow);
+    if (end - start < targetWindow) {
+      start = Math.max(0, end - targetWindow);
+    }
+
+    let snippet = raw.slice(start, end).trim();
+    if (start > 0) snippet = "..." + snippet;
+    if (end < raw.length) snippet = snippet + "...";
+    return clipWithEllipsis(snippet, params.maxChars);
+  }
+
+  const headChars = Math.floor(params.maxChars * 0.62);
+  const tailChars = Math.max(180, params.maxChars - headChars - 8);
+  const head = raw.slice(0, headChars).trim();
+  const tail = raw.slice(-tailChars).trim();
+  return clipWithEllipsis(`${head}\n...\n${tail}`, params.maxChars);
+}
 
 // Intent routing is handled by the LLM-based router; avoid heuristic keyword lists here.
 
@@ -615,6 +1055,25 @@ function languageHintFromDetected(lang: "it" | "es" | "en" | "de" | "fr" | null)
     return "L'utilisateur a ecrit en francais. Reponds toujours en francais, meme si le contexte est dans une autre langue.";
   }
   return "The user wrote in English. Always reply in English, even if the context is in another language.";
+}
+
+function strictLanguageInstruction(
+  lang: "it" | "es" | "en" | "de" | "fr" | null
+): string | null {
+  if (!lang) return null;
+  if (lang === "it") {
+    return "STRICT OUTPUT LANGUAGE: Italian only. Translate any context snippets before answering.";
+  }
+  if (lang === "es") {
+    return "STRICT OUTPUT LANGUAGE: Spanish only. Translate any context snippets before answering.";
+  }
+  if (lang === "de") {
+    return "STRICT OUTPUT LANGUAGE: German only. Translate any context snippets before answering.";
+  }
+  if (lang === "fr") {
+    return "STRICT OUTPUT LANGUAGE: French only. Translate any context snippets before answering.";
+  }
+  return "STRICT OUTPUT LANGUAGE: English only. Translate any context snippets before answering.";
 }
 
 type ReplyLang = "it" | "es" | "en" | "de" | "fr";
@@ -1543,6 +2002,23 @@ export async function generateBotReplyForSlug(
     );
   }
 
+  const unsupportedAction = detectUnsupportedExternalAction(message);
+  if (unsupportedAction) {
+    const lang =
+      (await detectKnowledgeLanguageHint({
+        message,
+        lockedLanguage: null,
+        routedLanguage: null,
+        botId: botConfig.botId ?? null,
+        allowLLM: false
+      })) ?? detectQuickMessageLanguage(message);
+    return {
+      reply: buildUnsupportedActionReply(unsupportedAction, lang),
+      suggestion: null,
+      clerk: undefined
+    };
+  }
+
   const usageBase = {
     userId: botConfig.ownerUserId ?? null,
     botId: botConfig.botId ?? null
@@ -2008,10 +2484,11 @@ export async function generateBotReplyForSlug(
     const contextChunks = results.map((r, index) => {
       const safeUrl = r.url || botConfig.domain;
       const rawText = r.text || "";
-      const trimmedText =
-        rawText.length > MAX_CONTEXT_CHARS_PER_CHUNK
-          ? rawText.slice(0, MAX_CONTEXT_CHARS_PER_CHUNK) + "â€¦"
-          : rawText;
+      const trimmedText = buildContextSnippet({
+        rawText,
+        message,
+        maxChars: MAX_CONTEXT_CHARS_PER_CHUNK
+      });
 
       return `Chunk ${index + 1} (from ${safeUrl}):\n${trimmedText}`;
     });
@@ -2065,6 +2542,8 @@ export async function generateBotReplyForSlug(
         "- Keep answers concise and easy to scan.\n" +
         "- Do NOT invent new factual details about the business (services, prices, policies, locations, team skills) that were not mentioned earlier in the conversation.\n" +
         "- If the user asks for business facts you cannot infer, say you don't know and suggest checking the website or contacting the business.\n" +
+        "- Do NOT claim you can perform real-world actions (send emails, place calls, complete payments, or execute external workflows) unless such an action result is explicitly available in this conversation.\n" +
+        "- Do NOT offer to send documents/files by email (or perform call/payment actions) unless that capability is explicitly confirmed by a tool result in this conversation.\n" +
         "- You may refer back to information already mentioned, but avoid repeating long lists in full.\n" +
         "- Reply in the user's language when reasonable.\n"
     };
@@ -2115,14 +2594,21 @@ export async function generateBotReplyForSlug(
 
   const detectedReplyLanguage =
     !shopifyEnabled && knowledgeSource === "RAG"
-      ? await detectKnowledgeLanguage({
+      ? await detectKnowledgeLanguageHint({
           message,
           lockedLanguage: null,
           routedLanguage: null,
           botId: botConfig.botId ?? null
         })
       : null;
-  const detectedLanguageHint = languageHintFromDetected(detectedReplyLanguage);
+  const historyDetectedLanguage = await detectHistoryLanguageHint({
+    historyMessages,
+    botId: botConfig.botId ?? null
+  });
+  const quickDetectedLanguage = detectQuickMessageLanguageHint(message);
+  const effectiveDetectedLanguage =
+    detectedReplyLanguage ?? quickDetectedLanguage ?? historyDetectedLanguage;
+  const detectedLanguageHint = languageHintFromDetected(effectiveDetectedLanguage);
   if (detectedLanguageHint) {
     messages.push({
       role: "system",
@@ -2132,6 +2618,19 @@ export async function generateBotReplyForSlug(
       console.log("[TokenDebug] detectedLanguageHint", {
         botId: botConfig.botId,
         chars: countChars(detectedLanguageHint)
+      });
+    }
+  }
+  const strictLanguageHint = strictLanguageInstruction(effectiveDetectedLanguage);
+  if (strictLanguageHint) {
+    messages.push({
+      role: "system",
+      content: strictLanguageHint
+    });
+    if (tokenDebug) {
+      console.log("[TokenDebug] strictLanguageHint", {
+        botId: botConfig.botId,
+        chars: countChars(strictLanguageHint)
       });
     }
   }
@@ -2182,12 +2681,97 @@ export async function generateBotReplyForSlug(
   const bookingEnabledForTurn =
     bookingEnabled && shouldEnableBookingForTurn(message, shopifyEnabled);
 
+  const policyTargetLanguage = resolvePolicyTargetLanguage({
+    lockedLanguage: shoppingState?.language ?? null,
+    routedLanguage: routerResult?.language ?? null,
+    detectedLanguage: effectiveDetectedLanguage,
+    historyLanguage: historyDetectedLanguage,
+    quickLanguage: detectQuickMessageLanguageHint(` ${message} `)
+  });
+
+  const applyGenericReplyPolicy = async (reply: string): Promise<string> => {
+    const trimmed = String(reply || "").trim();
+    if (!trimmed) return reply;
+
+    const proposal = detectUnsupportedActionProposalInReply(trimmed);
+    if (proposal) {
+      return buildUnsupportedActionReply(
+        proposal,
+        policyTargetLanguage ?? detectQuickMessageLanguage(message)
+      );
+    }
+
+    let safeReply = trimmed;
+    if (policyTargetLanguage) {
+      const inferReplyLanguage = async (
+        value: string
+      ): Promise<"it" | "en" | "es" | "de" | "fr" | null> => {
+        const fastHint = await detectKnowledgeLanguageHint({
+          message: value,
+          lockedLanguage: null,
+          routedLanguage: null,
+          botId: botConfig.botId ?? null,
+          allowLLM: false
+        });
+        if (fastHint) return fastHint;
+        if (value.length >= 80) {
+          const quickHint = detectQuickMessageLanguageHint(value);
+          if (quickHint) return quickHint;
+          return await detectKnowledgeLanguageHint({
+            message: value,
+            lockedLanguage: null,
+            routedLanguage: null,
+            botId: botConfig.botId ?? null,
+            allowLLM: true
+          });
+        }
+        return null;
+      };
+
+      const beforeLang = await inferReplyLanguage(safeReply);
+      if (beforeLang && beforeLang !== policyTargetLanguage) {
+        const rewritten = await rewriteReplyToLanguage({
+          reply: safeReply,
+          targetLanguage: policyTargetLanguage,
+          usageContext: usageBase
+        });
+        if (!rewritten) {
+          return buildLanguageConsistencyFallback(policyTargetLanguage);
+        }
+        safeReply = rewritten;
+        const afterLang = await inferReplyLanguage(safeReply);
+        if (!afterLang || afterLang !== policyTargetLanguage) {
+          return buildLanguageConsistencyFallback(policyTargetLanguage);
+        }
+      }
+    }
+
+    const proposalAfterRewrite = detectUnsupportedActionProposalInReply(safeReply);
+    if (proposalAfterRewrite) {
+      return buildUnsupportedActionReply(
+        proposalAfterRewrite,
+        policyTargetLanguage ?? detectQuickMessageLanguage(message)
+      );
+    }
+
+    if (policyTargetLanguage) {
+      const finalQuickLang = detectQuickMessageLanguageHint(safeReply);
+      if (finalQuickLang && finalQuickLang !== policyTargetLanguage) {
+        return buildLanguageConsistencyFallback(policyTargetLanguage);
+      }
+    }
+
+    return safeReply;
+  };
+
   const finalizeReply = async (
     reply: string,
     extra?: { hasShopifyActionsInReply?: boolean }
   ): Promise<{ reply: string; suggestion?: RevenueAISuggestion | null; clerk?: ClerkPayload }> => {
+    const safeReply = await applyGenericReplyPolicy(reply);
+
     if (!botConfig.botId || !shopifyEnabled || !botConfig.revenueAIEnabled) {
-      return { reply, suggestion: null };
+      return { reply: safeReply, suggestion: null };
     }
 
     const intentOverride = mapRouterIntentToRevenueIntent(routerResult);
@@ -2201,7 +2785,7 @@ export async function generateBotReplyForSlug(
       conversationId: options.conversationId,
       sessionId: options.sessionId,
       userMessage: message,
-      assistantReply: reply,
+      assistantReply: safeReply,
       channel: options.channel,
       hasShopifyActionsInReply: extra?.hasShopifyActionsInReply,
       intentResult: intentOverride ?? intentResult,
@@ -2209,7 +2793,7 @@ export async function generateBotReplyForSlug(
       indecisionSignal
     });
 
-    if (!offer) return { reply, suggestion: null };
+    if (!offer) return { reply: safeReply, suggestion: null };
 
     // Allow RevenueAI to suggest items outside the current shortlist.
 
@@ -2238,8 +2822,8 @@ export async function generateBotReplyForSlug(
         : webAppend;
 
     let appended = appendText
-      ? `${reply}\n\n${appendText}`
-      : reply;
+      ? `${safeReply}\n\n${appendText}`
+      : safeReply;
 
     const channel = options.channel;
     const isNonWebChannel = channel && channel !== "WEB";

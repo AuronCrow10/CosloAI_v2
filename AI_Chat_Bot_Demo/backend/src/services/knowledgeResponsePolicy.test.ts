@@ -13,7 +13,7 @@ describe("knowledge response policy", () => {
     expect(policy.shouldCallAnswerLLM).toBe(true);
   });
 
-  it("marks low confidence when retrieval is low", () => {
+  it("answers when evidence exists even if confidence is low", () => {
     const policy = decideKnowledgePolicy({
       intent: "specific",
       retrieval: { retrievalStatus: "low_confidence", confidence: { level: "low" } },
@@ -21,6 +21,20 @@ describe("knowledge response policy", () => {
     });
     expect(policy.mode).toBe("specific");
     expect(policy.lowConfidence).toBe(true);
+    expect(policy.responseStrategy).toBe("answer");
+  });
+
+  it("clarifies when no-answer is explicitly recommended", () => {
+    const policy = decideKnowledgePolicy({
+      intent: "specific",
+      retrieval: {
+        retrievalStatus: "low_confidence",
+        confidence: { level: "low" },
+        noAnswerRecommended: true
+      },
+      resultsCount: 2
+    });
+    expect(policy.mode).toBe("specific");
     expect(policy.responseStrategy).toBe("clarify");
   });
 

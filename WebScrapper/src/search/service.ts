@@ -26,6 +26,10 @@ import {
   type ConfidenceSummary,
 } from './confidence.js';
 import { runQualityPipeline } from './pipeline.js';
+import {
+  applyHeuristicRerank,
+  type HeuristicRerankDebug,
+} from './rerank.js';
 
 export interface SearchOptions {
   domain?: string;
@@ -48,6 +52,7 @@ export interface SearchOptions {
   contextTokenBudget?: number;
   minConfidenceLevel?: ConfidenceLevel;
   noAnswerOnLowConfidence?: boolean;
+  heuristicRerank?: boolean;
 }
 
 export interface SearchDebug {
@@ -62,6 +67,7 @@ export interface SearchDebug {
   selection?: DedupeDebug;
   adaptive?: AdaptiveDebug;
   confidence?: ConfidenceSummary;
+  rerank?: HeuristicRerankDebug;
 }
 
 export interface SearchResponse {
@@ -184,6 +190,29 @@ export async function searchClientContent(params: {
         results: breakdown,
       };
     }
+  }
+
+  const reranked = applyHeuristicRerank({
+    query,
+    results: baseResults,
+    options: {
+      enabled: options?.heuristicRerank !== false,
+    },
+  });
+  baseResults = reranked.results;
+
+  if (options?.returnDebug) {
+    if (!debug) {
+      debug = {
+        strategy,
+        candidateCounts: {
+          vector: baseResults.length,
+          keyword: keywordPresent ? baseResults.length : 0,
+          merged: baseResults.length,
+        },
+      };
+    }
+    debug.rerank = reranked.debug;
   }
 
   const includeAdjacent = options?.includeAdjacent === true;

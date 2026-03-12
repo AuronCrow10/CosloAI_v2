@@ -10,8 +10,8 @@ export const DEFAULT_CONFIDENCE_CONFIG = {
   strongScoreThreshold: 0.75,
   highTopScore: 0.85,
   mediumTopScore: 0.65,
-  minGapHigh: 0.1,
-  minGapMedium: 0.05,
+  minGapHigh: 0.08,
+  minGapMedium: 0.03,
   minStrongHigh: 2,
   minStrongMedium: 1,
 };

@@ -333,7 +333,7 @@ router.post("/forgot-password", resetIpLimiter, resetEmailLimiter, async (req: R
 
   const code = String(randomInt(0, 1000000)).padStart(6, "0");
   const codeHash = await hashPassword(code);
-  const expiresAt = addSeconds(new Date(), 60 * 10); // 10 minutes
+  const expiresAt = addSeconds(new Date(), 60 * 30); // 30 minutes
 
   await prisma.passwordResetToken.deleteMany({
     where: { userId: user.id }
@@ -352,10 +352,10 @@ router.post("/forgot-password", resetIpLimiter, resetEmailLimiter, async (req: R
     subject: "Your Coslo password reset code",
     text:
       `Your password reset code is ${code}. ` +
-      "It expires in 10 minutes. If you didn't request this, you can ignore this email.",
+      "It expires in 30 minutes. If you didn't request this, you can ignore this email.",
     html:
       `<p>Your password reset code is <strong>${code}</strong>.</p>` +
-      "<p>This code expires in 10 minutes.</p>" +
+      "<p>This code expires in 30 minutes.</p>" +
       "<p>If you didn't request this, you can ignore this email.</p>"
   });
 

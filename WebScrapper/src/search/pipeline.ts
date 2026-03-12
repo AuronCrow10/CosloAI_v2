@@ -100,13 +100,13 @@ export function runQualityPipeline(params: {
   const belowThreshold =
     (threshold === 'high' && confidence.level !== 'high') ||
     (threshold === 'medium' && confidence.level === 'low');
-  const noAnswer =
+  const noAnswerRecommended =
     options.noAnswerOnLowConfidence === true && belowThreshold;
 
   return {
-    results: noAnswer ? [] : final.results,
+    results: noAnswerRecommended ? [] : final.results,
     retrievalStatus: belowThreshold ? 'low_confidence' : 'ok',
-    noAnswerRecommended: belowThreshold,
+    noAnswerRecommended,
     confidence,
     debug,
   };

@@ -41,6 +41,8 @@ export function buildKnowledgeSpecificPrompt(params: SpecificPromptParams): stri
     "- Answer ONLY using facts explicitly supported by the CONTEXT.\n" +
     `- ${caution}\n` +
     (strategyLine ? `- ${strategyLine}\n` : "") +
+    "- Do NOT claim you can perform real-world actions (send emails, place calls, complete payments, or execute external workflows) unless such an action result is explicitly provided in this conversation.\n" +
+    "- Do NOT offer to send files/documents by email (or to call/pay externally) unless that capability is explicitly available through a confirmed tool result in this conversation.\n" +
     "- Keep the tone natural and human-like.\n" +
     "- Keep answers concise and easy to scan.\n" +
     "- Reply in the user's language.\n" +

@@ -34,9 +34,7 @@ export function decideKnowledgePolicy(params: {
     retrieval?.retrievalStatus === "low_confidence" ||
     retrieval?.confidence?.level === "low" ||
     (noAnswerRecommended && resultsCount === 0);
-  const evidenceStrong =
-    resultsCount > 0 && !lowConfidence && !noAnswerRecommended;
-  const evidenceWeak = resultsCount === 0 || lowConfidence || noAnswerRecommended;
+  const hasEvidence = resultsCount > 0;
   const reasonCodes: string[] = [];
 
   if (noAnswerRecommended) reasonCodes.push("no_answer_recommended");
@@ -57,20 +55,21 @@ export function decideKnowledgePolicy(params: {
   }
 
   if (intent === "ambiguous") {
-    const responseStrategy = evidenceStrong ? "answer" : "clarify";
+    const responseStrategy = hasEvidence && !noAnswerRecommended ? "answer" : "clarify";
     return {
       mode: "ambiguous",
       responseStrategy,
       shouldCallAnswerLLM: true,
       lowConfidence,
       noAnswerRecommended,
-      reasonCodes: responseStrategy === "answer"
-        ? [...reasonCodes, "evidence_strong"]
-        : [...reasonCodes, "needs_clarification"]
+      reasonCodes:
+        responseStrategy === "answer"
+          ? [...reasonCodes, lowConfidence ? "evidence_present_low_confidence" : "evidence_strong"]
+          : [...reasonCodes, "needs_clarification"]
     };
   }
 
-  if (noAnswerRecommended && resultsCount === 0) {
+  if (!hasEvidence && noAnswerRecommended) {
     return {
       mode: "specific",
       responseStrategy: "insufficient_info",
@@ -81,7 +80,18 @@ export function decideKnowledgePolicy(params: {
     };
   }
 
-  if (evidenceWeak) {
+  if (!hasEvidence) {
+    return {
+      mode: "specific",
+      responseStrategy: "clarify",
+      shouldCallAnswerLLM: true,
+      lowConfidence,
+      noAnswerRecommended,
+      reasonCodes: [...reasonCodes, "needs_clarification"]
+    };
+  }
+
+  if (noAnswerRecommended) {
     return {
       mode: "specific",
       responseStrategy: "clarify",
@@ -98,6 +108,9 @@ export function decideKnowledgePolicy(params: {
     shouldCallAnswerLLM: true,
     lowConfidence,
     noAnswerRecommended,
-    reasonCodes: [...reasonCodes, "evidence_strong"]
+    reasonCodes: [
+      ...reasonCodes,
+      lowConfidence ? "evidence_present_low_confidence" : "evidence_strong"
+    ]
   };
 }

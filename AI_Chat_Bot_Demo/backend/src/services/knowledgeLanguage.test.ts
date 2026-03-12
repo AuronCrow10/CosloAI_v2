@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectKnowledgeLanguage } from "./knowledgeLanguage";
+import { detectKnowledgeLanguage, detectKnowledgeLanguageHint } from "./knowledgeLanguage";
 
 describe("detectKnowledgeLanguage", () => {
   it("prefers locked language when present", async () => {
@@ -40,5 +40,15 @@ describe("detectKnowledgeLanguage", () => {
       allowLLM: false
     });
     expect(lang).toBe("it");
+  });
+
+  it("can return null for uncertain language hints", async () => {
+    const hint = await detectKnowledgeLanguageHint({
+      message: "ok",
+      lockedLanguage: null,
+      routedLanguage: null,
+      allowLLM: false
+    });
+    expect(hint).toBeNull();
   });
 });

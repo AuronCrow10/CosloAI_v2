@@ -608,14 +608,19 @@ export class Database {
           chunk_index,
           chunk_text,
           chunk_hash,
+          job_id,
           embedding
         )
         VALUES (
           gen_random_uuid(),
-          $1, $2, $3, $4, $5, $6, $7, $8::vector
+          $1, $2, $3, $4, $5, $6, $7, $8, $9::vector
         )
         ON CONFLICT (client_id, chunk_hash)
-        ${supportsActiveFlag ? 'DO UPDATE SET is_active = true' : 'DO NOTHING'}
+        ${
+          supportsActiveFlag
+            ? 'DO UPDATE SET is_active = true, job_id = EXCLUDED.job_id, source_id = EXCLUDED.source_id'
+            : 'DO NOTHING'
+        }
         RETURNING id
         `,
         [
@@ -626,6 +631,7 @@ export class Database {
           chunk.chunkIndex,
           chunk.text,
           chunk.chunkHash,
+          chunk.jobId ?? null,
           embeddingLiteral,
         ],
       );
@@ -1003,6 +1009,52 @@ export class Database {
         ORDER BY chunk_index ASC
         `,
         [params.clientId, params.url],
+      );
+      return res.rows.map((row) => ({
+        id: row.id,
+        url: row.url,
+        sourceId: row.source_id ?? null,
+        chunkIndex: row.chunk_index,
+        text: row.chunk_text,
+        createdAt: row.created_at,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  async listChunksForClientByJobId(params: {
+    clientId: string;
+    jobId: string;
+  }): Promise<
+    {
+      id: string;
+      url: string;
+      sourceId: string | null;
+      chunkIndex: number;
+      text: string;
+      createdAt: Date;
+    }[]
+  > {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{
+        id: string;
+        url: string;
+        source_id: string | null;
+        chunk_index: number;
+        chunk_text: string;
+        created_at: Date;
+      }>(
+        `
+        SELECT id, url, source_id, chunk_index, chunk_text, created_at
+        FROM page_chunks_small
+        WHERE client_id = $1
+          AND job_id = $2
+          AND is_active = true
+        ORDER BY url ASC, chunk_index ASC
+        `,
+        [params.clientId, params.jobId],
       );
       return res.rows.map((row) => ({
         id: row.id,
