@@ -4,7 +4,11 @@ import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
-import { listAccessibleBots } from "../services/teamAccessService";
+import {
+  getTeamMembershipForBot,
+  listAccessibleBots,
+  userCanAccessBot
+} from "../services/teamAccessService";
 import { updateBotSubscriptionForFeatureChange } from "../services/billingService";
 import { deleteKnowledgeClient } from "../services/knowledgeClient";
 import { computeAssignedStyle } from "../services/revenueAIService";
@@ -247,18 +251,32 @@ router.get("/bots/live/:slug", async (req, res) => {
 
 router.use("/bots/", requireAuth);
 
+async function findAccessibleBot(
+  req: Request,
+  botId: string,
+  options?: { include?: any; select?: any }
+) {
+  const canAccess = await userCanAccessBot(req.user!, botId);
+  if (!canAccess) return null;
+  return prisma.bot.findUnique({
+    where: { id: botId },
+    ...(options || {})
+  } as any);
+}
+
+async function withTeamPages(req: Request, bot: any) {
+  if (!bot || req.user?.role !== "TEAM_MEMBER") return bot;
+  const membership = await getTeamMembershipForBot(req.user.id, bot.id);
+  return {
+    ...bot,
+    teamPagePermissions: membership?.pagePermissions || ["BOT_DETAIL"]
+  };
+}
+
 // List bots
 router.get("/bots", async (req: Request, res: Response) => {
   const bots = await listAccessibleBots(req.user!);
   res.json(bots);
-});
-
-// Team members are restricted to bots list only
-router.use("/bots/:id", (req: Request, res: Response, next) => {
-  if (req.user?.role === "TEAM_MEMBER") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-  return next();
 });
 
 // Create bot
@@ -421,9 +439,6 @@ if (selectedCount > 1) {
 
 // Update bot (features, basics, etc.)
 router.patch("/bots/:id", async (req: Request, res: Response) => {
-  if (req.user?.role === "TEAM_MEMBER") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
   const parsed = botUpdateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -431,8 +446,7 @@ router.patch("/bots/:id", async (req: Request, res: Response) => {
   const data = parsed.data;
 
   // load bot with subscription (if any)
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id },
+  const bot = await findAccessibleBot(req, req.params.id, {
     include: { subscription: true }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
@@ -533,7 +547,12 @@ if (selectedCount > 1) {
     nextFeatureFlags.leadWhatsappMessages500 !== bot.leadWhatsappMessages500 ||
     nextFeatureFlags.leadWhatsappMessages1000 !== bot.leadWhatsappMessages1000;
 
-  if (bot.subscription && bot.status === "ACTIVE" && featuresChanged) {
+  const currentSubscription = (bot as any).subscription as
+    | { id: string; stripeSubscriptionId: string }
+    | null
+    | undefined;
+
+  if (currentSubscription && bot.status === "ACTIVE" && featuresChanged) {
     try {
       await updateBotSubscriptionForFeatureChange(
         {
@@ -550,8 +569,8 @@ if (selectedCount > 1) {
           leadWhatsappMessages500: nextFeatureFlags.leadWhatsappMessages500,
           leadWhatsappMessages1000: nextFeatureFlags.leadWhatsappMessages1000,
           subscription: {
-            id: bot.subscription.id,
-            stripeSubscriptionId: bot.subscription.stripeSubscriptionId
+            id: currentSubscription.id,
+            stripeSubscriptionId: currentSubscription.stripeSubscriptionId
           }
         },
         "create_prorations"
@@ -631,25 +650,16 @@ if (selectedCount > 1) {
 
 // Get bot
 router.get("/bots/:id", async (req: Request, res: Response) => {
-  if (req.user?.role === "TEAM_MEMBER") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id },
+  const bot = await findAccessibleBot(req, req.params.id, {
     include: { bookingServices: true }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
-  res.json(bot);
+  res.json(await withTeamPages(req, bot));
 });
 
 // Revenue AI settings (per bot)
 router.get("/bots/:id/revenue-ai", async (req: Request, res: Response) => {
-  if (req.user?.role === "TEAM_MEMBER") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id },
+  const bot = await findAccessibleBot(req, req.params.id, {
     select: {
       id: true,
       revenueAIEnabled: true,
@@ -667,24 +677,17 @@ router.get("/bots/:id/revenue-ai", async (req: Request, res: Response) => {
       revenueAICategoryComplementMap: true
     }
   });
-
   if (!bot) return res.status(404).json({ error: "Not found" });
   res.json(bot);
 });
 
 router.put("/bots/:id/revenue-ai", async (req: Request, res: Response) => {
-  if (req.user?.role === "TEAM_MEMBER") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
   const parsed = revenueAISettingsSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
-  });
+  const bot = await findAccessibleBot(req, req.params.id);
   if (!bot) return res.status(404).json({ error: "Not found" });
 
   const updated = await prisma.bot.update({
@@ -696,10 +699,6 @@ router.put("/bots/:id/revenue-ai", async (req: Request, res: Response) => {
 });
 
 router.put("/bots/:id/revenue-ai/override", async (req: Request, res: Response) => {
-  if (req.user?.role === "TEAM_MEMBER") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
   const schema = z.object({
     conversationId: z.string().min(1),
     styleOverride: z.enum(["SOFT", "CLOSER"]).nullable()
@@ -710,9 +709,7 @@ router.put("/bots/:id/revenue-ai/override", async (req: Request, res: Response) 
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
-  });
+  const bot = await findAccessibleBot(req, req.params.id);
   if (!bot) return res.status(404).json({ error: "Not found" });
 
   const conversation = await prisma.conversation.findFirst({
@@ -824,9 +821,7 @@ router.delete("/bots/:id", async (req: Request, res: Response) => {
 
 // Get current automation settings for a bot
 router.get("/bots/:id/meta-leads/automation", async (req: Request, res: Response) => {
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
-  });
+  const bot = await findAccessibleBot(req, req.params.id);
 
   if (!bot) {
     return res.status(404).json({ error: "Not found" });
@@ -869,9 +864,7 @@ router.put("/bots/:id/meta-leads/automation", async (req: Request, res: Response
     templateLanguage
   } = parsed.data;
 
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
-  });
+  const bot = await findAccessibleBot(req, req.params.id);
 
   if (!bot) {
     return res.status(404).json({ error: "Not found" });
@@ -933,9 +926,7 @@ router.put("/bots/:id/meta-leads/automation", async (req: Request, res: Response
 
 // List recent Meta leads for a bot
 router.get("/bots/:id/meta-leads", async (req: Request, res: Response) => {
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
-  });
+  const bot = await findAccessibleBot(req, req.params.id);
 
   if (!bot) {
     return res.status(404).json({ error: "Not found" });

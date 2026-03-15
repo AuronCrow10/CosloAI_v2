@@ -9,6 +9,7 @@ import {
 } from "../services/billingService";
 import { getPlanUsageForBot } from "../services/planUsageService";
 import { getEmailUsageForBot } from "../services/emailUsageService";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 // ✅ Referrals
 import {
@@ -402,16 +403,20 @@ router.get("/billing/payments/:id/invoice-url", async (req, res) => {
 
 /**
  * POST /api/bots/:id/pricing-preview
- * - Protected + ownership checked
+ * - Protected + bot access checked
  */
 router.post("/bots/:id/pricing-preview", requireAuth, async (req, res) => {
   try {
     const botId = req.params.id;
-    const userId = (req as any).user.id as string;
+    const user = (req as any).user as {
+      id: string;
+      role: "ADMIN" | "CLIENT" | "REFERRER" | "TEAM_MEMBER";
+    };
 
     const bot = await prisma.bot.findUnique({ where: { id: botId } });
     if (!bot) return res.status(404).json({ error: "Bot not found" });
-    if (bot.userId !== userId) return res.status(403).json({ error: "Forbidden" });
+    const canAccess = await userCanAccessBot(user, bot.id);
+    if (!canAccess) return res.status(403).json({ error: "Forbidden" });
 
     const body = (req.body || {}) as Partial<{
       useDomainCrawler: boolean;

@@ -45,6 +45,7 @@ import {
   redactCustomerData,
   redactShopData
 } from "../shopify/dataProtectionService";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 const router = Router();
 
@@ -119,7 +120,7 @@ const widgetContextSchema = z.object({
   slug: z.string().min(1)
 });
 
-async function requireShopOwnerAccess(req: Request, shopDomain: string) {
+async function requireShopAccess(req: Request, shopDomain: string) {
   const shop = await prisma.shopifyShop.findUnique({
     where: { shopDomain },
     include: { bot: true }
@@ -127,7 +128,14 @@ async function requireShopOwnerAccess(req: Request, shopDomain: string) {
   if (!shop) {
     throw new Error("SHOP_NOT_FOUND");
   }
-  if (!shop.bot || shop.bot.userId !== req.user!.id) {
+  if (!shop.bot) {
+    throw new Error("FORBIDDEN");
+  }
+  if (!shop.botId) {
+    throw new Error("FORBIDDEN");
+  }
+  const canAccess = await userCanAccessBot(req.user!, shop.botId);
+  if (!canAccess) {
     throw new Error("FORBIDDEN");
   }
   return shop;
@@ -143,9 +151,12 @@ router.get("/shopify/install", requireAuth, async (req: Request, res: Response) 
   let botId: string | undefined;
 
   if (parsed.data.botId) {
-    const bot = await prisma.bot.findFirst({
-      where: { id: parsed.data.botId, userId: req.user!.id }
-    });
+    const canAccess = await userCanAccessBot(req.user!, parsed.data.botId);
+    const bot = canAccess
+      ? await prisma.bot.findUnique({
+          where: { id: parsed.data.botId }
+        })
+      : null;
     if (!bot) {
       return res.status(404).json({ error: "Bot not found" });
     }
@@ -398,9 +409,21 @@ router.get("/shopify/auth/callback", async (req: Request, res: Response) => {
     await registerShopifyWebhooks(result.shopDomain);
 
     if (result.botId && result.userId) {
-      const bot = await prisma.bot.findFirst({
-        where: { id: result.botId, userId: result.userId }
+      const stateUser = await prisma.user.findUnique({
+        where: { id: result.userId },
+        select: { id: true, role: true }
       });
+      const canAccess =
+        !!stateUser &&
+        (await userCanAccessBot(
+          { id: stateUser.id, role: stateUser.role },
+          result.botId
+        ));
+      const bot = canAccess
+        ? await prisma.bot.findUnique({
+            where: { id: result.botId }
+          })
+        : null;
       if (bot) {
         await linkShopToBot(result.shopDomain, bot.id);
         if (config.shopifyAppUrl) {
@@ -822,7 +845,7 @@ router.get("/shopify/catalog-schema", async (req: Request, res: Response) => {
     } catch (err: any) {
       return res.status(400).json({ error: err.message || "Invalid shop domain" });
     }
-    const shop = await requireShopOwnerAccess(req, shopDomain);
+    const shop = await requireShopAccess(req, shopDomain);
     botId = shop.botId || botId;
     if (!botId) {
       return res.status(404).json({ error: "Shop not linked to a bot" });
@@ -830,9 +853,12 @@ router.get("/shopify/catalog-schema", async (req: Request, res: Response) => {
   }
 
   if (!shopDomain && botId) {
-    const bot = await prisma.bot.findFirst({
-      where: { id: botId, userId: req.user!.id }
-    });
+    const canAccess = await userCanAccessBot(req.user!, botId);
+    const bot = canAccess
+      ? await prisma.bot.findUnique({
+          where: { id: botId }
+        })
+      : null;
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     const shop = await prisma.shopifyShop.findFirst({
       where: { botId: bot.id, isActive: true },
@@ -868,7 +894,7 @@ router.post("/shopify/catalog-schema/rebuild", async (req: Request, res: Respons
     } catch (err: any) {
       return res.status(400).json({ error: err.message || "Invalid shop domain" });
     }
-    const shop = await requireShopOwnerAccess(req, shopDomain);
+    const shop = await requireShopAccess(req, shopDomain);
     botId = shop.botId || botId;
     if (!botId) {
       return res.status(404).json({ error: "Shop not linked to a bot" });
@@ -876,9 +902,12 @@ router.post("/shopify/catalog-schema/rebuild", async (req: Request, res: Respons
   }
 
   if (!shopDomain && botId) {
-    const bot = await prisma.bot.findFirst({
-      where: { id: botId, userId: req.user!.id }
-    });
+    const canAccess = await userCanAccessBot(req.user!, botId);
+    const bot = canAccess
+      ? await prisma.bot.findUnique({
+          where: { id: botId }
+        })
+      : null;
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     const shop = await prisma.shopifyShop.findFirst({
       where: { botId: bot.id, isActive: true },
@@ -914,7 +943,7 @@ router.get("/shopify/catalog-context", async (req: Request, res: Response) => {
     } catch (err: any) {
       return res.status(400).json({ error: err.message || "Invalid shop domain" });
     }
-    const shop = await requireShopOwnerAccess(req, shopDomain);
+    const shop = await requireShopAccess(req, shopDomain);
     botId = shop.botId || botId;
     if (!botId) {
       return res.status(404).json({ error: "Shop not linked to a bot" });
@@ -944,7 +973,7 @@ router.post("/shopify/catalog-context/rebuild", async (req: Request, res: Respon
     } catch (err: any) {
       return res.status(400).json({ error: err.message || "Invalid shop domain" });
     }
-    const shop = await requireShopOwnerAccess(req, shopDomain);
+    const shop = await requireShopAccess(req, shopDomain);
     botId = shop.botId || botId;
     if (!botId) {
       return res.status(404).json({ error: "Shop not linked to a bot" });
@@ -974,7 +1003,7 @@ router.patch("/shopify/catalog-context", async (req: Request, res: Response) => 
     } catch (err: any) {
       return res.status(400).json({ error: err.message || "Invalid shop domain" });
     }
-    const shop = await requireShopOwnerAccess(req, shopDomain);
+    const shop = await requireShopAccess(req, shopDomain);
     botId = shop.botId || botId;
     if (!botId) {
       return res.status(404).json({ error: "Shop not linked to a bot" });
@@ -1026,11 +1055,11 @@ router.get("/shopify/shops/lookup", async (req: Request, res: Response) => {
     return res.json({ status: "inactive", shopDomain });
   }
 
-  if (shop.botId && shop.bot?.userId === req.user!.id) {
-    return res.json({ status: "linked_to_you", shopDomain, botId: shop.botId });
-  }
-
   if (shop.botId) {
+    const canAccess = await userCanAccessBot(req.user!, shop.botId);
+    if (canAccess) {
+      return res.json({ status: "linked_to_you", shopDomain, botId: shop.botId });
+    }
     return res.json({ status: "linked_to_other", shopDomain });
   }
 
@@ -1043,9 +1072,12 @@ router.get("/shopify/shops", async (req: Request, res: Response) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const bot = await prisma.bot.findFirst({
-    where: { id: parsed.data.botId, userId: req.user!.id }
-  });
+  const canAccess = await userCanAccessBot(req.user!, parsed.data.botId);
+  const bot = canAccess
+    ? await prisma.bot.findUnique({
+        where: { id: parsed.data.botId }
+      })
+    : null;
   if (!bot) {
     return res.status(404).json({ error: "Bot not found" });
   }
@@ -1097,9 +1129,12 @@ router.patch("/shopify/shops/:shopDomain/link", async (req: Request, res: Respon
   }
 
   if (parsed.data.botId) {
-    const bot = await prisma.bot.findFirst({
-      where: { id: parsed.data.botId, userId: req.user!.id }
-    });
+    const canAccess = await userCanAccessBot(req.user!, parsed.data.botId);
+    const bot = canAccess
+      ? await prisma.bot.findUnique({
+          where: { id: parsed.data.botId }
+        })
+      : null;
     if (!bot) {
       return res.status(404).json({ error: "Bot not found" });
     }
@@ -1133,7 +1168,7 @@ router.patch("/shopify/shops/:shopDomain/link", async (req: Request, res: Respon
 router.post("/shopify/:shopDomain/sync/products", async (req: Request, res: Response) => {
   try {
     const shopDomain = normalizeShopDomain(req.params.shopDomain);
-    await requireShopOwnerAccess(req, shopDomain);
+    await requireShopAccess(req, shopDomain);
     const result = await syncShopifyProducts(shopDomain);
     return res.json(result);
   } catch (err: any) {
@@ -1156,7 +1191,7 @@ router.get("/shopify/:shopDomain/products/search", async (req: Request, res: Res
 
   try {
     const shopDomain = normalizeShopDomain(req.params.shopDomain);
-    await requireShopOwnerAccess(req, shopDomain);
+    await requireShopAccess(req, shopDomain);
     const result = await searchShopifyProducts(shopDomain, {
       query: parsed.data.q,
       priceMin: parsed.data.priceMin ? Number(parsed.data.priceMin) : undefined,
@@ -1185,7 +1220,7 @@ router.post("/shopify/:shopDomain/cart", async (req: Request, res: Response) => 
 
   try {
     const shopDomain = normalizeShopDomain(req.params.shopDomain);
-    await requireShopOwnerAccess(req, shopDomain);
+    await requireShopAccess(req, shopDomain);
     const urls = await buildCartUrls({
       shopDomain,
       variantId: parsed.data.variantId,
@@ -1202,7 +1237,7 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       const shopDomain = normalizeShopDomain(req.params.shopDomain);
-      await requireShopOwnerAccess(req, shopDomain);
+      await requireShopAccess(req, shopDomain);
       const result = await buildCartUrl({ shopDomain });
       return res.json(result);
     } catch (err: any) {
@@ -1220,7 +1255,7 @@ router.get("/shopify/:shopDomain/orders/lookup", async (req: Request, res: Respo
 
   try {
     const shopDomain = normalizeShopDomain(req.params.shopDomain);
-    await requireShopOwnerAccess(req, shopDomain);
+    await requireShopAccess(req, shopDomain);
     const result = await lookupOrderByEmailAndNumber({
       shopDomain,
       email,
@@ -1239,3 +1274,4 @@ export default router;
 // PCD handling: customers/data_request, customers/redact, and shop/redact are implemented.
 // Product/inventory data is cached for performance and cleared on shop redact/uninstall.
 // Order data is fetched on demand for order status lookups and retained for limited time.
+

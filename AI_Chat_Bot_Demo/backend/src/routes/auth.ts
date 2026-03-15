@@ -191,7 +191,7 @@ router.post("/register", async (req: Request, res: Response) => {
 
   let referralCodeId: string | null = null;
   let inviteRecord: { id: string; email: string; invitedById: string } | null = null;
-  let inviteBotIds: string[] = [];
+  let inviteBotAccess: Array<{ botId: string; pagePermissions: string[] }> = [];
 
   if (inviteToken) {
     const invite = await prisma.teamInvite.findUnique({
@@ -209,8 +209,13 @@ router.post("/register", async (req: Request, res: Response) => {
     }
 
     inviteRecord = { id: invite.id, email: invite.email, invitedById: invite.invitedById };
-    inviteBotIds = invite.bots.map((b) => b.botId);
-    if (inviteBotIds.length === 0) {
+    inviteBotAccess = invite.bots.map((b: any) => ({
+      botId: b.botId,
+      pagePermissions: Array.isArray(b.pagePermissions)
+        ? b.pagePermissions
+        : ["BOT_DETAIL"]
+    }));
+    if (inviteBotAccess.length === 0) {
       return res.status(400).json({ error: "Invite has no bots" });
     }
   } else {
@@ -226,7 +231,7 @@ router.post("/register", async (req: Request, res: Response) => {
       email,
       passwordHash,
       role: inviteRecord ? "TEAM_MEMBER" : "CLIENT",
-      emailVerified: false,
+      emailVerified: !!inviteRecord,
       referralCodeId: referralCodeId ?? undefined,
       referredAt: referralCodeId ? new Date() : undefined
     }
@@ -235,13 +240,14 @@ router.post("/register", async (req: Request, res: Response) => {
   if (inviteRecord) {
     await prisma.$transaction([
       prisma.teamMembership.createMany({
-        data: inviteBotIds.map((botId) => ({
+        data: inviteBotAccess.map(({ botId, pagePermissions }) => ({
           userId: user.id,
           botId,
-          grantedById: inviteRecord!.invitedById
+          grantedById: inviteRecord!.invitedById,
+          pagePermissions
         })),
         skipDuplicates: true
-      }),
+      } as any),
       prisma.teamInvite.update({
         where: { id: inviteRecord.id },
         data: { usedAt: new Date() }
@@ -249,7 +255,9 @@ router.post("/register", async (req: Request, res: Response) => {
     ]);
   }
 
-  await sendVerificationEmail(user.id, email);
+  if (!inviteRecord) {
+    await sendVerificationEmail(user.id, email);
+  }
 
   return res.status(201).json({
     message: inviteRecord

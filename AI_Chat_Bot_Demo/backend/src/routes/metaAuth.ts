@@ -6,6 +6,7 @@ import { prisma } from "../prisma/prisma";
 import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
 import { debugToken } from "../services/metaTokenService";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 const router = Router();
 
@@ -179,7 +180,8 @@ router.get(
         return res.status(404).json({ error: "Bot not found" });
       }
 
-      if (user.role !== "ADMIN" && bot.userId !== user.id) {
+      const canAccess = await userCanAccessBot(user, bot.id);
+      if (!canAccess) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -296,8 +298,17 @@ router.get("/meta/oauth/callback", async (req: Request, res: Response) => {
       return res.status(400).send("Bot not found");
     }
 
-    if (bot.userId !== userId) {
-      return res.status(400).send("User no longer owns this bot");
+    const stateUser = await prisma.user.findUnique({ where: { id: userId } });
+    if (!stateUser) {
+      return res.status(400).send("User no longer exists");
+    }
+
+    const canAccess = await userCanAccessBot(
+      { id: stateUser.id, role: stateUser.role },
+      bot.id
+    );
+    if (!canAccess) {
+      return res.status(400).send("User can no longer access this bot");
     }
 
     // 1) Short-lived user token
@@ -393,12 +404,13 @@ router.get(
         return res.status(404).json({ error: "Session not found" });
       }
 
-      if (user.role !== "ADMIN" && session.userId !== user.id) {
+      if (session.userId !== user.id) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      if (session.bot.userId !== session.userId) {
-        return res.status(400).json({ error: "Session bot mismatch" });
+      const canAccess = await userCanAccessBot(user, session.botId);
+      if (!canAccess) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const rawPages = session.pagesJson as any[];
@@ -463,14 +475,15 @@ router.post(
         return res.status(404).json({ error: "Session not found" });
       }
 
-      if (user.role !== "ADMIN" && session.userId !== user.id) {
+      if (session.userId !== user.id) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
       const bot = session.bot;
 
-      if (bot.userId !== session.userId) {
-        return res.status(400).json({ error: "Session bot mismatch" });
+      const canAccess = await userCanAccessBot(user, bot.id);
+      if (!canAccess) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const rawPages = session.pagesJson as any[];

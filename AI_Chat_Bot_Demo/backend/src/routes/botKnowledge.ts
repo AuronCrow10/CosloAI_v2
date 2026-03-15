@@ -19,6 +19,7 @@ import {
   deleteChunk
 } from "../services/knowledgeClient";
 import { getPlanUsageForBot } from "../services/planUsageService";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 const router = Router();
 
@@ -56,12 +57,16 @@ function logBotKnowledge(label: string, data: Record<string, unknown>) {
 // -----------------------------
 router.use("/bots", requireAuth);
 
-async function getUserBot(botId: string, userId: string) {
-  return prisma.bot.findFirst({ where: { id: botId, userId } });
+type RouteUser = NonNullable<Request["user"]>;
+
+async function getUserBot(botId: string, user: RouteUser) {
+  const canAccess = await userCanAccessBot(user, botId);
+  if (!canAccess) return null;
+  return prisma.bot.findUnique({ where: { id: botId } });
 }
 
-async function ensureKnowledgeClient(botId: string, userId: string) {
-  const bot = await getUserBot(botId, userId);
+async function ensureKnowledgeClient(botId: string, user: RouteUser) {
+  const bot = await getUserBot(botId, user);
   if (!bot) throw new Error("BOT_NOT_FOUND");
   if (bot.status !== "ACTIVE") throw new Error("BOT_NOT_ACTIVE");
   if ((bot as any).knowledgeSource === "SHOPIFY") {
@@ -95,7 +100,7 @@ router.post("/bots/:id/knowledge/estimate-crawl", async (req: Request, res: Resp
       overrideDomain: overrideDomain ?? null
     });
 
-    const { bot } = await ensureKnowledgeClient(botId, userId);
+    const { bot } = await ensureKnowledgeClient(botId, req.user!);
 
     const domainToUse = overrideDomain || bot.domain;
     if (!domainToUse) return res.status(400).json({ error: "No domain configured for this bot" });
@@ -129,7 +134,7 @@ router.get("/bots/:id/knowledge/estimate-crawl-status", async (req: Request, res
 
     if (!estimateId) return res.status(400).json({ error: "estimateId is required" });
 
-    const { bot } = await ensureKnowledgeClient(botId, userId);
+    const { bot } = await ensureKnowledgeClient(botId, req.user!);
 
     const status = await getEstimateCrawlStatus(estimateId);
     if (!status || !status.status) {
@@ -194,7 +199,7 @@ router.post("/bots/:id/knowledge/crawl-domain", async (req: Request, res: Respon
       estimateId: estimateId ?? null
     });
 
-    const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
+    const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, req.user!);
 
     const domainToUse = overrideDomain || bot.domain;
 
@@ -323,7 +328,7 @@ router.get("/bots/:id/knowledge/crawl-history", async (req: Request, res: Respon
     const botId = req.params.id;
     const userId = req.user!.id;
 
-    const bot = await getUserBot(botId, userId);
+    const bot = await getUserBot(botId, req.user!);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
     if (!bot.knowledgeClientId) {
@@ -355,7 +360,7 @@ router.get("/bots/:id/knowledge/crawl-status", async (req: Request, res: Respons
 
     if (!jobId) return res.status(400).json({ error: "jobId is required" });
 
-    const bot = await getUserBot(botId, userId);
+    const bot = await getUserBot(botId, req.user!);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     if ((bot as any).knowledgeSource === "SHOPIFY") {
       return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
@@ -399,7 +404,7 @@ router.post("/bots/:id/knowledge/deactivate-job", async (req: Request, res: Resp
 
     if (!jobId) return res.status(400).json({ error: "jobId is required" });
 
-    const bot = await getUserBot(botId, userId);
+    const bot = await getUserBot(botId, req.user!);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     if ((bot as any).knowledgeSource === "SHOPIFY") {
       return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
@@ -429,7 +434,7 @@ router.get("/bots/:id/knowledge/chunks", async (req: Request, res: Response) => 
 
     if (!jobId) return res.status(400).json({ error: "jobId is required" });
 
-    const bot = await getUserBot(botId, userId);
+    const bot = await getUserBot(botId, req.user!);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     if ((bot as any).knowledgeSource === "SHOPIFY") {
       return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
@@ -460,7 +465,7 @@ router.patch("/bots/:id/knowledge/chunks/:chunkId", async (req: Request, res: Re
 
     if (!text) return res.status(400).json({ error: "text is required" });
 
-    const bot = await getUserBot(botId, userId);
+    const bot = await getUserBot(botId, req.user!);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     if ((bot as any).knowledgeSource === "SHOPIFY") {
       return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
@@ -492,7 +497,7 @@ router.delete("/bots/:id/knowledge/chunks/:chunkId", async (req: Request, res: R
     const userId = req.user!.id;
     const chunkId = req.params.chunkId;
 
-    const bot = await getUserBot(botId, userId);
+    const bot = await getUserBot(botId, req.user!);
     if (!bot) return res.status(404).json({ error: "Bot not found" });
     if ((bot as any).knowledgeSource === "SHOPIFY") {
       return res.status(400).json({ error: "Bot is configured to use Shopify knowledge." });
@@ -522,7 +527,7 @@ router.post(
       const botId = req.params.id;
       const userId = req.user!.id;
 
-      const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
+      const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, req.user!);
 
       const files = req.files as Express.Multer.File[] | undefined;
       if (!files || files.length === 0) {
@@ -556,7 +561,7 @@ router.post(
       const botId = req.params.id;
       const userId = req.user!.id;
 
-      const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, userId);
+      const { bot, knowledgeClientId } = await ensureKnowledgeClient(botId, req.user!);
 
       const files = req.files as Express.Multer.File[] | undefined;
       if (!files || files.length === 0) {
@@ -593,3 +598,4 @@ router.post(
 );
 
 export default router;
+

@@ -4,6 +4,7 @@ import axios from "axios";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 const router = Router();
 
@@ -82,7 +83,8 @@ router.post(
         return res.status(404).json({ error: "Bot not found" });
       }
 
-      if (user.role !== "ADMIN" && bot.userId !== user.id) {
+      const canAccess = await userCanAccessBot(user, bot.id);
+      if (!canAccess) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -242,7 +244,12 @@ router.post(
 
       const bot = session.bot;
 
-      if (user.role !== "ADMIN" && bot.userId !== user.id) {
+      if (session.userId !== user.id) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const canAccess = await userCanAccessBot(user, bot.id);
+      if (!canAccess) {
         return res.status(403).json({ error: "Forbidden" });
       }
 

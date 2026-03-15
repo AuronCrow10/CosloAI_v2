@@ -117,6 +117,7 @@ model TeamInviteBot {
   id        String     @id @default(uuid())
   inviteId  String
   botId     String
+  pagePermissions String[] @default(["BOT_DETAIL"])
   invite    TeamInvite @relation(fields: [inviteId], references: [id])
   bot       Bot        @relation(fields: [botId], references: [id])
   createdAt DateTime   @default(now())
@@ -130,6 +131,7 @@ model TeamMembership {
   userId        String
   botId         String
   grantedById   String
+  pagePermissions String[] @default(["BOT_DETAIL"])
   user          User     @relation(fields: [userId], references: [id])
   bot           Bot      @relation(fields: [botId], references: [id])
   grantedBy     User     @relation("TeamMembershipGranter", fields: [grantedById], references: [id])

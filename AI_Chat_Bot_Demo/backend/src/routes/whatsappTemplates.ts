@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
 import { config } from "../config";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 const router = Router();
 
@@ -178,9 +179,17 @@ const listQuerySchema = z.object({
  */
 
 /*
-async function getWhatsAppContext(botId: string, userId: string) {
-  const bot = await prisma.bot.findFirst({
-    where: { id: botId, userId }
+async function getWhatsAppContext(
+  botId: string,
+  user: NonNullable<Request["user"]>
+) {
+  const canAccess = await userCanAccessBot(user, botId);
+  if (!canAccess) {
+    throw new HttpError(404, "Bot not found");
+  }
+
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId }
   });
 
   if (!bot) {
@@ -201,7 +210,7 @@ async function getWhatsAppContext(botId: string, userId: string) {
   }
 
   const lastSession = await prisma.whatsappConnectSession.findFirst({
-    where: { botId: bot.id, userId },
+    where: { botId: bot.id, userId: user.id },
     orderBy: { createdAt: "desc" }
   });
 
@@ -223,9 +232,17 @@ async function getWhatsAppContext(botId: string, userId: string) {
 
 */
 
-async function getWhatsAppContext(botId: string, userId: string) {
-  const bot = await prisma.bot.findFirst({
-    where: { id: botId, userId }
+async function getWhatsAppContext(
+  botId: string,
+  user: NonNullable<Request["user"]>
+) {
+  const canAccess = await userCanAccessBot(user, botId);
+  if (!canAccess) {
+    throw new HttpError(404, "Bot not found");
+  }
+
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId }
   });
 
   if (!bot) {
@@ -252,7 +269,7 @@ async function getWhatsAppContext(botId: string, userId: string) {
   // 1) Preferred path: embedded signup session
   //    (the long-term, “real” integration you care about)
   const lastSession = await prisma.whatsappConnectSession.findFirst({
-    where: { botId: bot.id, userId },
+    where: { botId: bot.id, userId: user.id },
     orderBy: { createdAt: "desc" }
   });
 
@@ -308,7 +325,7 @@ router.get(
     try {
       const { bot, channel, wabaId, accessToken } = await getWhatsAppContext(
         req.params.botId,
-        req.user!.id
+        req.user!
       );
 
       const parsedQuery = listQuerySchema.parse(req.query);
@@ -425,7 +442,7 @@ router.post(
     try {
       const { bot, channel, wabaId, accessToken } = await getWhatsAppContext(
         req.params.botId,
-        req.user!.id
+        req.user!
       );
 
       const payload = templateUpsertSchema.parse(req.body);
@@ -514,7 +531,7 @@ router.put(
     try {
       const { bot, channel, wabaId, accessToken } = await getWhatsAppContext(
         req.params.botId,
-        req.user!.id
+        req.user!
       );
 
       const payload = templateUpsertSchema.parse(req.body);

@@ -4,19 +4,51 @@ import { randomBytes } from "crypto";
 import { prisma } from "../prisma/prisma";
 import { requireAuth } from "../middleware/auth";
 import { sendMail } from "../services/mailer";
+import {
+  normalizeTeamPagesForKnowledgeSource,
+  TEAM_PAGE_VALUES,
+  TeamPagePermission
+} from "../services/teamAccessService";
 
 const router = Router();
 
 router.use("/team", requireAuth);
 
+const teamBotAccessSchema = z.object({
+  botId: z.string().uuid(),
+  pages: z.array(z.enum(TEAM_PAGE_VALUES)).optional()
+});
+
 const inviteSchema = z.object({
   email: z.string().email(),
-  botIds: z.array(z.string().uuid()).min(1)
+  botIds: z.array(z.string().uuid()).min(1).optional(),
+  botAccess: z.array(teamBotAccessSchema).min(1).optional()
+}).refine((value) => (value.botIds && value.botIds.length > 0) || (value.botAccess && value.botAccess.length > 0), {
+  message: "botIds or botAccess is required"
 });
 
 const memberBotsSchema = z.object({
-  botIds: z.array(z.string().uuid()).min(1)
+  botIds: z.array(z.string().uuid()).min(1).optional(),
+  botAccess: z.array(teamBotAccessSchema).min(1).optional()
+}).refine((value) => (value.botIds && value.botIds.length > 0) || (value.botAccess && value.botAccess.length > 0), {
+  message: "botIds or botAccess is required"
 });
+
+function mergeRequestedBotAccess(
+  value: { botIds?: string[]; botAccess?: Array<{ botId: string; pages?: TeamPagePermission[] }> }
+): Map<string, TeamPagePermission[]> {
+  const map = new Map<string, TeamPagePermission[]>();
+  for (const botId of value.botIds || []) {
+    if (!map.has(botId)) {
+      map.set(botId, []);
+    }
+  }
+  for (const item of value.botAccess || []) {
+    const existing = map.get(item.botId) || [];
+    map.set(item.botId, Array.from(new Set([...existing, ...(item.pages || [])])));
+  }
+  return map;
+}
 
 router.post("/team/invites", async (req: Request, res: Response) => {
   if (!req.user || req.user.role === "TEAM_MEMBER") {
@@ -29,16 +61,28 @@ router.post("/team/invites", async (req: Request, res: Response) => {
   }
 
   const email = parsed.data.email.toLowerCase().trim();
-  const botIds = Array.from(new Set(parsed.data.botIds));
+  const requestedAccess = mergeRequestedBotAccess(parsed.data);
+  const botIds = Array.from(requestedAccess.keys());
 
   const ownedBots = await prisma.bot.findMany({
     where: { id: { in: botIds }, userId: req.user.id },
-    select: { id: true, name: true }
+    select: { id: true, name: true, knowledgeSource: true }
   });
 
   if (ownedBots.length !== botIds.length) {
     return res.status(403).json({ error: "Forbidden" });
   }
+
+  const normalizedBotAccess: Array<{
+    botId: string;
+    pages: TeamPagePermission[];
+  }> = ownedBots.map((bot) => ({
+    botId: bot.id,
+    pages: normalizeTeamPagesForKnowledgeSource(
+      requestedAccess.get(bot.id) || [],
+      bot.knowledgeSource === "SHOPIFY" ? "SHOPIFY" : "RAG"
+    )
+  }));
 
   const token = randomBytes(32).toString("hex");
 
@@ -48,7 +92,10 @@ router.post("/team/invites", async (req: Request, res: Response) => {
       token,
       invitedById: req.user.id,
       bots: {
-        create: botIds.map((botId) => ({ botId }))
+        create: normalizedBotAccess.map(({ botId, pages }) => ({
+          botId,
+          pagePermissions: pages
+        })) as any
       }
     },
     include: {
@@ -76,7 +123,11 @@ router.post("/team/invites", async (req: Request, res: Response) => {
     id: invite.id,
     email: invite.email,
     createdAt: invite.createdAt,
-    bots: invite.bots.map((b) => ({ id: b.botId, name: b.bot.name }))
+    bots: invite.bots.map((b: any) => ({
+      id: b.botId,
+      name: b.bot.name,
+      pages: Array.isArray(b.pagePermissions) ? b.pagePermissions : ["BOT_DETAIL"]
+    }))
   });
 });
 
@@ -111,14 +162,20 @@ router.get("/team/members", async (req: Request, res: Response) => {
       name: string | null;
       lastLoginAt: Date | null;
       createdAt: Date;
-      bots: { id: string; name: string }[];
+      bots: { id: string; name: string; pages: TeamPagePermission[] }[];
     }
   >();
 
   for (const m of memberships) {
     const existing = memberMap.get(m.userId);
     if (existing) {
-      existing.bots.push({ id: m.botId, name: m.bot.name });
+      existing.bots.push({
+        id: m.botId,
+        name: m.bot.name,
+        pages: Array.isArray((m as any).pagePermissions)
+          ? (m as any).pagePermissions
+          : ["BOT_DETAIL"]
+      });
     } else {
       memberMap.set(m.userId, {
         userId: m.userId,
@@ -126,7 +183,13 @@ router.get("/team/members", async (req: Request, res: Response) => {
         name: m.user.name,
         lastLoginAt: m.user.lastLoginAt,
         createdAt: m.user.createdAt,
-        bots: [{ id: m.botId, name: m.bot.name }]
+        bots: [{
+          id: m.botId,
+          name: m.bot.name,
+          pages: Array.isArray((m as any).pagePermissions)
+            ? (m as any).pagePermissions
+            : ["BOT_DETAIL"]
+        }]
       });
     }
   }
@@ -139,7 +202,11 @@ router.get("/team/members", async (req: Request, res: Response) => {
       id: invite.id,
       email: invite.email,
       createdAt: invite.createdAt,
-      bots: invite.bots.map((b) => ({ id: b.botId, name: b.bot.name }))
+      bots: invite.bots.map((b: any) => ({
+        id: b.botId,
+        name: b.bot.name,
+        pages: Array.isArray(b.pagePermissions) ? b.pagePermissions : ["BOT_DETAIL"]
+      }))
     }))
   });
 });
@@ -193,16 +260,35 @@ router.put("/team/members/:userId", async (req: Request, res: Response) => {
   }
 
   const targetUserId = req.params.userId;
-  const botIds = Array.from(new Set(parsed.data.botIds));
+  const requestedAccess = mergeRequestedBotAccess(parsed.data);
+  const botIds = Array.from(requestedAccess.keys());
 
   const ownedBots = await prisma.bot.findMany({
     where: { id: { in: botIds }, userId: req.user.id },
-    select: { id: true, name: true }
+    select: { id: true, name: true, knowledgeSource: true }
   });
 
   if (ownedBots.length !== botIds.length) {
     return res.status(403).json({ error: "Forbidden" });
   }
+
+  const normalizedBotAccess: Array<{
+    botId: string;
+    pages: TeamPagePermission[];
+  }> = ownedBots.map((bot) => ({
+    botId: bot.id,
+    pages: normalizeTeamPagesForKnowledgeSource(
+      requestedAccess.get(bot.id) || [],
+      bot.knowledgeSource === "SHOPIFY" ? "SHOPIFY" : "RAG"
+    )
+  }));
+
+  const samePages = (a: TeamPagePermission[], b: TeamPagePermission[]) => {
+    if (a.length !== b.length) return false;
+    const sa = [...a].sort().join("|");
+    const sb = [...b].sort().join("|");
+    return sa === sb;
+  };
 
   await prisma.$transaction(async (tx) => {
     const existing = await tx.teamMembership.findMany({
@@ -210,14 +296,22 @@ router.put("/team/members/:userId", async (req: Request, res: Response) => {
         userId: targetUserId,
         bot: { userId: req.user!.id }
       },
-      select: { botId: true }
+      select: { botId: true, pagePermissions: true as any } as any
     });
 
-    const existingIds = new Set(existing.map((m) => m.botId));
-    const nextIds = new Set(botIds);
+    const existingByBotId = new Map(existing.map((m: any) => [m.botId, m]));
+    const nextIds = new Set(normalizedBotAccess.map((item) => item.botId));
 
     const toRemove = existing.filter((m) => !nextIds.has(m.botId));
-    const toAdd = botIds.filter((id) => !existingIds.has(id));
+    const toAdd = normalizedBotAccess.filter((item) => !existingByBotId.has(item.botId));
+    const toUpdate = normalizedBotAccess.filter((item) => {
+      const current = existingByBotId.get(item.botId) as any;
+      if (!current) return false;
+      const currentPages = Array.isArray(current.pagePermissions)
+        ? (current.pagePermissions as TeamPagePermission[])
+        : (["BOT_DETAIL"] as TeamPagePermission[]);
+      return !samePages(currentPages, item.pages);
+    });
 
     if (toRemove.length > 0) {
       await tx.teamMembership.deleteMany({
@@ -230,11 +324,19 @@ router.put("/team/members/:userId", async (req: Request, res: Response) => {
 
     if (toAdd.length > 0) {
       await tx.teamMembership.createMany({
-        data: toAdd.map((botId) => ({
+        data: toAdd.map(({ botId, pages }) => ({
           userId: targetUserId,
           botId,
-          grantedById: req.user!.id
-        }))
+          grantedById: req.user!.id,
+          pagePermissions: pages
+        })) as any
+      });
+    }
+
+    for (const item of toUpdate) {
+      await tx.teamMembership.updateMany({
+        where: { userId: targetUserId, botId: item.botId },
+        data: { pagePermissions: item.pages } as any
       });
     }
   });

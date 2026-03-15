@@ -1595,7 +1595,7 @@ router.get(
 router.get(
   "/dashboard/revenue-ai",
   async (req: Request, res: Response): Promise<void> => {
-    const userId = req.user!.id;
+    const user = req.user!;
     const days = parseRangeDays(req, 30);
     const botId = typeof req.query.botId === "string" ? req.query.botId : null;
 
@@ -1603,12 +1603,32 @@ router.get(
     const rangeStart = subDays(today, days - 1);
     const rangeEnd = addDays(today, 1);
 
+    if (user.role === "TEAM_MEMBER" && !botId) {
+      res.status(400).json({ error: "botId is required" });
+      return;
+    }
+
+    const botWhere =
+      user.role === "TEAM_MEMBER"
+        ? {
+            ...(botId ? { id: botId } : {}),
+            teamMemberships: {
+              some: {
+                userId: user.id
+              }
+            }
+          }
+        : {
+            ...(botId ? { id: botId } : {}),
+            userId: user.id
+          };
+
     const bots = await prisma.bot.findMany({
-      where: { userId },
+      where: botWhere as any,
       select: { id: true, name: true }
     });
 
-    const botIds = botId ? bots.filter((b) => b.id === botId).map((b) => b.id) : bots.map((b) => b.id);
+    const botIds = bots.map((b) => b.id);
 
     if (botIds.length === 0) {
       res.json({

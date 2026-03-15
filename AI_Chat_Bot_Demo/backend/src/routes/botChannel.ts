@@ -2,10 +2,15 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../prisma/prisma";
+import { userCanAccessBot } from "../services/teamAccessService";
 
 const router = Router();
 
 router.use("/bots/", requireAuth);
+
+async function canAccessBot(req: Request, botId: string): Promise<boolean> {
+  return userCanAccessBot(req.user!, botId);
+}
 
 const channelCreateSchema = z.object({
   type: z.enum(["WEB", "WHATSAPP", "FACEBOOK", "INSTAGRAM"]),
@@ -18,8 +23,11 @@ const channelUpdateSchema = channelCreateSchema.partial();
 
 // GET /bots/:id/channels
 router.get("/bots/:id/channels", async (req: Request, res: Response) => {
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id },
+  const access = await canAccessBot(req, req.params.id);
+  if (!access) return res.status(404).json({ error: "Bot not found" });
+
+  const bot = await prisma.bot.findUnique({
+    where: { id: req.params.id },
     include: { channels: true }
   });
   if (!bot) return res.status(404).json({ error: "Bot not found" });
@@ -33,8 +41,11 @@ router.post("/bots/:id/channels", async (req: Request, res: Response) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const bot = await prisma.bot.findFirst({
-    where: { id: req.params.id, userId: req.user!.id }
+  const access = await canAccessBot(req, req.params.id);
+  if (!access) return res.status(404).json({ error: "Bot not found" });
+
+  const bot = await prisma.bot.findUnique({
+    where: { id: req.params.id }
   });
   if (!bot) return res.status(404).json({ error: "Bot not found" });
 
@@ -63,9 +74,13 @@ router.patch(
     const channel = await prisma.botChannel.findFirst({
       where: {
         id: req.params.channelId,
-        bot: { id: req.params.id, userId: req.user!.id }
+        bot: { id: req.params.id }
       }
     });
+    if (channel) {
+      const access = await canAccessBot(req, channel.botId);
+      if (!access) return res.status(404).json({ error: "Channel not found" });
+    }
     if (!channel) return res.status(404).json({ error: "Channel not found" });
 
     const updated = await prisma.botChannel.update({
@@ -84,9 +99,13 @@ router.delete(
     const channel = await prisma.botChannel.findFirst({
       where: {
         id: req.params.channelId,
-        bot: { id: req.params.id, userId: req.user!.id }
+        bot: { id: req.params.id }
       }
     });
+    if (channel) {
+      const access = await canAccessBot(req, channel.botId);
+      if (!access) return res.status(404).json({ error: "Channel not found" });
+    }
     if (!channel) return res.status(404).json({ error: "Channel not found" });
 
     await prisma.botChannel.delete({ where: { id: channel.id } });
