@@ -10,13 +10,22 @@ const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PHONE_RE = /(\+?\d[\d\s().-]{6,}\d)/g;
 const CONTACT_URL_TOKENS = ["contact", "contatti", "contatto", "contattaci", "contacto"];
 const PHONE_CONTEXT_RE = /\b(tel|telefono|phone|whatsapp|cellulare|cell|call|chiam)/i;
+const PLACEHOLDER_EMAIL_DOMAIN_PATTERNS = [
+  /^test\./i,
+  /^mailinator\./i,
+  /^ex\.com/i
+];
 
 function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
 function normalizePhone(value: string): string {
-  return value.replace(/[^\d+]/g, "");
+  const compact = value.replace(/[^\d+]/g, "");
+  if (compact.startsWith("00") && compact.length > 4) {
+    return `+${compact.slice(2)}`;
+  }
+  return compact;
 }
 
 function countDigits(value: string): number {
@@ -28,6 +37,31 @@ function isLikelyPhone(value: string, context?: string): boolean {
   if (digits < 8 || digits > 15) return false;
   if (!context) return false;
   return PHONE_CONTEXT_RE.test(context);
+}
+
+function isValidEmailDomain(domain: string): boolean {
+  if (!domain || domain.length < 4) return false;
+  if (!domain.includes(".")) return false;
+  if (domain.startsWith(".") || domain.endsWith(".")) return false;
+  if (domain.includes("..")) return false;
+  if (PLACEHOLDER_EMAIL_DOMAIN_PATTERNS.some((pattern) => pattern.test(domain))) {
+    return false;
+  }
+  const tld = domain.split(".").pop() || "";
+  if (!/^[a-z]{2,24}$/i.test(tld)) return false;
+  return true;
+}
+
+function isValidEmailValue(value: string): boolean {
+  const normalized = normalizeEmail(value);
+  const at = normalized.indexOf("@");
+  if (at <= 0 || at >= normalized.length - 1) return false;
+  const local = normalized.slice(0, at);
+  const domain = normalized.slice(at + 1);
+  if (local.length < 1 || local.length > 64) return false;
+  if (local.includes("..")) return false;
+  if (!/^[a-z0-9._%+-]+$/i.test(local)) return false;
+  return isValidEmailDomain(domain);
 }
 
 type ContactSourceInput = {
@@ -69,7 +103,10 @@ export function extractContacts(params: {
     const text = source.text || "";
     if (!text) continue;
     const emails = text.match(EMAIL_RE) || [];
-    emails.forEach((value) => emailSet.add(normalizeEmail(value)));
+    emails.forEach((value) => {
+      if (!isValidEmailValue(value)) return;
+      emailSet.add(normalizeEmail(value));
+    });
 
     const phones = text.match(PHONE_RE) || [];
     phones.forEach((value) => {
@@ -120,7 +157,9 @@ export function extractContactsBySource(
 
   for (const source of sources) {
     const text = source.text || "";
-    const emails = (text.match(EMAIL_RE) || []).map(normalizeEmail);
+    const emails = (text.match(EMAIL_RE) || [])
+      .map(normalizeEmail)
+      .filter((value) => isValidEmailValue(value));
     const phonesRaw = text.match(PHONE_RE) || [];
     const contactLikeUrl =
       !!source.url &&

@@ -175,6 +175,7 @@ export async function getChatCompletion(params: {
   messages: ChatMessage[];
   model?: string;
   maxTokens?: number;
+  temperature?: number;
   usageContext?: UsageContextInput;
   maxContinuations?: number;
 }): Promise<string> {
@@ -182,6 +183,7 @@ export async function getChatCompletion(params: {
     messages,
     model = "gpt-4.1-mini",
     maxTokens = 200,
+    temperature,
     usageContext,
     maxContinuations = 3
   } = params;
@@ -196,6 +198,7 @@ export async function getChatCompletion(params: {
       messages: currentMessages,
       model,
       maxTokens,
+      temperature,
       usageContext
     });
 

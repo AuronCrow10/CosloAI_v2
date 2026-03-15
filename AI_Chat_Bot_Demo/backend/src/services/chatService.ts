@@ -1,11 +1,11 @@
-﻿// services/chatService.ts
+// services/chatService.ts
 
 import { getBotConfigBySlug, BookingConfig } from "../bots/config";
 import { getOverviewCoverageQueries } from "../knowledge/overviewCoverageQueries";
 import { detectKnowledgeLanguage, detectKnowledgeLanguageHint } from "./knowledgeLanguage";
 import { getKnowledgeOverviewNoResultsMessage } from "./knowledgeFallbacks";
 import { runKnowledgeRetrieval } from "./knowledgeOrchestration";
-import { detectContactQuery } from "../knowledge/contactQueryDetection";
+import { detectContactQuerySmart } from "../knowledge/contactQueryDetection";
 import { searchKnowledgeContacts } from "../knowledge/contactRetrieval";
 import { extractContacts, extractContactsBySource } from "../knowledge/contactExtraction";
 import { resolveContactFallback } from "../knowledge/contactFallbacks";
@@ -85,10 +85,18 @@ import {
 import { evaluateClerkEligibility } from "./shopifyClerkEligibility";
 
 const MAX_MESSAGE_LENGTH = 2000;
-const MAX_CONTEXT_CHARS_PER_CHUNK = 1000;
+const BASE_CONTEXT_CHARS_PER_CHUNK = 1000;
+const MAX_TOTAL_CONTEXT_CHARS = 4300;
+const MIN_CONTEXT_CHARS_PER_CHUNK = 450;
+const PRIORITIZED_CONTEXT_CHARS = [1700, 1100, 850, 700, 600, 550] as const;
 const HISTORY_TURNS_TO_KEEP = 2; // 2 user+assistant turns = 4 messages total
+const ENABLE_CONVERSATION_MEMORY_SUMMARY =
+  String(process.env.ENABLE_CONVERSATION_MEMORY_SUMMARY || "false").toLowerCase() ===
+  "true";
 
 const CONTEXT_TOKEN_STOPWORDS = new Set([
+  "a",
+  "an",
   "the",
   "and",
   "for",
@@ -96,24 +104,102 @@ const CONTEXT_TOKEN_STOPWORDS = new Set([
   "that",
   "this",
   "what",
+  "when",
+  "where",
+  "who",
+  "how",
+  "about",
+  "from",
+  "your",
   "have",
-  "sono",
+  "will",
+  "would",
+  "could",
+  "please",
+  "info",
+  "information",
+  "details",
+  "detail",
+  "want",
+  "know",
+  "tell",
+  "give",
+  "more",
+  "also",
+  "ciao",
+  "grazie",
+  "dimmi",
+  "dammi",
   "come",
   "dove",
   "quando",
   "quale",
   "quali",
-  "dimmi",
-  "dammi",
-  "info",
-  "please",
-  "pero",
-  "about",
-  "from",
-  "will",
-  "your",
-  "ciao",
-  "grazie"
+  "sono",
+  "vuoi",
+  "sapere",
+  "informazioni",
+  "informazione",
+  "specifiche",
+  "specifica",
+  "specifico",
+  "specifici",
+  "dettaglio",
+  "dettagli",
+  "anche",
+  "avete",
+  "vostri",
+  "vostre",
+  "para",
+  "por",
+  "sobre",
+  "como",
+  "donde",
+  "cuando",
+  "cual",
+  "cuales",
+  "quiero",
+  "quieres",
+  "saber",
+  "informacion",
+  "especifico",
+  "especifica",
+  "especificos",
+  "especificas",
+  "detalle",
+  "detalles",
+  "tambien",
+  "gracias",
+  "merci",
+  "bonjour",
+  "comment",
+  "ou",
+  "quel",
+  "quelle",
+  "quels",
+  "quelles",
+  "voulez",
+  "veux",
+  "savoir",
+  "informations",
+  "specifique",
+  "specifiques",
+  "aussi",
+  "hallo",
+  "danke",
+  "wie",
+  "wo",
+  "wann",
+  "welche",
+  "welcher",
+  "welches",
+  "mochtest",
+  "willst",
+  "wissen",
+  "informationen",
+  "spezifisch",
+  "spezifische",
+  "bitte"
 ]);
 
 const BASE_BOOKING_FIELDS = ["name", "email", "phone", "service", "datetime"] as const;
@@ -311,11 +397,54 @@ const GENERIC_SHORT_REPLIES = new Set([
   "perfetto grazie"
 ]);
 
+const PENDING_FOLLOW_UP_TTL_MS = 20 * 60 * 1000;
+
+type PendingFollowUpState = {
+  previousQuestion: string;
+  resolvedKnowledgeQuery: string;
+  topicHint: string | null;
+  hasSpecificTopic: boolean;
+  createdAt: number;
+  expiresAt: number;
+};
+
+const pendingFollowUpStateStore = new Map<string, PendingFollowUpState>();
+
 function normalizeShortReplyToken(message: string): string {
   return foldContextText(message)
     .replace(/[^a-z0-9\s'-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isAffirmativeFollowUpSignal(normalizedReply: string): boolean {
+  if (!normalizedReply) return false;
+  if (AFFIRMATIVE_SHORT_REPLIES.has(normalizedReply)) return true;
+
+  const words = normalizedReply.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 7) return false;
+
+  const affirmativeRoots = new Set([
+    "si",
+    "yes",
+    "sure",
+    "certo",
+    "ovvio",
+    "claro",
+    "oui",
+    "ja",
+    "okay",
+    "ok"
+  ]);
+  if (!affirmativeRoots.has(words[0])) return false;
+
+  const tail = words.slice(1);
+  if (!tail.length) return true;
+  return tail.every((word) =>
+    /^(voglio|vorrei|want|please|per|piu|more|link|dettagli|details|info|informazioni|contatto|contatti|telefono|email)$/i.test(
+      word
+    )
+  );
 }
 
 function getLastAssistantContent(historyMessages: ChatMessage[]): string | null {
@@ -355,7 +484,54 @@ type ShortAffirmativeFollowUpContext = {
   normalizedReply: string;
   previousQuestion: string;
   resolvedKnowledgeQuery: string;
+  topicHint: string | null;
+  hasSpecificTopic: boolean;
+  source: "state" | "history";
 };
+
+function buildPendingFollowUpStateKey(params: {
+  botId: string | null | undefined;
+  conversationId: string | null | undefined;
+  sessionId: string | null | undefined;
+}): string | null {
+  const { botId, conversationId, sessionId } = params;
+  if (!botId) return null;
+  if (conversationId) return `${botId}:conversation:${conversationId}`;
+  if (sessionId) return `${botId}:session:${sessionId}`;
+  return null;
+}
+
+function prunePendingFollowUpStateStore(now = Date.now()): void {
+  for (const [key, state] of pendingFollowUpStateStore.entries()) {
+    if (!state || state.expiresAt <= now) {
+      pendingFollowUpStateStore.delete(key);
+    }
+  }
+}
+
+function loadPendingFollowUpState(key: string | null): PendingFollowUpState | null {
+  if (!key) return null;
+  prunePendingFollowUpStateStore();
+  return pendingFollowUpStateStore.get(key) ?? null;
+}
+
+function clearPendingFollowUpState(key: string | null): void {
+  if (!key) return;
+  pendingFollowUpStateStore.delete(key);
+}
+
+function savePendingFollowUpState(
+  key: string | null,
+  state: PendingFollowUpState | null
+): void {
+  if (!key) return;
+  if (!state) {
+    clearPendingFollowUpState(key);
+    return;
+  }
+  prunePendingFollowUpStateStore();
+  pendingFollowUpStateStore.set(key, state);
+}
 
 function extractLastAssistantQuestion(content: string | null): string | null {
   if (!content) return null;
@@ -370,45 +546,340 @@ function extractLastAssistantQuestion(content: string | null): string | null {
   return question;
 }
 
+function findLastAssistantQuestionInHistory(historyMessages: ChatMessage[]): {
+  question: string;
+  assistantIndex: number;
+} | null {
+  for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
+    const msg = historyMessages[i];
+    if (msg.role !== "assistant") continue;
+    const content = typeof msg.content === "string" ? msg.content : "";
+    const question = extractLastAssistantQuestion(content);
+    if (question) {
+      return { question, assistantIndex: i };
+    }
+  }
+  return null;
+}
+
+function findLastAssistantMessageInHistory(historyMessages: ChatMessage[]): {
+  content: string;
+  assistantIndex: number;
+} | null {
+  for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
+    const msg = historyMessages[i];
+    if (msg.role !== "assistant") continue;
+    const content = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (!content) continue;
+    return { content, assistantIndex: i };
+  }
+  return null;
+}
+
+function extractLastUserMessageBeforeIndex(
+  historyMessages: ChatMessage[],
+  maxExclusiveIndex: number
+): string | null {
+  for (let i = maxExclusiveIndex - 1; i >= 0; i -= 1) {
+    const msg = historyMessages[i];
+    if (msg.role !== "user") continue;
+    const content = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (content.length > 0) return content;
+  }
+  return null;
+}
+
+function looksGenericFollowUpQuestion(question: string): boolean {
+  const folded = foldContextText(question);
+  const hasGenericPattern =
+    /\b(vuoi|want|quieres|voulez|mochtest|details?|dettagli?|informazioni?|info|specific|specifiche|specifico|clarify|chiarire)\b/.test(
+      folded
+    );
+  const contentTokens = extractContextQueryTokens(question);
+  return hasGenericPattern || contentTokens.length <= 1;
+}
+
+const FOLLOW_UP_INTENT_NOISE_TOKENS = new Set([
+  "vuoi",
+  "want",
+  "quieres",
+  "voulez",
+  "mochtest",
+  "details",
+  "dettagli",
+  "informazioni",
+  "specifiche",
+  "specifico",
+  "clarify",
+  "chiarire",
+  "posso",
+  "podemos",
+  "puedo",
+  "please",
+  "certo",
+  "ovvio",
+  "sure",
+  "yes",
+  "okay"
+]);
+
+function extractFollowUpIntentTokens(message: string): string[] {
+  return extractContextQueryTokens(message)
+    .filter((token) => !FOLLOW_UP_INTENT_NOISE_TOKENS.has(token))
+    .slice(0, 6);
+}
+
+function buildResolvedFollowUpKnowledgeQuery(params: {
+  previousQuestion: string;
+  topicHint: string | null;
+}): string {
+  const { previousQuestion, topicHint } = params;
+  const questionWithoutPunctuation = previousQuestion.replace(/[?]+$/, "").trim();
+  const genericQuestion = looksGenericFollowUpQuestion(previousQuestion);
+  const questionIntentTokens = extractFollowUpIntentTokens(previousQuestion);
+
+  if (topicHint && topicHint.trim().length >= 4) {
+    if (questionIntentTokens.length > 0) {
+      const foldedTopic = foldContextText(topicHint);
+      const missingIntentTokens = questionIntentTokens.filter(
+        (token) => !foldedTopic.includes(token)
+      );
+      if (missingIntentTokens.length > 0) {
+        return `${topicHint}. ${missingIntentTokens.join(" ")}`;
+      }
+    }
+    if (genericQuestion) return topicHint;
+  }
+
+  return questionWithoutPunctuation;
+}
+function getLastConcreteUserTopicFromHistory(
+  historyMessages: ChatMessage[]
+): string | null {
+  for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
+    const msg = historyMessages[i];
+    if (msg.role !== "user") continue;
+    const content = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (!content) continue;
+    if (isWeakLanguageSignalMessage(content)) continue;
+    const tokens = extractContextQueryTokens(content);
+    if (tokens.length >= 1) return content;
+  }
+  return null;
+}
+
+function isContextDependentFollowUpQuery(message: string): boolean {
+  const folded = foldContextText(message);
+  const tokens = extractContextQueryTokens(message);
+  const hasBridgeLanguage =
+    /\b(invece|also|what about|and the|ed il|ed la|e il|e la|quello|quella|that one|those|questo|questa)\b/.test(
+      folded
+    );
+  const asksLink = queryLooksLikeDirectLinkRequest(message);
+  const genericQuestionShape =
+    /[?]/.test(message) &&
+    tokens.length > 0 &&
+    tokens.length <= 3 &&
+    /\b(quanto|costo|costa|disponibil|personalizz|durata|scheda|tecnica|acquisto|noleggio|finanzi)\b/.test(
+      folded
+    );
+
+  return hasBridgeLanguage || asksLink || genericQuestionShape;
+}
+
+function buildContextualKnowledgeInputMessage(params: {
+  message: string;
+  historyMessages: ChatMessage[];
+  shortAffirmativeFollowUp: ShortAffirmativeFollowUpContext | null;
+}): string {
+  const { message, historyMessages, shortAffirmativeFollowUp } = params;
+  if (shortAffirmativeFollowUp) {
+    return shortAffirmativeFollowUp.hasSpecificTopic
+      ? shortAffirmativeFollowUp.resolvedKnowledgeQuery
+      : message;
+  }
+
+  if (!isContextDependentFollowUpQuery(message)) return message;
+  const topic = getLastConcreteUserTopicFromHistory(historyMessages);
+  if (!topic) return message;
+
+  const currentTokens = new Set(extractContextQueryTokens(message));
+  const topicTokens = extractContextQueryTokens(topic);
+  const overlap = topicTokens.some((token) => currentTokens.has(token));
+  if (overlap) return message;
+
+  return `${topic}. ${message}`;
+}
 function resolveShortAffirmativeFollowUpContext(params: {
   message: string;
   historyMessages: ChatMessage[];
   bookingFlowActive: boolean;
+  pendingState: PendingFollowUpState | null;
 }): ShortAffirmativeFollowUpContext | null {
-  const { message, historyMessages, bookingFlowActive } = params;
+  const { message, historyMessages, bookingFlowActive, pendingState } = params;
   if (bookingFlowActive) return null;
 
   const normalizedReply = normalizeShortReplyToken(message);
-  if (!AFFIRMATIVE_SHORT_REPLIES.has(normalizedReply)) {
+  if (!isAffirmativeFollowUpSignal(normalizedReply)) {
     return null;
   }
 
-  const previousQuestion = extractLastAssistantQuestion(
-    getLastAssistantContent(historyMessages)
-  );
-  if (!previousQuestion) return null;
+  if (pendingState) {
+    return {
+      normalizedReply,
+      previousQuestion: pendingState.previousQuestion,
+      resolvedKnowledgeQuery: pendingState.resolvedKnowledgeQuery,
+      topicHint: pendingState.topicHint,
+      hasSpecificTopic: pendingState.hasSpecificTopic,
+      source: "state"
+    };
+  }
 
-  const resolvedKnowledgeQuery = previousQuestion.replace(/[?]+$/, "").trim();
-  if (!resolvedKnowledgeQuery) return null;
+  const lastQuestionCtx = findLastAssistantQuestionInHistory(historyMessages);
+  if (!lastQuestionCtx) {
+    const lastAssistantCtx = findLastAssistantMessageInHistory(historyMessages);
+    if (!lastAssistantCtx) return null;
+
+    const topicHint = extractLastUserMessageBeforeIndex(
+      historyMessages,
+      lastAssistantCtx.assistantIndex
+    );
+    if (!topicHint || topicHint.trim().length < 4) return null;
+
+    const compactAssistant = lastAssistantCtx.content.replace(/\s+/g, " ").trim();
+    const previousQuestion =
+      compactAssistant.length > 220
+        ? `${compactAssistant.slice(0, 217).trimEnd()}...`
+        : compactAssistant;
+
+    const resolvedKnowledgeQuery = buildResolvedFollowUpKnowledgeQuery({
+      previousQuestion,
+      topicHint
+    });
+
+    return {
+      normalizedReply,
+      previousQuestion,
+      resolvedKnowledgeQuery,
+      topicHint,
+      hasSpecificTopic:
+        extractContextQueryTokens(resolvedKnowledgeQuery).length >= 1 ||
+        extractContextQueryTokens(topicHint).length >= 1,
+      source: "history"
+    };
+  }
+
+  const previousQuestion = lastQuestionCtx.question;
+  if (!previousQuestion.replace(/[?]+$/, "").trim()) return null;
+
+  const topicHint = extractLastUserMessageBeforeIndex(
+    historyMessages,
+    lastQuestionCtx.assistantIndex
+  );
+  const genericQuestion = looksGenericFollowUpQuestion(previousQuestion);
+  const hasSpecificTopic =
+    (!genericQuestion && extractContextQueryTokens(previousQuestion).length >= 1) ||
+    (typeof topicHint === "string" && topicHint.trim().length >= 4);
+
+  const resolvedKnowledgeQuery = buildResolvedFollowUpKnowledgeQuery({
+    previousQuestion,
+    topicHint: topicHint ?? null
+  });
 
   return {
     normalizedReply,
     previousQuestion,
-    resolvedKnowledgeQuery
+    resolvedKnowledgeQuery,
+    topicHint: topicHint ?? null,
+    hasSpecificTopic,
+    source: "history"
+  };
+}
+
+function buildPendingFollowUpStateFromAssistantReply(params: {
+  reply: string;
+  baseUserQuery: string;
+}): PendingFollowUpState | null {
+  const { reply, baseUserQuery } = params;
+  const question = extractLastAssistantQuestion(reply);
+  if (!question) return null;
+
+  const questionWithoutPunctuation = question.replace(/[?]+$/, "").trim();
+  if (questionWithoutPunctuation.length < 8) return null;
+
+  const topicHint = baseUserQuery.trim().length >= 4 ? baseUserQuery.trim() : null;
+  const resolvedKnowledgeQuery = buildResolvedFollowUpKnowledgeQuery({
+    previousQuestion: question,
+    topicHint
+  });
+
+  const hasSpecificTopic =
+    extractContextQueryTokens(resolvedKnowledgeQuery).length >= 1 ||
+    (!!topicHint && extractContextQueryTokens(topicHint).length >= 1);
+
+  const now = Date.now();
+  return {
+    previousQuestion: question,
+    resolvedKnowledgeQuery,
+    topicHint,
+    hasSpecificTopic,
+    createdAt: now,
+    expiresAt: now + PENDING_FOLLOW_UP_TTL_MS
   };
 }
 
 function buildShortAffirmativeFollowUpSystemHint(
   context: ShortAffirmativeFollowUpContext
 ): string {
+  const scopeRule = context.hasSpecificTopic
+    ? "- You MUST answer strictly within the scope of that previous question/topic."
+    : "- The previous question has no concrete topic, so ask exactly ONE focused clarification question before giving details.";
+  const topicLine = context.topicHint
+    ? `- Last concrete user topic before that question: ${context.topicHint}`
+    : "- No concrete prior topic is available in history.";
+  const responseRule = context.hasSpecificTopic
+    ? "- Cover the concrete options explicitly offered in that question when possible."
+    : "- Do NOT invent facts when topic is missing; request the missing topic first.";
+
   return (
     "Short-confirmation follow-up rule:\n" +
     `- The user replied with a short affirmative ("${context.normalizedReply}") to your previous question.\n` +
-    "- You MUST answer strictly within the scope of that previous question.\n" +
-    "- Cover all options explicitly offered in that question when possible.\n" +
+    `${scopeRule}\n` +
+    `${responseRule}\n` +
+    `${topicLine}\n` +
+    "- Give a direct answer now; do not ask the user to restate the same request.\n" +
     "- Do NOT introduce extra topics, assumptions, ROI claims, or unrelated business facts.\n" +
+    "- If data is missing, state exactly what is missing and ask one focused follow-up question.\n" +
     `Previous assistant question: ${context.previousQuestion}`
   );
+}
+
+async function detectShortFollowUpTargetLanguage(params: {
+  context: ShortAffirmativeFollowUpContext | null;
+  botId?: string | null;
+}): Promise<SupportedLanguage | null> {
+  const { context, botId } = params;
+  if (!context) return null;
+
+  const fromQuestion = detectQuickMessageLanguageHint(context.previousQuestion);
+  if (fromQuestion) return fromQuestion;
+
+  const heuristic = await detectKnowledgeLanguageHint({
+    message: context.previousQuestion,
+    lockedLanguage: null,
+    routedLanguage: null,
+    botId: botId ?? null,
+    allowLLM: false
+  });
+  if (heuristic) return heuristic;
+
+  return await detectKnowledgeLanguageHint({
+    message: context.previousQuestion,
+    lockedLanguage: null,
+    routedLanguage: null,
+    botId: botId ?? null,
+    allowLLM: true
+  });
 }
 
 function isSupportedLanguage(value: string | null | undefined): value is SupportedLanguage {
@@ -428,31 +899,30 @@ async function detectHistoryLanguageHint(params: {
   const { historyMessages, botId } = params;
   if (!historyMessages.length) return null;
 
-  const pickFrom = async (roles: Array<"user" | "assistant">): Promise<SupportedLanguage | null> => {
-    for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
-      const msg = historyMessages[i];
-      if (!roles.includes(msg.role as "user" | "assistant")) continue;
-      const content = typeof msg.content === "string" ? msg.content.trim() : "";
-      if (!content) continue;
+  // For weak user inputs (e.g. "si", "ok"), rely on immediate recent turns only.
+  const recentTurns = historyMessages
+    .slice(-4)
+    .reverse()
+    .filter((msg) => msg.role === "user" || msg.role === "assistant");
 
-      const quick = detectQuickMessageLanguageHint(content);
-      if (quick) return quick;
+  for (const msg of recentTurns) {
+    const content = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (!content) continue;
 
-      const heuristic = await detectKnowledgeLanguageHint({
-        message: content,
-        lockedLanguage: null,
-        routedLanguage: null,
-        botId: botId ?? null,
-        allowLLM: false
-      });
-      if (heuristic && isSupportedLanguage(heuristic)) return heuristic;
-    }
-    return null;
-  };
+    const quick = detectQuickMessageLanguageHint(content);
+    if (quick) return quick;
 
-  const userFirst = await pickFrom(["user"]);
-  if (userFirst) return userFirst;
-  return pickFrom(["assistant"]);
+    const heuristic = await detectKnowledgeLanguageHint({
+      message: content,
+      lockedLanguage: null,
+      routedLanguage: null,
+      botId: botId ?? null,
+      allowLLM: false
+    });
+    if (heuristic && isSupportedLanguage(heuristic)) return heuristic;
+  }
+
+  return null;
 }
 
 function detectUnsupportedExternalAction(message: string): UnsupportedActionType | null {
@@ -526,10 +996,437 @@ function buildUnsupportedActionReply(
   return "I can’t complete payments directly. I can guide you through the correct steps to complete payment.";
 }
 
+function buildUnsupportedProposalFallback(
+  lang: "it" | "en" | "es" | "de" | "fr"
+): string {
+  if (lang === "it") {
+    return "Posso aiutarti con informazioni verificate e dettagli disponibili qui in chat. Se vuoi, ti fornisco subito i dati o il link corretto presenti nel materiale.";
+  }
+  if (lang === "es") {
+    return "Puedo ayudarte con informacion verificada y detalles disponibles aqui en el chat. Si quieres, te comparto ahora mismo los datos o el enlace correcto presentes en el material.";
+  }
+  if (lang === "de") {
+    return "Ich kann dir mit verifizierten Informationen und Details direkt im Chat helfen. Wenn du willst, teile ich dir jetzt die passenden Daten oder den richtigen Link aus dem Material mit.";
+  }
+  if (lang === "fr") {
+    return "Je peux t'aider avec des informations verifiees et des details disponibles ici dans le chat. Si tu veux, je te donne tout de suite les coordonnees ou le bon lien presents dans le contenu.";
+  }
+  return "I can help with verified information and details directly in chat. If you want, I can share the correct details or link available in the material right away.";
+}
+
 function hasUnsupportedActionRefusal(text: string): boolean {
   return /\b(non posso|cannot|can't|unable to|no puedo|ich kann nicht|je ne peux pas)\b/i.test(
     text
   );
+}
+
+function extractUrlsFromText(text: string): string[] {
+  const matches = String(text || "").match(/https?:\/\/[^\s)]+/gi) || [];
+  const deduped = Array.from(
+    new Set(
+      matches
+        .map((url) => url.trim().replace(/[.,;:!?]+$/, ""))
+        .filter(Boolean)
+    )
+  );
+  return deduped.slice(0, 8);
+}
+
+const URL_TOPIC_NOISE_TOKENS = new Set([
+  "scheda",
+  "tecnica",
+  "dettagliata",
+  "dettagli",
+  "download",
+  "link",
+  "pagina",
+  "page",
+  "direct",
+  "diretto",
+  "detailed",
+  "informazioni",
+  "info",
+  "contact",
+  "contatti"
+]);
+
+function selectBestEvidenceUrlForQuery(params: {
+  query: string;
+  evidenceText: string;
+}): string | null {
+  const { query, evidenceText } = params;
+  const urls = extractUrlsFromText(evidenceText);
+  if (!urls.length) return null;
+
+  const queryTokens = extractContextQueryTokens(query).filter(
+    (token) => !URL_TOPIC_NOISE_TOKENS.has(token)
+  );
+  if (!queryTokens.length) return null;
+
+  const ranked = urls
+    .map((url) => {
+      const foldedUrl = foldContextText(url);
+      let score = 0;
+      for (const token of queryTokens) {
+        if (foldedUrl.includes(token)) score += 1;
+      }
+      return { url, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  if (!ranked.length || ranked[0].score <= 0) return null;
+  if (ranked[1] && ranked[0].score === ranked[1].score) return null;
+  return ranked[0].url;
+}
+
+function queryLooksLikeDirectLinkRequest(query: string): boolean {
+  return /\b(link|url|download|scaric|scheda|pagina|page|enlace|lien|herunterlad|telecharger)\b/i.test(
+    foldContextText(query)
+  );
+}
+
+function buildDirectLinkPrefix(lang: "it" | "en" | "es" | "de" | "fr"): string {
+  if (lang === "it") return "Ecco il link diretto:";
+  if (lang === "es") return "Aqui tienes el enlace directo:";
+  if (lang === "de") return "Hier ist der direkte Link:";
+  if (lang === "fr") return "Voici le lien direct :";
+  return "Here is the direct link:";
+}
+
+function alignReplyUrlWithEvidence(params: {
+  reply: string;
+  resolvedQuery: string;
+  evidenceText: string;
+  lang: "it" | "en" | "es" | "de" | "fr";
+}): string {
+  const { reply, resolvedQuery, evidenceText, lang } = params;
+  const bestUrl = selectBestEvidenceUrlForQuery({
+    query: resolvedQuery,
+    evidenceText
+  });
+  if (!bestUrl) return reply;
+
+  const replyUrls = extractUrlsFromText(reply);
+  if (replyUrls.length === 0) {
+    if (!queryLooksLikeDirectLinkRequest(resolvedQuery)) return reply;
+    return `${reply}\n\n${buildDirectLinkPrefix(lang)} ${bestUrl}`.trim();
+  }
+
+  if (replyUrls.some((url) => foldContextText(url) === foldContextText(bestUrl))) {
+    return reply;
+  }
+
+  return reply.replace(replyUrls[0], bestUrl);
+}
+
+const CLAIM_QUERY_VERB_TOKENS = new Set([
+  "have",
+  "has",
+  "do",
+  "does",
+  "can",
+  "offrite",
+  "avete",
+  "fornite",
+  "include",
+  "inclus",
+  "accettate",
+  "serve",
+  "esiste",
+  "hay",
+  "tienen",
+  "aceptan",
+  "incluye",
+  "ofrecen",
+  "habt",
+  "haben",
+  "gibt",
+  "kann",
+  "offrez",
+  "proposez",
+  "acceptez",
+  "inclut",
+  "avez",
+  "vous"
+]);
+
+function isBinaryClaimQuestion(message: string): boolean {
+  const trimmed = String(message || "").trim();
+  if (!trimmed) return false;
+  if (!/[?]$/.test(trimmed) && !/^(is|are|do|does|can|avete|offrite|fornite|serve|hay|tienen|aceptan|habt|haben|gibt|offrez|avez)\b/i.test(trimmed)) {
+    return false;
+  }
+  return /\b(avete|offrite|fornite|include|inclus|accett|serve|esiste|do you|does it|is there|are there|can i|hay|tienen|acept|incluye|habt|haben|gibt|kann|offrez|proposez|acceptez|inclut|avez)\b/i.test(
+    foldContextText(trimmed)
+  );
+}
+
+function hasUncertaintyMarkers(text: string): boolean {
+  return /\b(non risulta|non risultano|non disponibile|non specific|non ho informazioni|dal contesto|non e indicato|i (do not|don't) have|not specified|not available|not enough information|unknown|nicht angegeben|keine information|no se especifica|sin informacion|pas indique|pas d'information)\b/i.test(
+    foldContextText(text)
+  );
+}
+
+function isDefinitiveClaimReply(text: string): boolean {
+  const folded = foldContextText(text);
+  if (hasUncertaintyMarkers(folded)) return false;
+  return /\b(si|sì|yes|no|non |we (do|don't)|accettiamo|offriamo|forniamo|include|is included|ist enthalten|oui|ja|noi|abbiamo|es gibt|hay|ofrecemos|aceptamos)\b/i.test(
+    folded
+  );
+}
+
+function hasEvidenceForClaim(message: string, evidenceText: string): boolean {
+  const foldedEvidence = foldContextText(evidenceText || "");
+  if (!foldedEvidence.trim()) return false;
+
+  const queryTokens = extractContextQueryTokens(message).filter(
+    (token) => !CLAIM_QUERY_VERB_TOKENS.has(token)
+  );
+  if (queryTokens.length === 0) return true;
+
+  let matched = 0;
+  for (const token of queryTokens.slice(0, 8)) {
+    const hasTokenHit = buildContextTokenCandidates(token).some((candidate) => {
+      const positions = findTermPositions({
+        text: foldedEvidence,
+        term: candidate.term,
+        mode: candidate.mode
+      });
+      return positions.length > 0;
+    });
+    if (hasTokenHit) matched += 1;
+  }
+
+  const coverage = matched / Math.max(1, queryTokens.length);
+  return matched >= 2 || coverage >= 0.45;
+}
+
+function normalizeNumericClaim(token: string): string {
+  let value = token.trim();
+  if (!value) return "";
+
+  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(value)) {
+    // IT/EU thousand separators.
+    value = value.replace(/\./g, "").replace(",", ".");
+  } else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(value)) {
+    // EN thousand separators.
+    value = value.replace(/,/g, "");
+  } else if (/^\d+,\d+$/.test(value)) {
+    // Decimal comma.
+    value = value.replace(",", ".");
+  }
+
+  value = value.replace(/^0+(\d)/, "$1");
+  return value;
+}
+
+function extractNumericClaims(text: string): string[] {
+  const compact = String(text || "");
+  const pattern = /\b\d{2,}(?:[.,]\d{3})*(?:[.,]\d+)?\b/g;
+  const claims: string[] = [];
+  let match: RegExpExecArray | null = null;
+  while ((match = pattern.exec(compact)) !== null) {
+    const normalized = normalizeNumericClaim(match[0]);
+    if (normalized) claims.push(normalized);
+  }
+  return Array.from(new Set(claims));
+}
+
+function hasEvidenceForNumericClaims(reply: string, evidenceText: string): boolean {
+  const replyClaims = extractNumericClaims(reply);
+  if (replyClaims.length === 0) return true;
+
+  const evidenceClaims = new Set(extractNumericClaims(evidenceText));
+  if (evidenceClaims.size === 0) return false;
+
+  let matched = 0;
+  for (const claim of replyClaims) {
+    if (evidenceClaims.has(claim)) matched += 1;
+  }
+
+  const coverage = matched / Math.max(1, replyClaims.length);
+  return matched >= replyClaims.length || coverage >= 0.8;
+}
+
+function isFactualClaimRiskyReply(message: string, reply: string): boolean {
+  if (!reply.trim()) return false;
+  if (hasUncertaintyMarkers(foldContextText(reply))) return false;
+  if (extractNumericClaims(reply).length > 0) return true;
+  if (isBinaryClaimQuestion(message) && isDefinitiveClaimReply(reply)) return true;
+
+  const foldedReply = foldContextText(reply);
+  return /\b(si|sì|yes|no|offriamo|forniamo|accettiamo|include|available|disponibile|disponibili|required|necessario)\b/.test(
+    foldedReply
+  );
+}
+
+function shouldRunFactualGroundingGuard(params: {
+  message: string;
+  reply: string;
+  evidenceText: string;
+}): boolean {
+  const { message, reply, evidenceText } = params;
+  if (!isFactualClaimRiskyReply(message, reply)) return false;
+
+  const evidence = String(evidenceText || "").trim();
+  if (!evidence) return false;
+
+  const hasNumericClaims = extractNumericClaims(reply).length > 0;
+  const numericSupported = hasEvidenceForNumericClaims(reply, evidence);
+  const binaryDefinitive =
+    isBinaryClaimQuestion(message) && isDefinitiveClaimReply(reply);
+  const claimSupported = hasEvidenceForClaim(message, evidence);
+
+  // Deterministic outcomes do not need an extra LLM guard pass.
+  if (hasNumericClaims && !numericSupported) return false;
+  if (binaryDefinitive && !claimSupported) return false;
+  if (hasNumericClaims && numericSupported && claimSupported) return false;
+  if (binaryDefinitive && claimSupported) return false;
+
+  // Only run the guard in high-risk inconclusive cases.
+  return !claimSupported || (!hasNumericClaims && !binaryDefinitive);
+}
+
+async function isUnsupportedFactualClaim(params: {
+  userMessage: string;
+  reply: string;
+  evidenceText: string;
+  usageContext: { userId?: string | null; botId?: string | null };
+}): Promise<boolean> {
+  const { userMessage, reply, evidenceText, usageContext } = params;
+  const evidenceSnippet = String(evidenceText || "")
+    .trim()
+    .slice(0, 4000);
+  if (!evidenceSnippet) return true;
+
+  try {
+    const raw = await getChatCompletion({
+      model: "gpt-4o-mini",
+      maxTokens: 140,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a strict factual grounding checker.\n" +
+            "Return ONLY JSON: {\"unsupported\":true|false,\"confidence\":0-1}.\n" +
+            "unsupported=true if the assistant reply contains any factual claim not supported by evidence or contradicting evidence.\n" +
+            "If uncertain, set unsupported=true."
+        },
+        {
+          role: "user",
+          content:
+            `User message:\n${userMessage}\n\n` +
+            `Assistant reply:\n${reply}\n\n` +
+            `Evidence:\n${evidenceSnippet}`
+        }
+      ],
+      usageContext: {
+        ...usageContext,
+        operation: "factual_grounding_guard"
+      }
+    });
+
+    const compact = raw.trim();
+    const jsonText =
+      compact.startsWith("{") && compact.endsWith("}")
+        ? compact
+        : compact.slice(
+            Math.max(0, compact.indexOf("{")),
+            compact.lastIndexOf("}") + 1
+          );
+    if (!jsonText || !jsonText.startsWith("{")) return true;
+
+    const parsed = JSON.parse(jsonText) as {
+      unsupported?: unknown;
+      confidence?: unknown;
+    };
+    const unsupported = parsed.unsupported === true;
+    const confidence =
+      typeof parsed.confidence === "number" ? parsed.confidence : 0;
+    if (unsupported) return true;
+    return confidence < 0.55;
+  } catch {
+    return false;
+  }
+}
+
+async function rewriteReplyUsingEvidenceOnly(params: {
+  reply: string;
+  userMessage: string;
+  evidenceText: string;
+  targetLanguage: "it" | "en" | "es" | "de" | "fr";
+  usageContext: { userId?: string | null; botId?: string | null };
+}): Promise<string | null> {
+  const { reply, userMessage, evidenceText, targetLanguage, usageContext } = params;
+  const languageLabel =
+    targetLanguage === "it"
+      ? "Italian"
+      : targetLanguage === "es"
+      ? "Spanish"
+      : targetLanguage === "de"
+      ? "German"
+      : targetLanguage === "fr"
+      ? "French"
+      : "English";
+
+  const evidenceSnippet = String(evidenceText || "")
+    .trim()
+    .slice(0, 4500);
+
+  try {
+    const rewritten = await getChatCompletion({
+      model: "gpt-4.1-mini",
+      maxTokens: 320,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Rewrite the assistant reply so it is strictly evidence-bound.\n" +
+            "Rules:\n" +
+            "- Keep the same target language.\n" +
+            "- Preserve only claims explicitly supported by evidence.\n" +
+            "- Remove unsupported numbers/facts.\n" +
+            "- If essential data is missing, clearly say it is not explicitly available and ask one focused clarification.\n" +
+            "- Return only the rewritten reply text."
+        },
+        {
+          role: "user",
+          content:
+            `Target language: ${languageLabel}\n` +
+            `User message: ${userMessage}\n\n` +
+            `Current reply:\n${reply}\n\n` +
+            `Evidence:\n${evidenceSnippet || "(none)"}`
+        }
+      ],
+      usageContext: {
+        ...usageContext,
+        operation: "chat_evidence_rewrite"
+      }
+    });
+    return rewritten?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function buildInsufficientEvidenceClaimReply(
+  lang: "it" | "en" | "es" | "de" | "fr"
+): string {
+  if (lang === "it") {
+    return "Non ho una conferma esplicita su questo punto nel contesto disponibile. Per evitare informazioni imprecise, ti consiglio di verificarlo direttamente con il team.";
+  }
+  if (lang === "es") {
+    return "No tengo una confirmacion explicita sobre este punto en el contexto disponible. Para evitar datos imprecisos, te recomiendo verificarlo directamente con el equipo.";
+  }
+  if (lang === "de") {
+    return "Dazu habe ich im vorhandenen Kontext keine eindeutige Bestatigung. Um ungenaue Angaben zu vermeiden, empfehle ich die direkte Bestatigung beim Team.";
+  }
+  if (lang === "fr") {
+    return "Je n'ai pas de confirmation explicite sur ce point dans le contexte disponible. Pour eviter des informations inexactes, je te conseille de verifier directement avec l'equipe.";
+  }
+  return "I don't have an explicit confirmation on that point in the available context. To avoid inaccurate information, please verify it directly with the team.";
 }
 
 function detectUnsupportedActionProposalInReply(
@@ -567,6 +1464,127 @@ function detectUnsupportedActionProposalInReply(
   if (paymentProposal) return "payment";
 
   return null;
+}
+
+function hasExplicitExternalCapabilityAction(text: string): boolean {
+  if (!text || hasUnsupportedActionRefusal(text)) return false;
+  const lower = foldContextText(text);
+
+  const hasCapabilityFrame =
+    /\b(posso|possiamo|i can|we can|puedo|podemos|ich kann|wir konnen|je peux|nous pouvons)\b/.test(
+      lower
+    ) ||
+    /\b(vuoi che|want me to|quieres que|voulez vous que|mochtest du dass)\b/.test(
+      lower
+    );
+  if (!hasCapabilityFrame) return false;
+
+  const externalAction =
+    /\b(metterti in contatto|put you in touch|ponerte en contacto|mettre en relation|in kontakt bringen|contact (them|for you)|contattare .* per te|contactar .* por ti|contacter .* pour toi|kontaktieren .* fur dich)\b/.test(
+      lower
+    ) ||
+    /\b(scrivere|write|draft|redigere|compose|preparare)\b.{0,30}\b(email|mail|message|messaggio|richiesta|request|solicitud|demande)\b/.test(
+      lower
+    ) ||
+    /\b(trovare|find|buscar|trouver|suchen)\b.{0,35}\b(fornitor|provider|course|ente|vendor|partner)\b/.test(
+      lower
+    ) ||
+    /\b(inoltrare|forward|escalate|escalare|submit|inviare .* a)\b/.test(
+      lower
+    );
+
+  return externalAction;
+}
+
+function looksLikeCapabilityProposalCandidate(text: string): boolean {
+  return hasExplicitExternalCapabilityAction(text);
+}
+
+function buildCapabilityScopeFallback(
+  lang: "it" | "en" | "es" | "de" | "fr"
+): string {
+  if (lang === "it") {
+    return "Posso aiutarti solo con informazioni verificate nei contenuti disponibili e con i contatti dell'azienda presenti nel materiale. Non posso promettere azioni esterne non confermate.";
+  }
+  if (lang === "es") {
+    return "Solo puedo ayudarte con informacion verificada en el contenido disponible y con contactos de la empresa presentes en el material. No puedo prometer acciones externas no confirmadas.";
+  }
+  if (lang === "de") {
+    return "Ich kann dir nur mit verifizierten Informationen aus den verfugbaren Inhalten und mit dort vorhandenen Unternehmenskontakten helfen. Ich kann keine unbestaetigten externen Aktionen versprechen.";
+  }
+  if (lang === "fr") {
+    return "Je peux seulement t'aider avec des informations verifiees dans le contenu disponible et avec les contacts de l'entreprise presents dans le materiel. Je ne peux pas promettre des actions externes non confirmees.";
+  }
+  return "I can only help with verified information from the available content and with company contacts present in that material. I cannot promise unconfirmed external actions.";
+}
+
+async function isUnsupportedCapabilityProposal(params: {
+  userMessage: string;
+  reply: string;
+  evidenceText: string;
+  supportedActionHints?: string[];
+  usageContext: { userId?: string | null; botId?: string | null };
+}): Promise<boolean> {
+  const { userMessage, reply, evidenceText, supportedActionHints, usageContext } = params;
+  if (!looksLikeCapabilityProposalCandidate(reply)) return false;
+
+  const evidenceSnippet = String(evidenceText || "")
+    .trim()
+    .slice(0, 3000);
+  const actionHints = Array.isArray(supportedActionHints)
+    ? supportedActionHints.filter((value) => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const actionHintsText =
+    actionHints.length > 0 ? actionHints.join(", ") : "(none)";
+
+  try {
+    const raw = await getChatCompletion({
+      model: "gpt-4o-mini",
+      maxTokens: 120,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a strict capability guard for a knowledge-grounded assistant.\n" +
+            "Return ONLY JSON: {\"unsupported\":true|false,\"confidence\":0-1}.\n" +
+            "Mark unsupported=true if the reply promises or offers actions/capabilities that are not explicitly supported by provided evidence or by explicit tool results in this same turn.\n" +
+            "If uncertain, choose unsupported=true.\n" +
+            "Treat drafting/sending messages, contacting third parties, finding external providers, or executing workflows as unsupported unless explicitly evidenced."
+        },
+        {
+          role: "user",
+          content:
+            `User message:\n${userMessage}\n\n` +
+            `Assistant reply:\n${reply}\n\n` +
+            `Evidence:\n${evidenceSnippet || "(none)"}\n\n` +
+            `Supported actions from tool results in this turn:\n${actionHintsText}`
+        }
+      ],
+      usageContext: {
+        ...usageContext,
+        operation: "capability_guard"
+      }
+    });
+
+    const parsedBlock = raw.trim();
+    const jsonText =
+      parsedBlock.startsWith("{") && parsedBlock.endsWith("}")
+        ? parsedBlock
+        : parsedBlock.slice(
+            Math.max(0, parsedBlock.indexOf("{")),
+            parsedBlock.lastIndexOf("}") + 1
+          );
+    if (!jsonText || !jsonText.startsWith("{")) return true;
+
+    const parsed = JSON.parse(jsonText) as { unsupported?: unknown; confidence?: unknown };
+    const unsupported = parsed.unsupported === true;
+    const confidence =
+      typeof parsed.confidence === "number" ? parsed.confidence : 0;
+    if (unsupported) return true;
+    return confidence < 0.55;
+  } catch {
+    return true;
+  }
 }
 
 async function rewriteReplyToLanguage(params: {
@@ -620,9 +1638,198 @@ async function rewriteReplyToLanguage(params: {
   }
 }
 
+function looksLikeShortAffirmativeDeflection(reply: string): boolean {
+  const lower = foldContextText(reply);
+  const hasQuestionLikeDeflection =
+    /\b(vuoi|se vuoi|posso darti maggiori dettagli|posso fornirti maggiori dettagli|come posso aiutarti)\b/.test(
+      lower
+    ) ||
+    /\b(if you need|if you want|would you like more details|feel free to ask|how can i help)\b/.test(
+      lower
+    ) ||
+    /\b(si quieres|quieres mas detalles|como puedo ayudarte)\b/.test(lower) ||
+    /\b(si tu veux|souhaitez vous|veux tu plus de details|comment puis je aider)\b/.test(
+      lower
+    ) ||
+    /\b(wenn du mochtest|mochtest du mehr details|wie kann ich helfen)\b/.test(
+      lower
+    );
+  return hasQuestionLikeDeflection;
+}
+
+function isConcreteFollowUpResolution(
+  reply: string,
+  context: ShortAffirmativeFollowUpContext
+): boolean {
+  const foldedReply = foldContextText(reply);
+  if (hasUncertaintyMarkers(foldedReply)) return false;
+  if (extractNumericClaims(reply).length > 0) return true;
+
+  const topicTokens = extractContextQueryTokens(context.resolvedKnowledgeQuery).slice(0, 8);
+  if (topicTokens.length === 0) return false;
+
+  let matched = 0;
+  for (const token of topicTokens) {
+    const tokenHit = buildContextTokenCandidates(token).some((candidate) => {
+      const positions = findTermPositions({
+        text: foldedReply,
+        term: candidate.term,
+        mode: candidate.mode
+      });
+      return positions.length > 0;
+    });
+    if (tokenHit) matched += 1;
+  }
+
+  // Require at least two concrete topic token hits when no numeric anchors exist.
+  // This prevents generic deflections that only repeat one keyword from passing.
+  return matched >= 2;
+}
+function hasMinimumTopicAlignment(params: {
+  reply: string;
+  query: string;
+  minMatches?: number;
+}): boolean {
+  const { reply, query } = params;
+  const minMatches = Math.max(1, params.minMatches ?? 1);
+  const foldedReply = foldContextText(reply);
+  const queryTokens = extractFollowUpIntentTokens(query);
+  const tokens =
+    queryTokens.length > 0
+      ? queryTokens
+      : extractContextQueryTokens(query).slice(0, 8);
+  if (tokens.length === 0) return true;
+
+  let matched = 0;
+  for (const token of tokens) {
+    const hit = buildContextTokenCandidates(token).some((candidate) => {
+      const positions = findTermPositions({
+        text: foldedReply,
+        term: candidate.term,
+        mode: candidate.mode
+      });
+      return positions.length > 0;
+    });
+    if (hit) matched += 1;
+    if (matched >= minMatches) return true;
+  }
+  return false;
+}
+async function rewriteReplyWithinCapabilities(params: {
+  reply: string;
+  targetLanguage: "it" | "en" | "es" | "de" | "fr";
+  usageContext: { userId?: string | null; botId?: string | null };
+}): Promise<string | null> {
+  const { reply, targetLanguage, usageContext } = params;
+  const languageLabel =
+    targetLanguage === "it"
+      ? "Italian"
+      : targetLanguage === "es"
+      ? "Spanish"
+      : targetLanguage === "de"
+      ? "German"
+      : targetLanguage === "fr"
+      ? "French"
+      : "English";
+
+  try {
+    const rewritten = await getChatCompletion({
+      model: "gpt-4.1-mini",
+      maxTokens: 260,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Rewrite the assistant reply in the target language.\n" +
+            "Rules:\n" +
+            "- Preserve factual content.\n" +
+            "- Remove any claim of executing external actions on the user's behalf.\n" +
+            "- Never say you will contact third parties, send requests, or perform workflows for the user.\n" +
+            "- Safe alternative phrasing is allowed, e.g. offering to share verified contact details.\n" +
+            "- Keep concise and natural.\n" +
+            "- Return only the rewritten reply text.\n"
+        },
+        {
+          role: "user",
+          content:
+            `Target language: ${languageLabel}\n` +
+            "Reply to rewrite:\n" +
+            reply
+        }
+      ],
+      usageContext: {
+        ...usageContext,
+        operation: "chat_capability_rewrite"
+      }
+    });
+    return rewritten?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function repairShortAffirmativeFollowUpReply(params: {
+  reply: string;
+  context: ShortAffirmativeFollowUpContext;
+  evidenceText: string;
+  targetLanguage: "it" | "en" | "es" | "de" | "fr";
+  usageContext: { userId?: string | null; botId?: string | null };
+}): Promise<string | null> {
+  const { reply, context, evidenceText, targetLanguage, usageContext } = params;
+  const languageLabel =
+    targetLanguage === "it"
+      ? "Italian"
+      : targetLanguage === "es"
+      ? "Spanish"
+      : targetLanguage === "de"
+      ? "German"
+      : targetLanguage === "fr"
+      ? "French"
+      : "English";
+  const evidenceSnippet = String(evidenceText || "").trim().slice(0, 3500);
+
+  try {
+    const rewritten = await getChatCompletion({
+      model: "gpt-4.1-mini",
+      maxTokens: 300,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are repairing an assistant reply after a short affirmative follow-up from the user.\n" +
+            "Return ONLY the final assistant reply text.\n" +
+            "Rules:\n" +
+            "- Answer directly and concretely to the previous assistant question/topic.\n" +
+            "- Do NOT ask another generic 'do you want more details' question.\n" +
+            "- Use evidence when present; do not invent facts.\n" +
+            "- If evidence is missing, state exactly what is missing and ask one focused clarification.\n" +
+            "- Keep the same language requested in Target language.\n"
+        },
+        {
+          role: "user",
+          content:
+            `Target language: ${languageLabel}\n` +
+            `Previous assistant question/topic: ${context.previousQuestion}\n` +
+            `Resolved follow-up query: ${context.resolvedKnowledgeQuery}\n` +
+            `Current weak/deflective reply:\n${reply}\n\n` +
+            `Evidence:\n${evidenceSnippet || "(none)"}`
+        }
+      ],
+      usageContext: {
+        ...usageContext,
+        operation: "chat_short_followup_repair"
+      }
+    });
+    return rewritten?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function resolvePolicyTargetLanguage(params: {
   lockedLanguage: string | null;
   routedLanguage: string | null;
+  followUpLanguage: SupportedLanguage | null;
   detectedLanguage: SupportedLanguage | null;
   historyLanguage: SupportedLanguage | null;
   quickLanguage: SupportedLanguage | null;
@@ -630,6 +1837,7 @@ function resolvePolicyTargetLanguage(params: {
   const {
     lockedLanguage,
     routedLanguage,
+    followUpLanguage,
     detectedLanguage,
     historyLanguage,
     quickLanguage
@@ -640,6 +1848,7 @@ function resolvePolicyTargetLanguage(params: {
   if (isSupportedLanguage(routedLanguage)) {
     return routedLanguage;
   }
+  if (followUpLanguage) return followUpLanguage;
   if (detectedLanguage) return detectedLanguage;
   if (historyLanguage) return historyLanguage;
   return quickLanguage;
@@ -649,22 +1858,26 @@ function buildLanguageConsistencyFallback(
   lang: "it" | "en" | "es" | "de" | "fr"
 ): string {
   if (lang === "it") {
-    return "Ti rispondo in italiano. Dimmi il dettaglio specifico che vuoi e ti rispondo in modo preciso.";
+    return "Certo, continuo in italiano. Dimmi pure cosa vuoi sapere e ti aiuto subito.";
   }
   if (lang === "es") {
-    return "Te respondo en espanol. Dime el detalle especifico que necesitas y te respondo con precision.";
+    return "Claro, continuo en espanol. Dime que necesitas y te ayudo enseguida.";
   }
   if (lang === "de") {
-    return "Ich antworte auf Deutsch. Nenne mir bitte das genaue Detail, dann antworte ich praezise.";
+    return "Klar, ich mache auf Deutsch weiter. Sag mir einfach, was du brauchst, und ich helfe dir direkt.";
   }
   if (lang === "fr") {
-    return "Je reponds en francais. Dis-moi le detail precis dont tu as besoin et je te repondrai clairement.";
+    return "Bien sur, je continue en francais. Dis-moi ce dont tu as besoin et je t'aide tout de suite.";
   }
-  return "I will reply in English. Tell me the exact detail you need and I will answer precisely.";
+  return "Sure, I will continue in English. Tell me what you need and I will help right away.";
 }
 
 function foldContextText(input: string): string {
   return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function extractContextQueryTokens(message: string): string[] {
@@ -676,9 +1889,172 @@ function extractContextQueryTokens(message: string): string[] {
   return Array.from(new Set(tokens)).slice(0, 10);
 }
 
+function buildContextTokenCandidates(token: string): Array<{
+  term: string;
+  mode: "exact" | "stem" | "prefix";
+}> {
+  const out: Array<{ term: string; mode: "exact" | "stem" | "prefix" }> = [
+    { term: token, mode: "exact" }
+  ];
+  const seen = new Set<string>([token]);
+
+  const stemSuffixes = [
+    "mente",
+    "zione",
+    "zioni",
+    "sione",
+    "sioni",
+    "mento",
+    "menti",
+    "ing",
+    "ers",
+    "er",
+    "es",
+    "en",
+    "ed",
+    "ly",
+    "no",
+    "na",
+    "ni",
+    "ne",
+    "i",
+    "e",
+    "o",
+    "a",
+    "s"
+  ];
+
+  for (const suffix of stemSuffixes) {
+    if (!token.endsWith(suffix)) continue;
+    const stem = token.slice(0, token.length - suffix.length);
+    if (stem.length < 4 || seen.has(stem)) continue;
+    seen.add(stem);
+    out.push({ term: stem, mode: "stem" });
+  }
+
+  if (token.length >= 6) {
+    const prefix = token.slice(0, 4);
+    if (!seen.has(prefix)) {
+      out.push({ term: prefix, mode: "prefix" });
+    }
+  }
+
+  return out;
+}
+
+function findTermPositions(params: {
+  text: string;
+  term: string;
+  mode: "exact" | "stem" | "prefix";
+}): number[] {
+  const { text, term, mode } = params;
+  if (!term || term.length < 3) return [];
+
+  const pattern =
+    mode === "exact"
+      ? new RegExp(`\\b${escapeRegex(term)}\\b`, "g")
+      : mode === "stem"
+        ? new RegExp(`\\b${escapeRegex(term)}[a-z0-9]{0,12}\\b`, "g")
+        : new RegExp(`\\b${escapeRegex(term)}[a-z0-9]{0,20}\\b`, "g");
+
+  const positions: number[] = [];
+  let match: RegExpExecArray | null = null;
+  while ((match = pattern.exec(text)) !== null) {
+    positions.push(match.index);
+  }
+  return positions;
+}
+
+function buildContextWindow(params: {
+  contentLength: number;
+  anchorPos: number;
+  windowChars: number;
+  beforeRatio: number;
+}): { start: number; end: number } {
+  const { contentLength, anchorPos, windowChars, beforeRatio } = params;
+  const before = Math.floor(windowChars * beforeRatio);
+  let start = Math.max(0, anchorPos - before);
+  let end = Math.min(contentLength, start + windowChars);
+  if (end - start < windowChars) {
+    start = Math.max(0, end - windowChars);
+  }
+  return { start, end };
+}
+
 function clipWithEllipsis(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  return text.slice(0, Math.max(0, maxChars - 1)).trimEnd() + "…";
+  const target = Math.max(0, maxChars - 1);
+  const boundaryCandidates = [
+    text.lastIndexOf("\n", target),
+    text.lastIndexOf(". ", target),
+    text.lastIndexOf("; ", target),
+    text.lastIndexOf(": ", target),
+    text.lastIndexOf(", ", target)
+  ].filter((idx) => idx >= 0);
+  const bestBoundary = boundaryCandidates.length > 0 ? Math.max(...boundaryCandidates) : -1;
+  const safeCut = bestBoundary >= Math.floor(target * 0.72) ? bestBoundary + 1 : target;
+  return text.slice(0, safeCut).trimEnd() + "…";
+}
+
+function findRegexPositions(text: string, pattern: RegExp): number[] {
+  const positions: number[] = [];
+  let match: RegExpExecArray | null = null;
+  while ((match = pattern.exec(text)) !== null) {
+    positions.push(match.index);
+    if (pattern.lastIndex === match.index) {
+      pattern.lastIndex += 1;
+    }
+  }
+  return positions;
+}
+
+function dedupeAnchorPositions(positions: number[], minGap: number): number[] {
+  const out: number[] = [];
+  for (const pos of positions) {
+    if (pos < 0) continue;
+    if (out.some((existing) => Math.abs(existing - pos) < minGap)) continue;
+    out.push(pos);
+  }
+  return out;
+}
+
+function collectFactualAnchorPositions(loweredRaw: string): number[] {
+  const factualPatterns = [
+    /\b\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?\s?(?:€|euro|eur|\$|usd|kg|kw|w|v|ah|lt|mm|cm|m|ore|ora|hours?|giorni?|days?|mesi?|months?|stagion\w*|weekend|%)\b/g,
+    /\b(?:weekend|stagion\w*|mese|mesi|month|months|giorno|giorni|day|days|durata|duration|prezz\w*|cost\w*|tariff\w*|finanzi\w*|rateal\w*|pagament\w*)\b/g,
+    /(?:^|[\n\r])\s*(?:[-*•]|\d+[.)])\s+/gm
+  ];
+
+  const anchors: number[] = [];
+  for (const pattern of factualPatterns) {
+    anchors.push(...findRegexPositions(loweredRaw, pattern));
+  }
+  return dedupeAnchorPositions(
+    Array.from(new Set(anchors)).sort((a, b) => a - b),
+    90
+  );
+}
+
+function mergeContextSpans(
+  spans: Array<{ start: number; end: number }>
+): Array<{ start: number; end: number }> {
+  if (spans.length <= 1) return spans;
+  const sorted = spans
+    .filter((span) => span.end > span.start)
+    .sort((a, b) => a.start - b.start);
+  if (sorted.length <= 1) return sorted;
+
+  const merged: Array<{ start: number; end: number }> = [sorted[0]];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const current = sorted[i];
+    const last = merged[merged.length - 1];
+    if (current.start <= last.end + 80) {
+      last.end = Math.max(last.end, current.end);
+    } else {
+      merged.push({ ...current });
+    }
+  }
+  return merged;
 }
 
 function buildContextSnippet(params: {
@@ -692,34 +2068,182 @@ function buildContextSnippet(params: {
 
   const loweredRaw = foldContextText(raw);
   const queryTokens = extractContextQueryTokens(params.message);
+  const factualAnchors = collectFactualAnchorPositions(loweredRaw);
 
-  let tokenPos = -1;
-  for (const token of queryTokens) {
-    const pos = loweredRaw.indexOf(token);
-    if (pos >= 0 && (tokenPos < 0 || pos < tokenPos)) {
-      tokenPos = pos;
+  const tokenMatches = queryTokens
+    .map((token) => {
+      const candidateMatches = buildContextTokenCandidates(token)
+        .map((candidate) => ({
+          ...candidate,
+          positions: findTermPositions({
+            text: loweredRaw,
+            term: candidate.term,
+            mode: candidate.mode
+          })
+        }))
+        .filter((candidate) => candidate.positions.length > 0)
+        .sort((a, b) => {
+          const modeRank = (mode: "exact" | "stem" | "prefix") =>
+            mode === "exact" ? 0 : mode === "stem" ? 1 : 2;
+          if (modeRank(a.mode) !== modeRank(b.mode)) {
+            return modeRank(a.mode) - modeRank(b.mode);
+          }
+          if (a.positions.length !== b.positions.length) {
+            return a.positions.length - b.positions.length;
+          }
+          return b.term.length - a.term.length;
+        });
+
+      if (!candidateMatches.length) return null;
+      return {
+        token,
+        ...candidateMatches[0]
+      };
+    })
+    .filter(
+      (
+        match
+      ): match is {
+        token: string;
+        term: string;
+        mode: "exact" | "stem" | "prefix";
+        positions: number[];
+      } => !!match
+    );
+
+  const anchorCandidates: number[] = [];
+  if (tokenMatches.length > 0) {
+    const rankedMatches = tokenMatches.sort((a, b) => {
+      const modeRank = (mode: "exact" | "stem" | "prefix") =>
+        mode === "exact" ? 0 : mode === "stem" ? 1 : 2;
+      if (modeRank(a.mode) !== modeRank(b.mode)) {
+        return modeRank(a.mode) - modeRank(b.mode);
+      }
+      if (a.positions.length !== b.positions.length) {
+        return a.positions.length - b.positions.length;
+      }
+      return b.term.length - a.term.length;
+    });
+
+    const primaryPos = rankedMatches[0].positions[0];
+    anchorCandidates.push(primaryPos);
+
+    const allTokenPositions = rankedMatches.flatMap((match) => match.positions);
+    const farthestTokenPos = allTokenPositions.reduce((best, current) => {
+      if (best < 0) return current;
+      const bestDistance = Math.abs(best - primaryPos);
+      const currentDistance = Math.abs(current - primaryPos);
+      return currentDistance > bestDistance ? current : best;
+    }, -1);
+    if (farthestTokenPos >= 0) {
+      anchorCandidates.push(farthestTokenPos);
     }
   }
 
-  if (tokenPos >= 0) {
-    const targetWindow = Math.max(500, Math.floor(params.maxChars * 0.82));
-    let start = Math.max(0, tokenPos - Math.floor(targetWindow * 0.35));
-    let end = Math.min(raw.length, start + targetWindow);
-    if (end - start < targetWindow) {
-      start = Math.max(0, end - targetWindow);
+  if (factualAnchors.length > 0) {
+    anchorCandidates.push(factualAnchors[0]);
+    anchorCandidates.push(factualAnchors[Math.floor((factualAnchors.length - 1) / 2)]);
+    anchorCandidates.push(factualAnchors[factualAnchors.length - 1]);
+  }
+
+  const maxAnchors = params.maxChars >= 1400 ? 4 : 3;
+  const selectedAnchors = dedupeAnchorPositions(
+    anchorCandidates,
+    Math.max(90, Math.floor(params.maxChars * 0.1))
+  ).slice(0, maxAnchors);
+
+  const primaryWindow = Math.max(560, Math.floor(params.maxChars * 0.6));
+  const secondaryWindow = Math.max(240, Math.floor(params.maxChars * 0.3));
+  const spans = selectedAnchors.map((anchorPos, index) =>
+    buildContextWindow({
+      contentLength: raw.length,
+      anchorPos,
+      windowChars: index === 0 ? primaryWindow : secondaryWindow,
+      beforeRatio: index === 0 ? 0.3 : 0.24
+    })
+  );
+
+  const mergedSpans = mergeContextSpans(spans);
+  if (mergedSpans.length > 0) {
+    const mergedSegments: string[] = [];
+    let hasLeadingGap = false;
+    let hasTrailingGap = false;
+
+    for (let i = 0; i < mergedSpans.length; i += 1) {
+      const span = mergedSpans[i];
+      if (i === 0 && span.start > 0) hasLeadingGap = true;
+      if (i === mergedSpans.length - 1 && span.end < raw.length) hasTrailingGap = true;
+      const section = raw.slice(span.start, span.end).trim();
+      if (section) mergedSegments.push(section);
     }
 
-    let snippet = raw.slice(start, end).trim();
-    if (start > 0) snippet = "..." + snippet;
-    if (end < raw.length) snippet = snippet + "...";
+    let snippet = mergedSegments.join("\n...\n");
+    if (hasLeadingGap) snippet = "..." + snippet;
+    if (hasTrailingGap) snippet += "...";
     return clipWithEllipsis(snippet, params.maxChars);
   }
 
-  const headChars = Math.floor(params.maxChars * 0.62);
-  const tailChars = Math.max(180, params.maxChars - headChars - 8);
+  if (factualAnchors.length > 0) {
+    const factualFocus = factualAnchors[factualAnchors.length - 1];
+    const factualSpan = buildContextWindow({
+      contentLength: raw.length,
+      anchorPos: factualFocus,
+      windowChars: Math.max(420, Math.floor(params.maxChars * 0.74)),
+      beforeRatio: 0.2
+    });
+    const introSpan = {
+      start: 0,
+      end: Math.min(raw.length, Math.max(180, Math.floor(params.maxChars * 0.2)))
+    };
+    const combined = mergeContextSpans([introSpan, factualSpan]);
+    const sections = combined.map((span) => raw.slice(span.start, span.end).trim());
+    return clipWithEllipsis(sections.join("\n...\n"), params.maxChars);
+  }
+
+  const headChars = Math.floor(params.maxChars * 0.5);
+  const tailChars = Math.max(260, params.maxChars - headChars - 8);
   const head = raw.slice(0, headChars).trim();
   const tail = raw.slice(-tailChars).trim();
   return clipWithEllipsis(`${head}\n...\n${tail}`, params.maxChars);
+}
+
+function buildContextChunkBudgets(chunkCount: number): number[] {
+  if (chunkCount <= 0) return [];
+  const budgets: number[] = Array.from({ length: chunkCount }, (_, index) =>
+    PRIORITIZED_CONTEXT_CHARS[index] ?? BASE_CONTEXT_CHARS_PER_CHUNK
+  );
+
+  let total = budgets.reduce((sum, value) => sum + value, 0);
+  if (total <= MAX_TOTAL_CONTEXT_CHARS) return budgets;
+
+  let overflow = total - MAX_TOTAL_CONTEXT_CHARS;
+  for (let i = budgets.length - 1; i >= 0 && overflow > 0; i -= 1) {
+    const reducible = Math.max(0, budgets[i] - MIN_CONTEXT_CHARS_PER_CHUNK);
+    if (reducible <= 0) continue;
+    const cut = Math.min(reducible, overflow);
+    budgets[i] -= cut;
+    overflow -= cut;
+  }
+
+  if (overflow > 0) {
+    for (let i = 0; i < budgets.length && overflow > 0; i += 1) {
+      const reducible = Math.max(0, budgets[i] - MIN_CONTEXT_CHARS_PER_CHUNK);
+      if (reducible <= 0) continue;
+      const cut = Math.min(reducible, overflow);
+      budgets[i] -= cut;
+      overflow -= cut;
+    }
+  }
+
+  total = budgets.reduce((sum, value) => sum + value, 0);
+  if (total > MAX_TOTAL_CONTEXT_CHARS && budgets.length > 0) {
+    budgets[budgets.length - 1] = Math.max(
+      MIN_CONTEXT_CHARS_PER_CHUNK,
+      budgets[budgets.length - 1] - (total - MAX_TOTAL_CONTEXT_CHARS)
+    );
+  }
+
+  return budgets;
 }
 
 // Intent routing is handled by the LLM-based router; avoid heuristic keyword lists here.
@@ -2050,7 +3574,7 @@ function shouldUseKnowledgeForTurn(
   if (GENERIC_SHORT_REPLIES.has(normalizedReply)) {
     if (
       lastAssistantAskedQuestion &&
-      AFFIRMATIVE_SHORT_REPLIES.has(normalizedReply)
+      isAffirmativeFollowUpSignal(normalizedReply)
     ) {
       return true;
     }
@@ -2313,6 +3837,20 @@ export async function generateBotReplyForSlug(
     );
   }
 
+  const followUpStateKey = buildPendingFollowUpStateKey({
+    botId: botConfig.botId ?? null,
+    conversationId: options.conversationId ?? null,
+    sessionId: options.sessionId ?? null
+  });
+  const normalizedIncomingShortReply = normalizeShortReplyToken(message);
+  const isShortAffirmativeReply = isAffirmativeFollowUpSignal(
+    normalizedIncomingShortReply
+  );
+  if (followUpStateKey && !isShortAffirmativeReply) {
+    clearPendingFollowUpState(followUpStateKey);
+  }
+  const pendingFollowUpState = loadPendingFollowUpState(followUpStateKey);
+
   const unsupportedAction = detectUnsupportedExternalAction(message);
   if (unsupportedAction) {
     const lang =
@@ -2334,6 +3872,7 @@ export async function generateBotReplyForSlug(
     userId: botConfig.ownerUserId ?? null,
     botId: botConfig.botId ?? null
   };
+  const executedToolNamesThisTurn = new Set<string>();
 
     const intentResult = classifyIntent(message);
 
@@ -2445,7 +3984,9 @@ export async function generateBotReplyForSlug(
           : fullHistory;
     }
 
-    await maybeUpdateConversationMemorySummary(slug, options.conversationId);
+    if (ENABLE_CONVERSATION_MEMORY_SUMMARY) {
+      await maybeUpdateConversationMemorySummary(slug, options.conversationId);
+    }
   }
 
   // Booking config for chat (normalized)
@@ -2460,21 +4001,33 @@ export async function generateBotReplyForSlug(
   const shortAffirmativeFollowUp = resolveShortAffirmativeFollowUpContext({
     message,
     historyMessages,
-    bookingFlowActive: bookingFlowActiveForKnowledge
+    bookingFlowActive: bookingFlowActiveForKnowledge,
+    pendingState: pendingFollowUpState
   });
-  const knowledgeInputMessage =
-    shortAffirmativeFollowUp?.resolvedKnowledgeQuery ?? message;
-
-  const memorySummary =
-    options.conversationId != null
-      ? await getConversationMemorySummary(options.conversationId)
-      : null;
+  if (shortAffirmativeFollowUp?.source === "state") {
+    clearPendingFollowUpState(followUpStateKey);
+  }
+  const shortFollowUpTargetLanguage = await detectShortFollowUpTargetLanguage({
+    context: shortAffirmativeFollowUp,
+    botId: botConfig.botId ?? null
+  });
+  const knowledgeInputMessage = shortAffirmativeFollowUp
+    ? shortAffirmativeFollowUp.hasSpecificTopic
+      ? shortAffirmativeFollowUp.resolvedKnowledgeQuery
+      : message
+    : message;
 
   const useKnowledge =
     knowledgeSource === "RAG" &&
     shouldUseKnowledgeForTurn(message, historyMessages, {
       bookingFlowActive: bookingFlowActiveForKnowledge
     });
+  const memorySummary =
+    ENABLE_CONVERSATION_MEMORY_SUMMARY &&
+    options.conversationId != null &&
+    !useKnowledge
+      ? await getConversationMemorySummary(options.conversationId)
+      : null;
 
   const tokenDebug =
     String(process.env.TOKEN_DEBUG || "").toLowerCase() === "true";
@@ -2496,6 +4049,7 @@ export async function generateBotReplyForSlug(
   let knowledgeIntentForBudget: string | null = null;
   let knowledgePolicyModeForBudget: string | null = null;
   let knowledgeResponseStrategyForBudget: string | null = null;
+  let knowledgeEvidenceText = "";
 
   if (useKnowledge) {
     if (!botConfig.knowledgeClientId) {
@@ -2510,7 +4064,10 @@ export async function generateBotReplyForSlug(
     });
     knowledgeIntentForBudget = intentResult.intent;
 
-    const contactDetection = detectContactQuery(knowledgeInputMessage);
+    const contactDetection = await detectContactQuerySmart({
+      message: knowledgeInputMessage,
+      botId: botConfig.botId ?? null
+    });
 
     const profile = resolveKnowledgeRetrievalProfile(
       botConfig.knowledgeRetrievalProfile
@@ -2524,12 +4081,30 @@ export async function generateBotReplyForSlug(
       ? { ...retrievalParams, returnDebug: true }
       : retrievalParams;
 
+    const weakLanguageSignalInput = isWeakLanguageSignalMessage(message);
+    const languageLockForKnowledge =
+      (isSupportedLanguage(shoppingState?.language ?? null)
+        ? shoppingState?.language
+        : null) ??
+      (weakLanguageSignalInput ? shortFollowUpTargetLanguage : null);
     const knowledgeLanguage = await detectKnowledgeLanguage({
       message: knowledgeInputMessage,
-      lockedLanguage: shoppingState?.language ?? null,
+      lockedLanguage: languageLockForKnowledge ?? null,
       routedLanguage: routerResult?.language ?? null,
-      botId: botConfig.botId ?? null
+      botId: botConfig.botId ?? null,
+      allowLLM: !(weakLanguageSignalInput && languageLockForKnowledge != null),
+      defaultLanguage:
+        languageLockForKnowledge ??
+        detectQuickMessageLanguageHint(knowledgeInputMessage) ??
+        "en"
     });
+    const contactReplyLanguage: SupportedLanguage =
+      isWeakLanguageSignalMessage(message)
+        ? (await detectHistoryLanguageHint({
+            historyMessages,
+            botId: botConfig.botId ?? null
+          })) ?? knowledgeLanguage
+        : knowledgeLanguage;
     const ftsLanguage = knowledgeLanguage;
 
     if (logDebug) {
@@ -2549,7 +4124,12 @@ export async function generateBotReplyForSlug(
       });
     }
 
-    const retrievalRun = contactDetection.isContactQuery
+    const shouldClarifyContactIntent =
+      contactDetection.ambiguous === true && !contactDetection.isContactQuery;
+    const shouldRouteToContactRetrieval =
+      contactDetection.isContactQuery && !shouldClarifyContactIntent;
+
+    const retrievalRun = shouldRouteToContactRetrieval
       ? {
           source: "contact_retrieval" as const,
           response: await searchKnowledgeContacts({
@@ -2595,14 +4175,22 @@ export async function generateBotReplyForSlug(
       console.log("[KnowledgePolicy] input_source", {
         source: retrievalRun.source
       });
-      if (contactDetection.isContactQuery) {
+      if (shouldRouteToContactRetrieval || shouldClarifyContactIntent) {
         console.log("[KnowledgeContact] detection", {
-          signals: contactDetection.contactSignals
+          signals: contactDetection.contactSignals,
+          source: contactDetection.source ?? "unknown",
+          confidence: contactDetection.confidence ?? null,
+          ambiguous: contactDetection.ambiguous ?? false,
+          llmUnavailable: contactDetection.llmUnavailable ?? false
         });
       }
     }
 
     const results = retrievalResponse.results || [];
+    knowledgeEvidenceText = results
+      .slice(0, 6)
+      .map((r) => String(r.text || ""))
+      .join("\n");
     const retrievalMeta = {
       retrievalStatus: retrievalResponse.retrievalStatus,
       noAnswerRecommended: retrievalResponse.noAnswerRecommended,
@@ -2644,7 +4232,18 @@ export async function generateBotReplyForSlug(
       knowledgeEarlyReply = getKnowledgeOverviewNoResultsMessage(knowledgeLanguage);
     }
 
-    if (contactDetection.isContactQuery) {
+    if (
+      !knowledgeEarlyReply &&
+      contactDetection.ambiguous === true &&
+      !contactDetection.isContactQuery
+    ) {
+      knowledgeEarlyReply = resolveContactFallback(
+        contactReplyLanguage,
+        "intentClarify"
+      );
+    }
+
+    if (shouldRouteToContactRetrieval) {
       const preferPartner = contactDetection.requestedFields.partner;
       const selection = selectContactExtractionPool({
         results,
@@ -2657,6 +4256,9 @@ export async function generateBotReplyForSlug(
         url: r.url,
         trusted: selection.trustedIds.has(r.id)
       }));
+      const sourceById = new Map(
+        sources.map((source) => [String(source.id || ""), source])
+      );
 
       const extracted = extractContacts({ sources });
 
@@ -2667,9 +4269,10 @@ export async function generateBotReplyForSlug(
         }))
       ).map((entry) => ({
         ...entry,
+        sourceText: sourceById.get(String(entry.resultId || ""))?.text ?? "",
         classification: classifyContactSource({
           url: entry.url,
-          text: sources.find((s) => s.id === entry.resultId)?.text ?? "",
+          text: sourceById.get(String(entry.resultId || ""))?.text ?? "",
           preferPartnerSources: preferPartner
         })
       }));
@@ -2693,17 +4296,37 @@ export async function generateBotReplyForSlug(
       const hasVerifiedDetails =
         extracted.emails.length > 0 || extracted.phones.length > 0;
       const hasVerifiedUrl = extracted.contactUrls.length > 0;
+      const localizedContactLabel = (field: "email" | "phone" | "contactPage"): string => {
+        if (field === "email") {
+          if (contactReplyLanguage === "es") return "Correo";
+          if (contactReplyLanguage === "de") return "E-Mail";
+          if (contactReplyLanguage === "fr") return "Email";
+          return "Email";
+        }
+        if (field === "phone") {
+          if (contactReplyLanguage === "it") return "Telefono";
+          if (contactReplyLanguage === "es") return "Telefono";
+          if (contactReplyLanguage === "de") return "Telefon";
+          if (contactReplyLanguage === "fr") return "Telephone";
+          return "Phone";
+        }
+        if (contactReplyLanguage === "it") return "Pagina contatti";
+        if (contactReplyLanguage === "es") return "Pagina de contacto";
+        if (contactReplyLanguage === "de") return "Kontaktseite";
+        if (contactReplyLanguage === "fr") return "Page contact";
+        return "Contact page";
+      };
 
       if (!preferPartner) {
         const genericSelection = selectBestGenericContactSource(perSource);
         if (genericSelection.conflict) {
           knowledgeEarlyReply = resolveContactFallback(
-            knowledgeLanguage,
-            "partnerClarify"
+            contactReplyLanguage,
+            "conflictClarify"
           );
         } else if (!genericSelection.selected) {
           knowledgeEarlyReply = resolveContactFallback(
-            knowledgeLanguage,
+            contactReplyLanguage,
             "noVerified"
           );
         } else if (
@@ -2712,7 +4335,7 @@ export async function generateBotReplyForSlug(
           genericSelection.selected.contactLikeUrl
         ) {
           knowledgeEarlyReply = resolveContactFallback(
-            knowledgeLanguage,
+            contactReplyLanguage,
             "contactPageOnly",
             { url: genericSelection.selected.url ?? undefined }
           );
@@ -2721,36 +4344,24 @@ export async function generateBotReplyForSlug(
           genericSelection.selected.phones.length === 0
         ) {
           knowledgeEarlyReply = resolveContactFallback(
-            knowledgeLanguage,
+            contactReplyLanguage,
             "noVerified"
           );
         } else {
           const lines: string[] = [];
           if (genericSelection.selected.emails.length > 0) {
             lines.push(
-              knowledgeLanguage === "it"
-                ? `Email: ${genericSelection.selected.emails.join(", ")}`
-                : knowledgeLanguage === "es"
-                ? `Correo: ${genericSelection.selected.emails.join(", ")}`
-                : `Email: ${genericSelection.selected.emails.join(", ")}`
+              `${localizedContactLabel("email")}: ${genericSelection.selected.emails.join(", ")}`
             );
           }
           if (genericSelection.selected.phones.length > 0) {
             lines.push(
-              knowledgeLanguage === "it"
-                ? `Telefono: ${genericSelection.selected.phones.join(", ")}`
-                : knowledgeLanguage === "es"
-                ? `TelÃ©fono: ${genericSelection.selected.phones.join(", ")}`
-                : `Phone: ${genericSelection.selected.phones.join(", ")}`
+              `${localizedContactLabel("phone")}: ${genericSelection.selected.phones.join(", ")}`
             );
           }
           if (genericSelection.selected.contactLikeUrl && genericSelection.selected.url) {
             lines.push(
-              knowledgeLanguage === "it"
-                ? `Pagina contatti: ${genericSelection.selected.url}`
-                : knowledgeLanguage === "es"
-                ? `PÃ¡gina de contacto: ${genericSelection.selected.url}`
-                : `Contact page: ${genericSelection.selected.url}`
+              `${localizedContactLabel("contactPage")}: ${genericSelection.selected.url}`
             );
           }
           knowledgeEarlyReply = lines.join("\n");
@@ -2770,46 +4381,30 @@ export async function generateBotReplyForSlug(
           // Skip generic fallback flow below.
         } else if (!hasVerifiedDetails && !hasVerifiedUrl) {
           knowledgeEarlyReply = resolveContactFallback(
-            knowledgeLanguage,
+            contactReplyLanguage,
             "noVerified"
           );
         }
       } else if (!hasVerifiedDetails && !hasVerifiedUrl) {
         knowledgeEarlyReply = resolveContactFallback(
-          knowledgeLanguage,
+          contactReplyLanguage,
           contactDetection.requestedFields.partner ? "partnerClarify" : "noVerified"
         );
       } else if (!hasVerifiedDetails && hasVerifiedUrl) {
-        knowledgeEarlyReply = resolveContactFallback(knowledgeLanguage, "contactPageOnly", {
+        knowledgeEarlyReply = resolveContactFallback(contactReplyLanguage, "contactPageOnly", {
           url: extracted.contactUrls[0]
         });
       } else {
         const lines: string[] = [];
         if (extracted.emails.length > 0) {
-          lines.push(
-            knowledgeLanguage === "it"
-              ? `Email: ${extracted.emails.join(", ")}`
-              : knowledgeLanguage === "es"
-              ? `Correo: ${extracted.emails.join(", ")}`
-              : `Email: ${extracted.emails.join(", ")}`
-          );
+          lines.push(`${localizedContactLabel("email")}: ${extracted.emails.join(", ")}`);
         }
         if (extracted.phones.length > 0) {
-          lines.push(
-            knowledgeLanguage === "it"
-              ? `Telefono: ${extracted.phones.join(", ")}`
-              : knowledgeLanguage === "es"
-              ? `TelÃ©fono: ${extracted.phones.join(", ")}`
-              : `Phone: ${extracted.phones.join(", ")}`
-          );
+          lines.push(`${localizedContactLabel("phone")}: ${extracted.phones.join(", ")}`);
         }
         if (extracted.contactUrls.length > 0) {
           lines.push(
-            knowledgeLanguage === "it"
-              ? `Pagina contatti: ${extracted.contactUrls[0]}`
-              : knowledgeLanguage === "es"
-              ? `PÃ¡gina de contacto: ${extracted.contactUrls[0]}`
-              : `Contact page: ${extracted.contactUrls[0]}`
+            `${localizedContactLabel("contactPage")}: ${extracted.contactUrls[0]}`
           );
         }
 
@@ -2819,14 +4414,8 @@ export async function generateBotReplyForSlug(
 
     const contextChunks = results.map((r, index) => {
       const safeUrl = r.url || botConfig.domain;
-      const rawText = r.text || "";
-      const trimmedText = buildContextSnippet({
-        rawText,
-        message: knowledgeInputMessage,
-        maxChars: MAX_CONTEXT_CHARS_PER_CHUNK
-      });
-
-      return `Chunk ${index + 1} (from ${safeUrl}):\n${trimmedText}`;
+      const rawText = (r.text || "").trim();
+      return `Chunk ${index + 1} (from ${safeUrl}):\n${rawText}`;
     });
 
     const contextText =
@@ -2904,7 +4493,10 @@ export async function generateBotReplyForSlug(
     messages.push({
       role: "system",
       content:
-        "Long-term memory for this user. Use it as soft background only; if it conflicts with recent messages, always trust the recent messages:\n" +
+        "Long-term memory for this user. Use it as soft background only.\n" +
+        "- Never use this memory as factual source for business details (prices, specs, durations, policies, contacts).\n" +
+        "- For business facts, rely on current retrieved context for this turn.\n" +
+        "- If memory conflicts with current messages or retrieved context, trust current turn evidence.\n" +
         memorySummary
     });
     if (tokenDebug) {
@@ -2924,13 +4516,21 @@ export async function generateBotReplyForSlug(
     });
   }
 
+  const preKnownLanguageForTurn =
+    (isSupportedLanguage(shoppingState?.language ?? null)
+      ? shoppingState?.language
+      : null) ??
+    shortFollowUpTargetLanguage ??
+    null;
   const detectedReplyLanguage =
     !shopifyEnabled && knowledgeSource === "RAG"
       ? await detectKnowledgeLanguageHint({
           message,
-          lockedLanguage: null,
-          routedLanguage: null,
-          botId: botConfig.botId ?? null
+          lockedLanguage: preKnownLanguageForTurn,
+          routedLanguage: routerResult?.language ?? null,
+          botId: botConfig.botId ?? null,
+          allowLLM:
+            preKnownLanguageForTurn == null && !isWeakLanguageSignalMessage(message)
         })
       : null;
   const historyDetectedLanguage = await detectHistoryLanguageHint({
@@ -2939,48 +4539,35 @@ export async function generateBotReplyForSlug(
   });
   const quickDetectedLanguage = detectQuickMessageLanguageHint(message);
   const effectiveDetectedLanguage = isWeakLanguageSignalMessage(message)
-    ? historyDetectedLanguage ?? quickDetectedLanguage ?? detectedReplyLanguage
-    : detectedReplyLanguage ?? quickDetectedLanguage ?? historyDetectedLanguage;
-  const detectedLanguageHint = languageHintFromDetected(effectiveDetectedLanguage);
-  if (detectedLanguageHint) {
-    messages.push({
-      role: "system",
-      content: detectedLanguageHint
-    });
-    if (tokenDebug) {
-      console.log("[TokenDebug] detectedLanguageHint", {
-        botId: botConfig.botId,
-        chars: countChars(detectedLanguageHint)
-      });
-    }
-  }
-  const strictLanguageHint = strictLanguageInstruction(effectiveDetectedLanguage);
+    ? shortFollowUpTargetLanguage ??
+      historyDetectedLanguage ??
+      detectedReplyLanguage ??
+      quickDetectedLanguage
+    : detectedReplyLanguage ??
+      quickDetectedLanguage ??
+      shortFollowUpTargetLanguage ??
+      historyDetectedLanguage;
+  const lockedLanguage = shoppingState?.language ?? null;
+  const enforcedLanguage =
+    (isSupportedLanguage(lockedLanguage) ? lockedLanguage : null) ??
+    shortFollowUpTargetLanguage ??
+    effectiveDetectedLanguage;
+  const strictLanguageHint = strictLanguageInstruction(enforcedLanguage);
   if (strictLanguageHint) {
+    const languageLockPrefix =
+      shortAffirmativeFollowUp && shortFollowUpTargetLanguage
+        ? "Short follow-up language lock: answer in the same language as the previous assistant question."
+        : "Language lock for this turn.";
+    const combinedLanguageHint = `${languageLockPrefix}\n${strictLanguageHint}`;
     messages.push({
       role: "system",
-      content: strictLanguageHint
+      content: combinedLanguageHint
     });
     if (tokenDebug) {
       console.log("[TokenDebug] strictLanguageHint", {
         botId: botConfig.botId,
-        chars: countChars(strictLanguageHint)
-      });
-    }
-  }
-
-  const lockedLanguage = shoppingState?.language ?? null;
-  const languageHint = lockedLanguage ? languageHintFromLock(lockedLanguage) : null;
-  if (languageHint) {
-    messages.push({
-      role: "system",
-      content:
-        "Language lock for this turn: the assistant must follow the user's language.\n" +
-        languageHint
-    });
-    if (tokenDebug) {
-      console.log("[TokenDebug] languageHint", {
-        botId: botConfig.botId,
-        chars: countChars(languageHint)
+        chars: countChars(combinedLanguageHint),
+        language: enforcedLanguage
       });
     }
   }
@@ -2991,7 +4578,7 @@ export async function generateBotReplyForSlug(
   }));
 
   const shouldAskClarifier =
-    !shortAffirmativeFollowUp &&
+    (!shortAffirmativeFollowUp || !shortAffirmativeFollowUp.hasSpecificTopic) &&
     shouldAskClarifyingQuestion({
       message,
       history: historyForIntent
@@ -3019,6 +4606,7 @@ export async function generateBotReplyForSlug(
   const policyTargetLanguage = resolvePolicyTargetLanguage({
     lockedLanguage: shoppingState?.language ?? null,
     routedLanguage: routerResult?.language ?? null,
+    followUpLanguage: shortFollowUpTargetLanguage,
     detectedLanguage: effectiveDetectedLanguage,
     historyLanguage: historyDetectedLanguage,
     quickLanguage: detectQuickMessageLanguageHint(` ${message} `)
@@ -3027,13 +4615,28 @@ export async function generateBotReplyForSlug(
   const applyGenericReplyPolicy = async (reply: string): Promise<string> => {
     const trimmed = String(reply || "").trim();
     if (!trimmed) return reply;
+    const fallbackLanguage =
+      policyTargetLanguage ??
+      shortFollowUpTargetLanguage ??
+      detectQuickMessageLanguage(message);
+    const strictFollowUpLanguage =
+      !!shortAffirmativeFollowUp &&
+      String(message || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length <= 3;
 
     const proposal = detectUnsupportedActionProposalInReply(trimmed);
     if (proposal) {
-      return buildUnsupportedActionReply(
-        proposal,
-        policyTargetLanguage ?? detectQuickMessageLanguage(message)
-      );
+      const rewritten = await rewriteReplyWithinCapabilities({
+        reply: trimmed,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (rewritten && !detectUnsupportedActionProposalInReply(rewritten)) {
+        return rewritten;
+      }
+      return buildUnsupportedProposalFallback(fallbackLanguage);
     }
 
     let safeReply = trimmed;
@@ -3064,39 +4667,255 @@ export async function generateBotReplyForSlug(
       };
 
       const beforeLang = await inferReplyLanguage(safeReply);
-      if (beforeLang && beforeLang !== policyTargetLanguage) {
+      const shouldRewrite =
+        (beforeLang && beforeLang !== policyTargetLanguage) ||
+        (strictFollowUpLanguage && beforeLang !== policyTargetLanguage);
+      if (shouldRewrite) {
         const rewritten = await rewriteReplyToLanguage({
           reply: safeReply,
           targetLanguage: policyTargetLanguage,
           usageContext: usageBase
         });
         if (!rewritten) {
-          return buildLanguageConsistencyFallback(policyTargetLanguage);
+          if (strictFollowUpLanguage) {
+            return buildLanguageConsistencyFallback(policyTargetLanguage);
+          }
+        } else {
+          safeReply = rewritten;
+          const afterLang = await inferReplyLanguage(safeReply);
+          if ((!afterLang || afterLang !== policyTargetLanguage) && strictFollowUpLanguage) {
+            return buildLanguageConsistencyFallback(policyTargetLanguage);
+          }
         }
+      }
+    }
+
+    if (
+      shortAffirmativeFollowUp &&
+      shortAffirmativeFollowUp.hasSpecificTopic &&
+      (
+        looksLikeShortAffirmativeDeflection(safeReply) ||
+        !isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp)
+      )
+    ) {
+      const repaired = await repairShortAffirmativeFollowUpReply({
+        reply: safeReply,
+        context: shortAffirmativeFollowUp,
+        evidenceText: knowledgeEvidenceText,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (repaired) {
+        safeReply = repaired;
+      }
+    }
+
+    if (
+      shortAffirmativeFollowUp &&
+      shortAffirmativeFollowUp.hasSpecificTopic &&
+      !isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp)
+    ) {
+      const groundedFollowUp = await rewriteReplyUsingEvidenceOnly({
+        reply: safeReply,
+        userMessage: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        evidenceText: knowledgeEvidenceText,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (groundedFollowUp) {
+        safeReply = groundedFollowUp;
+      }
+      if (!isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp)) {
+        return buildInsufficientEvidenceClaimReply(fallbackLanguage);
+      }
+    }
+
+    if (
+      shortAffirmativeFollowUp &&
+      shortAffirmativeFollowUp.hasSpecificTopic &&
+      hasUnsupportedActionRefusal(safeReply)
+    ) {
+      const repairedRefusal = await rewriteReplyUsingEvidenceOnly({
+        reply: safeReply,
+        userMessage: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        evidenceText: knowledgeEvidenceText,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (repairedRefusal && !hasUnsupportedActionRefusal(repairedRefusal)) {
+        safeReply = repairedRefusal;
+      }
+    }
+
+    if (shortAffirmativeFollowUp?.hasSpecificTopic) {
+      safeReply = alignReplyUrlWithEvidence({
+        reply: safeReply,
+        resolvedQuery: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        evidenceText: knowledgeEvidenceText,
+        lang: fallbackLanguage
+      });
+    }
+
+    if (useKnowledge && queryLooksLikeDirectLinkRequest(message)) {
+      safeReply = alignReplyUrlWithEvidence({
+        reply: safeReply,
+        resolvedQuery: message,
+        evidenceText: knowledgeEvidenceText,
+        lang: fallbackLanguage
+      });
+    }
+
+    if (hasExplicitExternalCapabilityAction(safeReply)) {
+      const rewritten = await rewriteReplyWithinCapabilities({
+        reply: safeReply,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (rewritten) {
         safeReply = rewritten;
-        const afterLang = await inferReplyLanguage(safeReply);
-        if (!afterLang || afterLang !== policyTargetLanguage) {
-          return buildLanguageConsistencyFallback(policyTargetLanguage);
-        }
       }
     }
 
     const proposalAfterRewrite = detectUnsupportedActionProposalInReply(safeReply);
     if (proposalAfterRewrite) {
-      return buildUnsupportedActionReply(
-        proposalAfterRewrite,
-        policyTargetLanguage ?? detectQuickMessageLanguage(message)
+      const rewritten = await rewriteReplyWithinCapabilities({
+        reply: safeReply,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (rewritten && !detectUnsupportedActionProposalInReply(rewritten)) {
+        safeReply = rewritten;
+      } else {
+        return buildUnsupportedProposalFallback(fallbackLanguage);
+      }
+    }
+
+    const unsupportedCapability = await isUnsupportedCapabilityProposal({
+      userMessage: message,
+      reply: safeReply,
+      evidenceText: knowledgeEvidenceText,
+      supportedActionHints: Array.from(executedToolNamesThisTurn.values()),
+      usageContext: usageBase
+    });
+    if (unsupportedCapability) {
+      return buildCapabilityScopeFallback(fallbackLanguage);
+    }
+
+    if (
+      useKnowledge &&
+      isFactualClaimRiskyReply(message, safeReply)
+    ) {
+      const numericClaimsSupported = hasEvidenceForNumericClaims(
+        safeReply,
+        knowledgeEvidenceText
       );
+      const claimEvidenceSupported = hasEvidenceForClaim(
+        message,
+        knowledgeEvidenceText
+      );
+      const binaryDefinitiveReply =
+        isBinaryClaimQuestion(message) &&
+        isDefinitiveClaimReply(safeReply);
+      let unsupportedFactualClaim =
+        !numericClaimsSupported ||
+        (binaryDefinitiveReply && !claimEvidenceSupported);
+
+      if (
+        !unsupportedFactualClaim &&
+        shouldRunFactualGroundingGuard({
+          message,
+          reply: safeReply,
+          evidenceText: knowledgeEvidenceText
+        })
+      ) {
+        unsupportedFactualClaim = await isUnsupportedFactualClaim({
+          userMessage: message,
+          reply: safeReply,
+          evidenceText: knowledgeEvidenceText,
+          usageContext: usageBase
+        });
+      }
+
+      if (unsupportedFactualClaim) {
+        const rewritten = await rewriteReplyUsingEvidenceOnly({
+          reply: safeReply,
+          userMessage: message,
+          evidenceText: knowledgeEvidenceText,
+          targetLanguage: fallbackLanguage,
+          usageContext: usageBase
+        });
+        if (!rewritten) {
+          return buildInsufficientEvidenceClaimReply(fallbackLanguage);
+        }
+        safeReply = rewritten;
+        if (!hasEvidenceForNumericClaims(safeReply, knowledgeEvidenceText)) {
+          return buildInsufficientEvidenceClaimReply(fallbackLanguage);
+        }
+      }
+    }
+
+    if (
+      useKnowledge &&
+      isBinaryClaimQuestion(message) &&
+      isDefinitiveClaimReply(safeReply) &&
+      !hasEvidenceForClaim(message, knowledgeEvidenceText)
+    ) {
+      return buildInsufficientEvidenceClaimReply(fallbackLanguage);
     }
 
     if (policyTargetLanguage) {
       const finalQuickLang = detectQuickMessageLanguageHint(safeReply);
       if (finalQuickLang && finalQuickLang !== policyTargetLanguage) {
-        return buildLanguageConsistencyFallback(policyTargetLanguage);
+        const rewritten = await rewriteReplyToLanguage({
+          reply: safeReply,
+          targetLanguage: policyTargetLanguage,
+          usageContext: usageBase
+        });
+        if (rewritten) {
+          safeReply = rewritten;
+        } else if (strictFollowUpLanguage) {
+          return buildLanguageConsistencyFallback(policyTargetLanguage);
+        }
       }
     }
-
+    if (shortAffirmativeFollowUp?.hasSpecificTopic) {
+      const aligned = hasMinimumTopicAlignment({
+        reply: safeReply,
+        query: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        minMatches: 1
+      });
+      if (!aligned) {
+        const rewritten = await rewriteReplyUsingEvidenceOnly({
+          reply: safeReply,
+          userMessage: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+          evidenceText: knowledgeEvidenceText,
+          targetLanguage: fallbackLanguage,
+          usageContext: usageBase
+        });
+        if (rewritten) {
+          safeReply = rewritten;
+        }
+      }
+    }
     return safeReply;
+  };
+
+  const persistPendingFollowUpFromReply = (finalReply: string): void => {
+    if (!followUpStateKey) return;
+    if (bookingFlowActiveForKnowledge) {
+      clearPendingFollowUpState(followUpStateKey);
+      return;
+    }
+
+    const candidate = buildPendingFollowUpStateFromAssistantReply({
+      reply: finalReply,
+      baseUserQuery: knowledgeInputMessage
+    });
+    if (!candidate) {
+      clearPendingFollowUpState(followUpStateKey);
+      return;
+    }
+    savePendingFollowUpState(followUpStateKey, candidate);
   };
 
   const finalizeReply = async (
@@ -3106,6 +4925,7 @@ export async function generateBotReplyForSlug(
     const safeReply = await applyGenericReplyPolicy(reply);
 
     if (!botConfig.botId || !shopifyEnabled || !botConfig.revenueAIEnabled) {
+      persistPendingFollowUpFromReply(safeReply);
       return { reply: safeReply, suggestion: null };
     }
 
@@ -3128,7 +4948,10 @@ export async function generateBotReplyForSlug(
       indecisionSignal
     });
 
-    if (!offer) return { reply: safeReply, suggestion: null };
+    if (!offer) {
+      persistPendingFollowUpFromReply(safeReply);
+      return { reply: safeReply, suggestion: null };
+    }
 
     // Allow RevenueAI to suggest items outside the current shortlist.
 
@@ -3199,6 +5022,7 @@ export async function generateBotReplyForSlug(
       }
     }
 
+    persistPendingFollowUpFromReply(appended);
     return { reply: appended, suggestion: offer.suggestion };
   };
 
@@ -3612,6 +5436,7 @@ export async function generateBotReplyForSlug(
     );
 
     for (const draftCall of draftCalls) {
+      executedToolNamesThisTurn.add(draftCall.function?.name || "update_booking_draft");
       try {
         const rawArgs = draftCall.function?.arguments || "{}";
         const parsed = JSON.parse(rawArgs);
@@ -3658,6 +5483,7 @@ export async function generateBotReplyForSlug(
     );
 
     if (shopifyCall) {
+      executedToolNamesThisTurn.add(shopifyCall.function?.name || "shopify_tool");
       if (!botConfig.botId) {
         throw new Error("Shopify tools unavailable for this bot.");
       }
@@ -4043,6 +5869,7 @@ export async function generateBotReplyForSlug(
   }
 
 const functionName = bookingCall.function?.name || "unknown";
+executedToolNamesThisTurn.add(functionName);
 
 // Parse booking tool arguments and execute
 let bookingResult: BookingResult;

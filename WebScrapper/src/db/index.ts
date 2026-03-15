@@ -1435,4 +1435,27 @@ export class Database {
       client.release();
     }
   }
+
+  async deactivateChunksForClientByJobId(params: {
+    clientId: string;
+    jobId: string;
+  }): Promise<number> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{ id: string }>(
+        `
+        UPDATE page_chunks_small
+        SET is_active = false
+        WHERE client_id = $1
+          AND job_id = $2
+          AND is_active = true
+        RETURNING id
+        `,
+        [params.clientId, params.jobId],
+      );
+      return res.rowCount ?? 0;
+    } finally {
+      client.release();
+    }
+  }
 }

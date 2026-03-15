@@ -1,4 +1,4 @@
-import { getChatCompletion } from "../openai/client";
+ï»¿import { getChatCompletion } from "../openai/client";
 
 export type KnowledgeLanguage = "en" | "it" | "es" | "de" | "fr";
 
@@ -8,6 +8,7 @@ type LlmLanguageResult = {
 };
 
 const LLM_LANGUAGE_CACHE = new Map<string, KnowledgeLanguage>();
+const LLM_CONFIDENCE_THRESHOLD = 0.55;
 
 function stripCodeFences(value: string): string {
   const trimmed = value.trim();
@@ -55,6 +56,130 @@ function foldDiacritics(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+function tokenizeWords(value: string): string[] {
+  return foldDiacritics(value)
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
+
+const LANGUAGE_HEURISTIC_MARKERS: Record<KnowledgeLanguage, Set<string>> = {
+  it: new Set([
+    "che",
+    "non",
+    "sono",
+    "come",
+    "dove",
+    "quando",
+    "quale",
+    "quali",
+    "avete",
+    "servizi",
+    "prezzo",
+    "prezzi",
+    "grazie",
+    "ciao",
+    "posso",
+    "potete",
+    "negli",
+    "della",
+    "delle",
+    "degli"
+  ]),
+  en: new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "what",
+    "where",
+    "when",
+    "how",
+    "price",
+    "prices",
+    "thanks",
+    "hello",
+    "can",
+    "does",
+    "do",
+    "you"
+  ]),
+  es: new Set([
+    "que",
+    "como",
+    "donde",
+    "cuando",
+    "precio",
+    "precios",
+    "gracias",
+    "hola",
+    "puedo",
+    "pueden",
+    "tienen",
+    "para",
+    "con"
+  ]),
+  de: new Set([
+    "was",
+    "wie",
+    "wo",
+    "wann",
+    "preis",
+    "preise",
+    "danke",
+    "hallo",
+    "kann",
+    "koennen",
+    "haben",
+    "und",
+    "mit"
+  ]),
+  fr: new Set([
+    "quoi",
+    "comment",
+    "ou",
+    "quand",
+    "prix",
+    "merci",
+    "bonjour",
+    "pouvez",
+    "avez",
+    "avec",
+    "pour",
+    "les",
+    "des"
+  ])
+};
+
+function detectLanguageWithHeuristics(message: string): KnowledgeLanguage | null {
+  const tokens = tokenizeWords(message);
+  if (tokens.length === 0) return null;
+
+  const scored = (Object.keys(LANGUAGE_HEURISTIC_MARKERS) as KnowledgeLanguage[]).map(
+    (lang) => {
+      const markers = LANGUAGE_HEURISTIC_MARKERS[lang];
+      let hits = 0;
+      for (const token of tokens) {
+        if (markers.has(token)) hits += 1;
+      }
+      return { lang, hits };
+    }
+  );
+
+  scored.sort((a, b) => b.hits - a.hits);
+  const best = scored[0];
+  const second = scored[1];
+  const coverage = best.hits / Math.max(1, tokens.length);
+  const minCoverage = tokens.length >= 4 ? 0.35 : 0.5;
+
+  if (best.hits < 2) return null;
+  if (coverage < minCoverage && best.hits < 3) return null;
+  if (second && best.hits <= second.hits) return null;
+
+  return best.lang;
+}
+
 async function detectLanguageWithLLM(
   message: string,
   botId?: string | null
@@ -70,8 +195,10 @@ async function detectLanguageWithLLM(
     "You are a language detector.",
     "Return ONLY strict JSON with keys:",
     '{"language":"en|it|es|de|fr|unknown","confidence":0-1}',
-    "Detect the user's message language.",
-    "If the message is too short or ambiguous, use language=unknown."
+    "Detect the language used by the user.",
+    "Evaluate the whole message (majority language), not single words.",
+    "If mixed language, pick the language that covers most of the message.",
+    "If no language clearly dominates (around >=60%) or the message is too short, return unknown."
   ].join(" ");
 
   try {
@@ -92,7 +219,9 @@ async function detectLanguageWithLLM(
     if (jsonText) {
       const parsed = JSON.parse(jsonText) as Partial<LlmLanguageResult>;
       const lang = normalizeLanguageTag(parsed.language);
-      if (lang) {
+      const confidence =
+        typeof parsed.confidence === "number" ? parsed.confidence : 0;
+      if (lang && confidence >= LLM_CONFIDENCE_THRESHOLD) {
         LLM_LANGUAGE_CACHE.set(cacheKey, lang);
         return lang;
       }
@@ -160,96 +289,16 @@ async function resolveKnowledgeLanguage(
     return routedLanguage;
   }
 
-  const lower = foldDiacritics(message.trim().toLowerCase());
-  if (lower) {
-    if (/[¿¡]/.test(message)) return "es";
-
-    const itHints = [
-      "cosa",
-      "che",
-      "chi",
-      "dove",
-      "quando",
-      "perche",
-      "quali",
-      "servizi",
-      "offrite",
-      "gestione",
-      "posso",
-      "potete",
-      "prenotare"
-    ];
-    const esHints = [
-      "que",
-      "quien",
-      "donde",
-      "cuando",
-      "como",
-      "precio",
-      "servicios"
-    ];
-    const deHints = [
-      "was",
-      "wer",
-      "wo",
-      "wann",
-      "warum",
-      "wie",
-      "welche",
-      "welcher",
-      "welches"
-    ];
-    const frHints = [
-      "quoi",
-      "qui",
-      "ou",
-      "quand",
-      "pourquoi",
-      "comment",
-      "quel",
-      "quelle",
-      "quels",
-      "quelles"
-    ];
-
-    if (itHints.some((token) => new RegExp(`\\b${token}\\b`, "i").test(lower))) {
-      return "it";
-    }
-    if (esHints.some((token) => new RegExp(`\\b${token}\\b`, "i").test(lower))) {
-      return "es";
-    }
-    if (deHints.some((token) => new RegExp(`\\b${token}\\b`, "i").test(lower))) {
-      return "de";
-    }
-    if (frHints.some((token) => new RegExp(`\\b${token}\\b`, "i").test(lower))) {
-      return "fr";
-    }
-
-    const itSignals = [
-      "ciao",
-      "grazie",
-      "vorrei",
-      "prezzo",
-      "quanto costa",
-      "inviamela",
-      "va bene",
-      "perfetto",
-      "daccordo"
-    ];
-    const esSignals = ["hola", "gracias", "quiero", "precio", "por favor"];
-    const deSignals = ["hallo", "danke", "ich moechte", "preis", "bitte"];
-    const frSignals = ["bonjour", "salut", "merci", "je veux", "prix", "svp"];
-
-    if (itSignals.some((token) => lower.includes(token))) return "it";
-    if (esSignals.some((token) => lower.includes(token))) return "es";
-    if (deSignals.some((token) => lower.includes(token))) return "de";
-    if (frSignals.some((token) => lower.includes(token))) return "fr";
-  }
-
   if (allowLLM) {
     const llmLang = await detectLanguageWithLLM(message, botId);
     if (llmLang) return llmLang;
   }
+
+  const lower = foldDiacritics(message.trim().toLowerCase());
+  if (lower && /[Â¿Â¡]/.test(message)) return "es";
+
+  const heuristicLang = detectLanguageWithHeuristics(message);
+  if (heuristicLang) return heuristicLang;
 
   return defaultLanguage;
 }

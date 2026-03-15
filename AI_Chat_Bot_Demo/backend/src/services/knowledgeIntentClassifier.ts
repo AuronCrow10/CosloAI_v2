@@ -22,6 +22,8 @@ const CLASSIFIER_MAX_TOKENS = 120;
 const CLASSIFIER_TIMEOUT_MS = 3000;
 const CLASSIFIER_MAX_RETRIES = 1;
 const CLASSIFIER_RETRY_BACKOFF_MS = 200;
+const OVERVIEW_META_RE =
+  /\b(cosa\s+(sap|fai|potete?|puoi)|in\s+generale|panoramica|overview|what\s+can\s+you\s+do|what\s+do\s+you\s+know|how\s+can\s+you\s+help|que\s+puedes?\s+hacer|que\s+sabes?|en\s+general|was\s+kannst\s+du|was\s+wissen\s+sie|im\s+allgemeinen|que\s+peux[-\s]?tu\s+faire|que\s+savez[-\s]?vous|en\s+general)\b/i;
 
 function buildClassifierSystemPrompt(): string {
   return (
@@ -208,6 +210,53 @@ function buildFallbackFromSignals(message: string, reason: string): KnowledgeInt
   };
 }
 
+function buildDeterministicIntentPrecheck(
+  message: string
+): KnowledgeIntentResult | null {
+  const trimmed = message.trim();
+  if (!trimmed) return null;
+
+  const normalized = foldDiacritics(trimmed).toLowerCase();
+  const signals = analyzeFallbackSignals(trimmed);
+  const hasQuestion = /[?¿]/.test(trimmed);
+
+  if (
+    OVERVIEW_META_RE.test(normalized) ||
+    (hasQuestion && !signals.hasConcreteSignal && signals.wordCount >= 2)
+  ) {
+    return {
+      intent: "overview",
+      confidence: "medium",
+      reason: "precheck_overview",
+      isFallback: true
+    };
+  }
+
+  if (
+    signals.isVeryShort &&
+    signals.pronounCount > 0 &&
+    !signals.hasConcreteSignal
+  ) {
+    return {
+      intent: "ambiguous",
+      confidence: "low",
+      reason: "precheck_ambiguous_short_followup",
+      isFallback: true
+    };
+  }
+
+  if (signals.hasConcreteSignal || (hasQuestion && signals.wordCount >= 3)) {
+    return {
+      intent: "specific",
+      confidence: "medium",
+      reason: "precheck_specific",
+      isFallback: true
+    };
+  }
+
+  return null;
+}
+
 export function parseKnowledgeIntentOutput(raw: string): KnowledgeIntentResult {
   const jsonText = extractJsonObject(raw);
   if (!jsonText) return { ...DEFAULT_FALLBACK, reason: "fallback_no_json" };
@@ -262,6 +311,22 @@ export async function classifyKnowledgeIntent(params: {
   const user = `Message:\n${message}`;
   const logDebug =
     String(process.env.KNOWLEDGE_DEBUG || "").toLowerCase() === "true";
+  const precheck = buildDeterministicIntentPrecheck(message);
+  if (precheck) {
+    classifierMetrics.fallbackUsedCount += precheck.isFallback ? 1 : 0;
+    classifierMetrics.intentCounts[precheck.intent] += 1;
+    classifierMetrics.lastLatencyMs = Date.now() - startedAt;
+    if (logDebug) {
+      console.log("[KnowledgeIntent] classifier_precheck", {
+        intent: precheck.intent,
+        confidence: precheck.confidence,
+        reason: precheck.reason,
+        latencyMs: classifierMetrics.lastLatencyMs,
+        metrics: getKnowledgeIntentClassifierMetrics()
+      });
+    }
+    return precheck;
+  }
 
   for (let attempt = 0; attempt <= CLASSIFIER_MAX_RETRIES; attempt += 1) {
     try {

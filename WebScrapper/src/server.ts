@@ -1452,20 +1452,10 @@ app.post('/chunks/deactivate', requireInternalAuth, async (req, res) => {
     }
 
     const jobType = inferJobType(job.startUrl);
-    let deactivated = 0;
-
-    if (jobType === 'docs') {
-      deactivated = await db.deactivateChunksForClientByUrl({
-        clientId,
-        url: job.startUrl,
-      });
-    } else {
-      const normalizedDomain = extractDomain(job.domain || job.startUrl);
-      deactivated = await db.deactivateChunksForClientByDomain({
-        clientId,
-        domain: normalizedDomain,
-      });
-    }
+    const deactivated = await db.deactivateChunksForClientByJobId({
+      clientId,
+      jobId: job.id,
+    });
 
     await db.markCrawlJobDeactivated(jobId);
 
