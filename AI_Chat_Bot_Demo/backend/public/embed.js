@@ -14,6 +14,37 @@
     return null;
   }
 
+  function isExcludedRoute() {
+    return /^\/demo\/[^/]+\/?$/.test(window.location.pathname || "");
+  }
+
+  function installRouteChangeEmitter() {
+    if (window.__botWidgetRouteEmitterInstalled) return;
+    window.__botWidgetRouteEmitterInstalled = true;
+
+    var originalPushState = window.history.pushState;
+    var originalReplaceState = window.history.replaceState;
+
+    function emitRouteChange() {
+      window.dispatchEvent(new Event("bot-widget-route-change"));
+    }
+
+    window.history.pushState = function () {
+      var result = originalPushState.apply(this, arguments);
+      emitRouteChange();
+      return result;
+    };
+
+    window.history.replaceState = function () {
+      var result = originalReplaceState.apply(this, arguments);
+      emitRouteChange();
+      return result;
+    };
+
+    window.addEventListener("popstate", emitRouteChange);
+    window.addEventListener("hashchange", emitRouteChange);
+  }
+
   function init() {
     if (window.self !== window.top) {
       // Prevent embedding the launcher inside the widget iframe
@@ -321,7 +352,7 @@
 
     function showHint() {
       // non disturbare se la chat è aperta o non ci sono messaggi
-      if (panel.style.display === "block" || !hints.length) return;
+      if (panel.style.display === "block" || !hints.length || isExcludedRoute()) return;
 
       var msg = hints[Math.floor(Math.random() * hints.length)];
       hintBubble.textContent = msg;
@@ -344,6 +375,23 @@
       hintIntervalId = window.setInterval(showHint, 20000);
     }
 
+    function applyWidgetRouteVisibility() {
+      var excluded = isExcludedRoute();
+      if (excluded) {
+        hideHint();
+        launcher.style.display = "none";
+        panel.style.display = "none";
+        hintBubble.style.display = "none";
+        return;
+      }
+
+      launcher.style.display = "flex";
+      hintBubble.style.display = "block";
+    }
+
+    installRouteChangeEmitter();
+    window.addEventListener("bot-widget-route-change", applyWidgetRouteVisibility);
+    applyWidgetRouteVisibility();
     startHints();
     }
 
