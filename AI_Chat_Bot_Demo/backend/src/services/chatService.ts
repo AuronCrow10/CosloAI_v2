@@ -234,7 +234,6 @@ function detectQuickMessageLanguageHint(
         " el ",
         " que ",
         " para ",
-        " no ",
         " precio ",
         " precios ",
         " quieres ",
@@ -286,19 +285,19 @@ function detectQuickMessageLanguageHint(
     }
   ];
 
-  let best: SupportedLanguage | null = null;
-  let bestScore = 0;
-  for (const check of checks) {
+  const scored = checks.map((check) => {
     let score = 0;
     for (const token of check.tokens) {
       if (lower.includes(token)) score += 1;
     }
-    if (score > bestScore) {
-      best = check.lang;
-      bestScore = score;
-    }
-  }
-  return bestScore > 0 ? best : null;
+    return { lang: check.lang, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  const second = scored[1];
+  if (!best || best.score < 2) return null;
+  if (second && best.score <= second.score) return null;
+  return best.lang;
 }
 
 function detectQuickMessageLanguage(message: string): "it" | "en" | "es" | "de" | "fr" {
@@ -895,8 +894,9 @@ function isSupportedLanguage(value: string | null | undefined): value is Support
 async function detectHistoryLanguageHint(params: {
   historyMessages: ChatMessage[];
   botId?: string | null;
+  preferUserMessages?: boolean;
 }): Promise<SupportedLanguage | null> {
-  const { historyMessages, botId } = params;
+  const { historyMessages, botId, preferUserMessages = true } = params;
   if (!historyMessages.length) return null;
 
   // For weak user inputs (e.g. "si", "ok"), rely on immediate recent turns only.
@@ -904,10 +904,17 @@ async function detectHistoryLanguageHint(params: {
     .slice(-4)
     .reverse()
     .filter((msg) => msg.role === "user" || msg.role === "assistant");
+  const orderedTurns = preferUserMessages
+    ? [
+        ...recentTurns.filter((msg) => msg.role === "user"),
+        ...recentTurns.filter((msg) => msg.role === "assistant")
+      ]
+    : recentTurns;
 
-  for (const msg of recentTurns) {
+  for (const msg of orderedTurns) {
     const content = typeof msg.content === "string" ? msg.content.trim() : "";
     if (!content) continue;
+    if (isWeakLanguageSignalMessage(content)) continue;
 
     const quick = detectQuickMessageLanguageHint(content);
     if (quick) return quick;
@@ -1494,6 +1501,140 @@ function hasExplicitExternalCapabilityAction(text: string): boolean {
     );
 
   return externalAction;
+}
+
+const EXTERNAL_GUIDANCE_ACTION_STEMS = [
+  "aiut",
+  "help",
+  "ayud",
+  "aider",
+  "helf",
+  "trov",
+  "find",
+  "buscar",
+  "trouver",
+  "such",
+  "search",
+  "cerc",
+  "fornir",
+  "provide",
+  "indicar",
+  "indicare",
+  "donner",
+  "geben",
+  "consigl",
+  "recommend",
+  "sugger",
+  "contatt",
+  "contact",
+  "kontakt",
+  "forward",
+  "inoltr",
+  "escal",
+  "submit"
+];
+
+function tokenMatchesAnyStem(token: string, stems: string[]): boolean {
+  return stems.some((stem) => token.startsWith(stem));
+}
+
+function looksLikeOutOfScopeExternalGuidance(reply: string): boolean {
+  const lower = foldContextText(reply);
+  const hasCapabilityFrame =
+    /\b(posso|possiamo|i can|we can|puedo|podemos|je peux|nous pouvons|ich kann|wir konnen|vuoi che|want me to|quieres que|voulez[-\s]?vous|mochtest du)\b/.test(
+      lower
+    );
+  const hasGuidanceAction =
+    /\b(aiut|help|ayud|aider|helf|trov|find|buscar|trouver|such|search|cerc|fornir|provide|indicar|indicare|donner|geben|consigl|recommend|sugger|contatt|contact|kontakt)\b/.test(
+      lower
+    );
+  const hasQuestion = /[?]/.test(reply);
+  const advisoryFrame =
+    /\b(consiglio|suggest|recommend|consigliamo|ti consiglio|je conseille|ich empfehle|te recomiendo)\b/.test(
+      lower
+    );
+  return hasCapabilityFrame && hasGuidanceAction && (hasQuestion || advisoryFrame);
+}
+
+function hasEvidenceForExternalGuidance(reply: string, evidenceText: string): boolean {
+  const evidence = String(evidenceText || "");
+  if (!evidence.trim()) return false;
+
+  const replyTokens = extractFollowUpIntentTokens(reply).filter((t) => t.length >= 4);
+  const anchorTokens = replyTokens.filter(
+    (token) =>
+      !CONTEXT_TOKEN_STOPWORDS.has(token) &&
+      !tokenMatchesAnyStem(token, EXTERNAL_GUIDANCE_ACTION_STEMS)
+  );
+  if (!anchorTokens.length) return false;
+
+  const evidenceTokens = new Set(extractContextQueryTokens(evidence));
+  if (evidenceTokens.size === 0) return false;
+
+  const evidenceActionTokens = extractFollowUpIntentTokens(evidence).filter(
+    (token) => token.length >= 4 && tokenMatchesAnyStem(token, EXTERNAL_GUIDANCE_ACTION_STEMS)
+  );
+  // External-guidance follow-ups are allowed only when evidence also contains
+  // explicit guidance/action language, not just topical nouns.
+  if (!evidenceActionTokens.length) return false;
+
+  let matched = 0;
+  for (const token of anchorTokens) {
+    if (evidenceTokens.has(token)) matched += 1;
+  }
+  const coverage = matched / Math.max(1, anchorTokens.length);
+  return matched >= 2 || (matched >= 1 && coverage >= 0.6);
+}
+
+function stripUnsupportedFollowUpQuestions(params: {
+  reply: string;
+  evidenceText: string;
+  useKnowledge: boolean;
+}): { reply: string; removedCount: number } {
+  const { reply, evidenceText, useKnowledge } = params;
+  if (!useKnowledge) return { reply, removedCount: 0 };
+  const segments = reply.split(/(?<=\?)/u);
+  if (segments.length <= 1) return { reply, removedCount: 0 };
+
+  let removedCount = 0;
+  const kept: string[] = [];
+
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    const questionIndex = segment.lastIndexOf("?");
+    const isQuestionSegment = questionIndex >= 0 && /[?]["')\]]*\s*$/u.test(trimmed);
+    if (!isQuestionSegment) {
+      kept.push(segment);
+      continue;
+    }
+
+    const lastDot = segment.lastIndexOf(".", questionIndex);
+    const lastBang = segment.lastIndexOf("!", questionIndex);
+    const lastNewline = segment.lastIndexOf("\n", questionIndex);
+    const splitIndex = Math.max(lastDot, lastBang, lastNewline);
+    const prefix = splitIndex >= 0 ? segment.slice(0, splitIndex + 1) : "";
+    const questionPart = splitIndex >= 0 ? segment.slice(splitIndex + 1) : segment;
+    const questionText = questionPart.trim();
+
+    const unsupported =
+      (hasExplicitExternalCapabilityAction(questionText) ||
+        looksLikeOutOfScopeExternalGuidance(questionText)) &&
+      !hasEvidenceForExternalGuidance(questionText, evidenceText);
+
+    if (unsupported) {
+      removedCount += 1;
+      if (prefix.trim()) kept.push(prefix);
+      continue;
+    }
+
+    kept.push(segment);
+  }
+
+  const rebuilt = kept.join("").replace(/[ \t]+\n/g, "\n").trim();
+  return {
+    reply: rebuilt || reply,
+    removedCount
+  };
 }
 
 function looksLikeCapabilityProposalCandidate(text: string): boolean {
@@ -4050,6 +4191,7 @@ export async function generateBotReplyForSlug(
   let knowledgePolicyModeForBudget: string | null = null;
   let knowledgeResponseStrategyForBudget: string | null = null;
   let knowledgeEvidenceText = "";
+  let knowledgeLowConfidence = false;
 
   if (useKnowledge) {
     if (!botConfig.knowledgeClientId) {
@@ -4082,11 +4224,17 @@ export async function generateBotReplyForSlug(
       : retrievalParams;
 
     const weakLanguageSignalInput = isWeakLanguageSignalMessage(message);
+    const historyLanguageForKnowledge = await detectHistoryLanguageHint({
+      historyMessages,
+      botId: botConfig.botId ?? null,
+      preferUserMessages: true
+    });
     const languageLockForKnowledge =
       (isSupportedLanguage(shoppingState?.language ?? null)
         ? shoppingState?.language
         : null) ??
-      (weakLanguageSignalInput ? shortFollowUpTargetLanguage : null);
+      shortFollowUpTargetLanguage ??
+      historyLanguageForKnowledge;
     const knowledgeLanguage = await detectKnowledgeLanguage({
       message: knowledgeInputMessage,
       lockedLanguage: languageLockForKnowledge ?? null,
@@ -4095,15 +4243,12 @@ export async function generateBotReplyForSlug(
       allowLLM: !(weakLanguageSignalInput && languageLockForKnowledge != null),
       defaultLanguage:
         languageLockForKnowledge ??
-        detectQuickMessageLanguageHint(knowledgeInputMessage) ??
+        historyLanguageForKnowledge ??
         "en"
     });
     const contactReplyLanguage: SupportedLanguage =
       isWeakLanguageSignalMessage(message)
-        ? (await detectHistoryLanguageHint({
-            historyMessages,
-            botId: botConfig.botId ?? null
-          })) ?? knowledgeLanguage
+        ? historyLanguageForKnowledge ?? knowledgeLanguage
         : knowledgeLanguage;
     const ftsLanguage = knowledgeLanguage;
 
@@ -4202,6 +4347,7 @@ export async function generateBotReplyForSlug(
       retrieval: retrievalMeta,
       resultsCount: results.length
     });
+    knowledgeLowConfidence = policy.lowConfidence;
     knowledgePolicyModeForBudget = policy.mode;
     knowledgeResponseStrategyForBudget = policy.responseStrategy;
 
@@ -4535,14 +4681,14 @@ export async function generateBotReplyForSlug(
       : null;
   const historyDetectedLanguage = await detectHistoryLanguageHint({
     historyMessages,
-    botId: botConfig.botId ?? null
+    botId: botConfig.botId ?? null,
+    preferUserMessages: true
   });
   const quickDetectedLanguage = detectQuickMessageLanguageHint(message);
   const effectiveDetectedLanguage = isWeakLanguageSignalMessage(message)
     ? shortFollowUpTargetLanguage ??
       historyDetectedLanguage ??
-      detectedReplyLanguage ??
-      quickDetectedLanguage
+      detectedReplyLanguage
     : detectedReplyLanguage ??
       quickDetectedLanguage ??
       shortFollowUpTargetLanguage ??
@@ -4799,6 +4945,39 @@ export async function generateBotReplyForSlug(
     });
     if (unsupportedCapability) {
       return buildCapabilityScopeFallback(fallbackLanguage);
+    }
+
+    if (useKnowledge) {
+      const sanitized = stripUnsupportedFollowUpQuestions({
+        reply: safeReply,
+        evidenceText: knowledgeEvidenceText,
+        useKnowledge
+      });
+      safeReply = sanitized.reply;
+    }
+
+    if (
+      useKnowledge &&
+      knowledgeLowConfidence &&
+      looksLikeOutOfScopeExternalGuidance(safeReply) &&
+      !hasEvidenceForExternalGuidance(safeReply, knowledgeEvidenceText)
+    ) {
+      const rewritten = await rewriteReplyUsingEvidenceOnly({
+        reply: safeReply,
+        userMessage: message,
+        evidenceText: knowledgeEvidenceText,
+        targetLanguage: fallbackLanguage,
+        usageContext: usageBase
+      });
+      if (rewritten) {
+        safeReply = rewritten;
+      }
+      if (
+        looksLikeOutOfScopeExternalGuidance(safeReply) &&
+        !hasEvidenceForExternalGuidance(safeReply, knowledgeEvidenceText)
+      ) {
+        return buildInsufficientEvidenceClaimReply(fallbackLanguage);
+      }
     }
 
     if (

@@ -43,6 +43,8 @@ export function buildKnowledgeSpecificPrompt(params: SpecificPromptParams): stri
     (strategyLine ? `- ${strategyLine}\n` : "") +
     "- Do NOT claim you can perform real-world actions (send emails, place calls, complete payments, or execute external workflows) unless such an action result is explicitly provided in this conversation.\n" +
     "- Do NOT offer to send files/documents by email (or to call/pay externally) unless that capability is explicitly available through a confirmed tool result in this conversation.\n" +
+    "- Do NOT recommend third-party entities, courses, authorities, providers, or external contacts unless they are explicitly named in the CONTEXT.\n" +
+    "- Do NOT ask follow-up questions that offer help beyond the available CONTEXT (e.g., finding external providers or contacts not present in CONTEXT).\n" +
     "- Speak like a real employee of the business (first-person plural when natural: we/our).\n" +
     "- Never mention internal retrieval mechanics (e.g., context, documents, knowledge base, FAQ, confidence) unless the user explicitly asks for sources.\n" +
     "- If the user asks for a source, cite it briefly and clearly.\n" +
