@@ -220,10 +220,9 @@ function buildDeterministicIntentPrecheck(
   const signals = analyzeFallbackSignals(trimmed);
   const hasQuestion = /[?¿]/.test(trimmed);
 
-  if (
-    OVERVIEW_META_RE.test(normalized) ||
-    (hasQuestion && !signals.hasConcreteSignal && signals.wordCount >= 2)
-  ) {
+  // High-precision only: classify as overview deterministically only when
+  // the user explicitly asks meta-capability/overview questions.
+  if (OVERVIEW_META_RE.test(normalized)) {
     return {
       intent: "overview",
       confidence: "medium",
@@ -245,7 +244,10 @@ function buildDeterministicIntentPrecheck(
     };
   }
 
-  if (signals.hasConcreteSignal || (hasQuestion && signals.wordCount >= 3)) {
+  // High-precision specific precheck:
+  // require concrete signals to avoid forcing specific/overview on vague
+  // short prompts that should be decided by classifier call.
+  if (signals.hasConcreteSignal && (hasQuestion || signals.wordCount >= 2)) {
     return {
       intent: "specific",
       confidence: "medium",

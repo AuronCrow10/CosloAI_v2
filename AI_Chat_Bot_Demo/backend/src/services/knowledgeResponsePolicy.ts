@@ -30,6 +30,10 @@ export function decideKnowledgePolicy(params: {
 }): KnowledgePolicyDecision {
   const { intent, retrieval, resultsCount } = params;
   const noAnswerRecommended = retrieval?.noAnswerRecommended === true;
+  const confidenceScore =
+    typeof retrieval?.confidence?.score === "number"
+      ? retrieval?.confidence?.score
+      : null;
   const lowConfidence =
     retrieval?.retrievalStatus === "low_confidence" ||
     retrieval?.confidence?.level === "low" ||
@@ -100,6 +104,23 @@ export function decideKnowledgePolicy(params: {
       noAnswerRecommended,
       reasonCodes: [...reasonCodes, "needs_clarification"]
     };
+  }
+
+  // Low-confidence + weak score tends to generate broad/non-grounded answers.
+  // In this case prefer clarify over free-form answer to keep quality stable.
+  if (lowConfidence && hasEvidence) {
+    const weakLowConfidence =
+      confidenceScore == null ? true : confidenceScore < 0.4;
+    if (weakLowConfidence) {
+      return {
+        mode: "specific",
+        responseStrategy: "clarify",
+        shouldCallAnswerLLM: true,
+        lowConfidence,
+        noAnswerRecommended,
+        reasonCodes: [...reasonCodes, "weak_low_confidence_clarify"]
+      };
+    }
   }
 
   return {
