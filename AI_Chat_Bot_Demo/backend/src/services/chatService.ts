@@ -2,7 +2,11 @@
 
 import { getBotConfigBySlug, BookingConfig } from "../bots/config";
 import { getOverviewCoverageQueries } from "../knowledge/overviewCoverageQueries";
-import { detectKnowledgeLanguage, detectKnowledgeLanguageHint } from "./knowledgeLanguage";
+import {
+  detectKnowledgeLanguage,
+  detectKnowledgeLanguageForLock,
+  detectKnowledgeLanguageHint
+} from "./knowledgeLanguage";
 import { getKnowledgeOverviewNoResultsMessage } from "./knowledgeFallbacks";
 import { runKnowledgeRetrieval } from "./knowledgeOrchestration";
 import { detectContactQuerySmart } from "../knowledge/contactQueryDetection";
@@ -397,6 +401,7 @@ const GENERIC_SHORT_REPLIES = new Set([
 ]);
 
 const PENDING_FOLLOW_UP_TTL_MS = 20 * 60 * 1000;
+const CONVERSATION_LANGUAGE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 type PendingFollowUpState = {
   previousQuestion: string;
@@ -408,6 +413,52 @@ type PendingFollowUpState = {
 };
 
 const pendingFollowUpStateStore = new Map<string, PendingFollowUpState>();
+
+type ConversationLanguageLockState = {
+  language: SupportedLanguage;
+  createdAt: number;
+  expiresAt: number;
+};
+
+const conversationLanguageLockStore = new Map<
+  string,
+  ConversationLanguageLockState
+>();
+
+function pruneConversationLanguageLockStore(now = Date.now()): void {
+  for (const [key, state] of conversationLanguageLockStore.entries()) {
+    if (!state || state.expiresAt <= now) {
+      conversationLanguageLockStore.delete(key);
+    }
+  }
+}
+
+function loadConversationLanguageLock(
+  key: string | null
+): SupportedLanguage | null {
+  if (!key) return null;
+  pruneConversationLanguageLockStore();
+  const state = conversationLanguageLockStore.get(key);
+  return state?.language ?? null;
+}
+
+function saveConversationLanguageLock(
+  key: string | null,
+  language: SupportedLanguage | null
+): void {
+  if (!key) return;
+  if (!language) {
+    conversationLanguageLockStore.delete(key);
+    return;
+  }
+  pruneConversationLanguageLockStore();
+  const now = Date.now();
+  conversationLanguageLockStore.set(key, {
+    language,
+    createdAt: now,
+    expiresAt: now + CONVERSATION_LANGUAGE_TTL_MS
+  });
+}
 
 function normalizeShortReplyToken(message: string): string {
   return foldContextText(message)
@@ -465,6 +516,14 @@ function assistantAskedForPersonalField(content: string | null): boolean {
   if (!content) return false;
   const folded = foldContextText(content);
   return /\b(name|nome|come ti chiami|email|telefono|phone|contatt|contact)\b/i.test(
+    folded
+  );
+}
+
+function assistantAskedForName(content: string | null): boolean {
+  if (!content) return false;
+  const folded = foldContextText(content);
+  return /\b(name|nome|come ti chiami|qual e il tuo nome|what is your name|tu nombre|como te llamas|wie heisst du|wie heißt du|dein name|comment tu t'appelles|votre nom)\b/i.test(
     folded
   );
 }
@@ -851,34 +910,6 @@ function buildShortAffirmativeFollowUpSystemHint(
     "- If data is missing, state exactly what is missing and ask one focused follow-up question.\n" +
     `Previous assistant question: ${context.previousQuestion}`
   );
-}
-
-async function detectShortFollowUpTargetLanguage(params: {
-  context: ShortAffirmativeFollowUpContext | null;
-  botId?: string | null;
-}): Promise<SupportedLanguage | null> {
-  const { context, botId } = params;
-  if (!context) return null;
-
-  const fromQuestion = detectQuickMessageLanguageHint(context.previousQuestion);
-  if (fromQuestion) return fromQuestion;
-
-  const heuristic = await detectKnowledgeLanguageHint({
-    message: context.previousQuestion,
-    lockedLanguage: null,
-    routedLanguage: null,
-    botId: botId ?? null,
-    allowLLM: false
-  });
-  if (heuristic) return heuristic;
-
-  return await detectKnowledgeLanguageHint({
-    message: context.previousQuestion,
-    lockedLanguage: null,
-    routedLanguage: null,
-    botId: botId ?? null,
-    allowLLM: true
-  });
 }
 
 function isSupportedLanguage(value: string | null | undefined): value is SupportedLanguage {
@@ -1541,7 +1572,7 @@ function tokenMatchesAnyStem(token: string, stems: string[]): boolean {
 function looksLikeOutOfScopeExternalGuidance(reply: string): boolean {
   const lower = foldContextText(reply);
   const hasCapabilityFrame =
-    /\b(posso|possiamo|i can|we can|puedo|podemos|je peux|nous pouvons|ich kann|wir konnen|vuoi che|want me to|quieres que|voulez[-\s]?vous|mochtest du)\b/.test(
+    /\b(posso|possiamo|i can|we can|puedo|podemos|je peux|nous pouvons|ich kann|wir konnen|vuoi che|want me to|quieres que|voulez[-\s]?vous|mochtest du|vuoi|would you like|quieres|voulez|mochtest)\b/.test(
       lower
     );
   const hasGuidanceAction =
@@ -1553,7 +1584,32 @@ function looksLikeOutOfScopeExternalGuidance(reply: string): boolean {
     /\b(consiglio|suggest|recommend|consigliamo|ti consiglio|je conseille|ich empfehle|te recomiendo)\b/.test(
       lower
     );
-  return hasCapabilityFrame && hasGuidanceAction && (hasQuestion || advisoryFrame);
+  return (
+    (hasCapabilityFrame || advisoryFrame) &&
+    hasGuidanceAction &&
+    (hasQuestion || advisoryFrame)
+  );
+}
+
+function detectExplicitLanguageSwitchCommand(
+  message: string
+): SupportedLanguage | null {
+  const folded = foldContextText(message);
+  const hasSwitchIntent =
+    /\b(rispondi|parla|scrivi|in\b|answer|reply|respond|speak|write|habla|responde|escribe|parlez|repondez|ecrivez|sprich|antworte|schreib)\b/.test(
+      folded
+    ) &&
+    /\b(italian|italiano|inglese|english|spanish|espanol|espanol|castellano|french|francese|francais|german|tedesco|deutsch)\b/.test(
+      folded
+    );
+
+  if (!hasSwitchIntent) return null;
+  if (/\b(italian|italiano)\b/.test(folded)) return "it";
+  if (/\b(english|inglese)\b/.test(folded)) return "en";
+  if (/\b(spanish|espanol|castellano)\b/.test(folded)) return "es";
+  if (/\b(french|francese|francais)\b/.test(folded)) return "fr";
+  if (/\b(german|tedesco|deutsch)\b/.test(folded)) return "de";
+  return null;
 }
 
 function hasEvidenceForExternalGuidance(reply: string, evidenceText: string): boolean {
@@ -1586,12 +1642,66 @@ function hasEvidenceForExternalGuidance(reply: string, evidenceText: string): bo
   return matched >= 2 || (matched >= 1 && coverage >= 0.6);
 }
 
+function looksLikeOfferFollowUpQuestion(questionText: string): boolean {
+  const lower = foldContextText(questionText);
+  const hasFollowUpShape =
+    /\b(vuoi|want|would you like|quieres|voulez|mochtest|preferisci|prefieres|preferez|bevorzugst)\b/.test(
+      lower
+    ) || /[?]/.test(questionText);
+  if (!hasFollowUpShape) return false;
+  return (
+    /\b(aiut|help|ayud|aider|helf|trov|find|buscar|trouver|such|search|cerc|fornir|provide|indicar|indicare|donner|geben|consigl|recommend|sugger|contatt|contact|kontakt)\b/.test(
+      lower
+    ) ||
+    /\b(dettagli|details|detalle|details|precisioni|specific|specifiche|specifico)\b/.test(
+      lower
+    )
+  );
+}
+
+function isFollowUpQuestionGrounded(params: {
+  questionText: string;
+  evidenceText: string;
+  userMessage: string;
+}): boolean {
+  const { questionText, evidenceText, userMessage } = params;
+  const evidence = String(evidenceText || "").trim();
+  if (!evidence) return false;
+
+  const questionTokens = extractFollowUpIntentTokens(questionText).filter(
+    (token) =>
+      token.length >= 4 &&
+      !CONTEXT_TOKEN_STOPWORDS.has(token) &&
+      !tokenMatchesAnyStem(token, EXTERNAL_GUIDANCE_ACTION_STEMS)
+  );
+  if (questionTokens.length === 0) return false;
+
+  const evidenceTokens = new Set(extractContextQueryTokens(evidence));
+  if (evidenceTokens.size === 0) return false;
+
+  const userTokens = new Set(extractContextQueryTokens(userMessage));
+
+  let evidenceMatches = 0;
+  let userMatches = 0;
+  for (const token of questionTokens) {
+    if (evidenceTokens.has(token)) evidenceMatches += 1;
+    if (userTokens.has(token)) userMatches += 1;
+  }
+
+  const evidenceCoverage = evidenceMatches / Math.max(1, questionTokens.length);
+  return (
+    (evidenceMatches >= 2 || (evidenceMatches >= 1 && evidenceCoverage >= 0.6)) &&
+    userMatches >= 1
+  );
+}
+
 function stripUnsupportedFollowUpQuestions(params: {
   reply: string;
   evidenceText: string;
   useKnowledge: boolean;
+  userMessage: string;
 }): { reply: string; removedCount: number } {
-  const { reply, evidenceText, useKnowledge } = params;
+  const { reply, evidenceText, useKnowledge, userMessage } = params;
   if (!useKnowledge) return { reply, removedCount: 0 };
   const segments = reply.split(/(?<=\?)/u);
   if (segments.length <= 1) return { reply, removedCount: 0 };
@@ -1617,9 +1727,15 @@ function stripUnsupportedFollowUpQuestions(params: {
     const questionText = questionPart.trim();
 
     const unsupported =
-      (hasExplicitExternalCapabilityAction(questionText) ||
+      ((hasExplicitExternalCapabilityAction(questionText) ||
         looksLikeOutOfScopeExternalGuidance(questionText)) &&
-      !hasEvidenceForExternalGuidance(questionText, evidenceText);
+        !hasEvidenceForExternalGuidance(questionText, evidenceText)) ||
+      (looksLikeOfferFollowUpQuestion(questionText) &&
+        !isFollowUpQuestionGrounded({
+          questionText,
+          evidenceText,
+          userMessage
+        }));
 
     if (unsupported) {
       removedCount += 1;
@@ -3983,6 +4099,20 @@ export async function generateBotReplyForSlug(
     conversationId: options.conversationId ?? null,
     sessionId: options.sessionId ?? null
   });
+  let conversationLanguageLock = loadConversationLanguageLock(followUpStateKey);
+  // Language policy: never switch mid-conversation.
+  // Set lock only when missing; once set, keep it fixed for the whole conversation/session.
+  if (!conversationLanguageLock) {
+    const detectedLockLanguage = await detectKnowledgeLanguageForLock({
+      message,
+      botId: botConfig.botId ?? null,
+      minConfidence: 0.85
+    });
+    if (detectedLockLanguage) {
+      conversationLanguageLock = detectedLockLanguage;
+      saveConversationLanguageLock(followUpStateKey, conversationLanguageLock);
+    }
+  }
   const normalizedIncomingShortReply = normalizeShortReplyToken(message);
   const isShortAffirmativeReply = isAffirmativeFollowUpSignal(
     normalizedIncomingShortReply
@@ -3995,6 +4125,7 @@ export async function generateBotReplyForSlug(
   const unsupportedAction = detectUnsupportedExternalAction(message);
   if (unsupportedAction) {
     const lang =
+      conversationLanguageLock ??
       (await detectKnowledgeLanguageHint({
         message,
         lockedLanguage: null,
@@ -4148,10 +4279,6 @@ export async function generateBotReplyForSlug(
   if (shortAffirmativeFollowUp?.source === "state") {
     clearPendingFollowUpState(followUpStateKey);
   }
-  const shortFollowUpTargetLanguage = await detectShortFollowUpTargetLanguage({
-    context: shortAffirmativeFollowUp,
-    botId: botConfig.botId ?? null
-  });
   const knowledgeInputMessage = shortAffirmativeFollowUp
     ? shortAffirmativeFollowUp.hasSpecificTopic
       ? shortAffirmativeFollowUp.resolvedKnowledgeQuery
@@ -4233,7 +4360,7 @@ export async function generateBotReplyForSlug(
       (isSupportedLanguage(shoppingState?.language ?? null)
         ? shoppingState?.language
         : null) ??
-      shortFollowUpTargetLanguage ??
+      conversationLanguageLock ??
       historyLanguageForKnowledge;
     const knowledgeLanguage = await detectKnowledgeLanguage({
       message: knowledgeInputMessage,
@@ -4666,7 +4793,7 @@ export async function generateBotReplyForSlug(
     (isSupportedLanguage(shoppingState?.language ?? null)
       ? shoppingState?.language
       : null) ??
-    shortFollowUpTargetLanguage ??
+    conversationLanguageLock ??
     null;
   const detectedReplyLanguage =
     !shopifyEnabled && knowledgeSource === "RAG"
@@ -4686,24 +4813,21 @@ export async function generateBotReplyForSlug(
   });
   const quickDetectedLanguage = detectQuickMessageLanguageHint(message);
   const effectiveDetectedLanguage = isWeakLanguageSignalMessage(message)
-    ? shortFollowUpTargetLanguage ??
+    ? conversationLanguageLock ??
       historyDetectedLanguage ??
       detectedReplyLanguage
     : detectedReplyLanguage ??
       quickDetectedLanguage ??
-      shortFollowUpTargetLanguage ??
+      conversationLanguageLock ??
       historyDetectedLanguage;
   const lockedLanguage = shoppingState?.language ?? null;
   const enforcedLanguage =
     (isSupportedLanguage(lockedLanguage) ? lockedLanguage : null) ??
-    shortFollowUpTargetLanguage ??
+    conversationLanguageLock ??
     effectiveDetectedLanguage;
   const strictLanguageHint = strictLanguageInstruction(enforcedLanguage);
   if (strictLanguageHint) {
-    const languageLockPrefix =
-      shortAffirmativeFollowUp && shortFollowUpTargetLanguage
-        ? "Short follow-up language lock: answer in the same language as the previous assistant question."
-        : "Language lock for this turn.";
+    const languageLockPrefix = "Language lock for this conversation.";
     const combinedLanguageHint = `${languageLockPrefix}\n${strictLanguageHint}`;
     messages.push({
       role: "system",
@@ -4750,9 +4874,12 @@ export async function generateBotReplyForSlug(
     bookingEnabled && shouldEnableBookingForTurn(message, shopifyEnabled);
 
   const policyTargetLanguage = resolvePolicyTargetLanguage({
-    lockedLanguage: shoppingState?.language ?? null,
+    lockedLanguage:
+      shoppingState?.language ??
+      conversationLanguageLock ??
+      null,
     routedLanguage: routerResult?.language ?? null,
-    followUpLanguage: shortFollowUpTargetLanguage,
+    followUpLanguage: conversationLanguageLock,
     detectedLanguage: effectiveDetectedLanguage,
     historyLanguage: historyDetectedLanguage,
     quickLanguage: detectQuickMessageLanguageHint(` ${message} `)
@@ -4763,7 +4890,7 @@ export async function generateBotReplyForSlug(
     if (!trimmed) return reply;
     const fallbackLanguage =
       policyTargetLanguage ??
-      shortFollowUpTargetLanguage ??
+      conversationLanguageLock ??
       detectQuickMessageLanguage(message);
     const strictFollowUpLanguage =
       !!shortAffirmativeFollowUp &&
@@ -4951,7 +5078,8 @@ export async function generateBotReplyForSlug(
       const sanitized = stripUnsupportedFollowUpQuestions({
         reply: safeReply,
         evidenceText: knowledgeEvidenceText,
-        useKnowledge
+        useKnowledge,
+        userMessage: shortAffirmativeFollowUp?.resolvedKnowledgeQuery ?? message
       });
       safeReply = sanitized.reply;
     }
@@ -5343,6 +5471,7 @@ export async function generateBotReplyForSlug(
   if (bookingEnabledForTurn && options.conversationId) {
     bookingDraft = await loadBookingDraft(options.conversationId);
     if (botBookingCfg) {
+      const lastAssistantMessage = getLastAssistantContent(historyMessages);
       const captureDebug =
         String(process.env.BOOKING_CAPTURE_DEBUG || "").toLowerCase() === "true";
 
@@ -5350,6 +5479,10 @@ export async function generateBotReplyForSlug(
         message,
         bookingCfg: botBookingCfg,
         existingDraft: bookingDraft,
+        context: {
+          bookingFlowActive: bookingFlowActiveForKnowledge,
+          assistantAskedForName: assistantAskedForName(lastAssistantMessage)
+        },
         debug: captureDebug,
         debugContext: {
           slug,

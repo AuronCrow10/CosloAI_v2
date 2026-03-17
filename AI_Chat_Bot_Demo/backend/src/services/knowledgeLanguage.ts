@@ -182,7 +182,8 @@ function detectLanguageWithHeuristics(message: string): KnowledgeLanguage | null
 
 async function detectLanguageWithLLM(
   message: string,
-  botId?: string | null
+  botId?: string | null,
+  minConfidence = LLM_CONFIDENCE_THRESHOLD
 ): Promise<KnowledgeLanguage | null> {
   const trimmed = message.trim();
   if (!trimmed) return null;
@@ -221,7 +222,7 @@ async function detectLanguageWithLLM(
       const lang = normalizeLanguageTag(parsed.language);
       const confidence =
         typeof parsed.confidence === "number" ? parsed.confidence : 0;
-      if (lang && confidence >= LLM_CONFIDENCE_THRESHOLD) {
+      if (lang && confidence >= minConfidence) {
         LLM_LANGUAGE_CACHE.set(cacheKey, lang);
         return lang;
       }
@@ -329,4 +330,13 @@ export async function detectKnowledgeLanguageHint(params: {
     ...params,
     defaultLanguage: null
   });
+}
+
+export async function detectKnowledgeLanguageForLock(params: {
+  message: string;
+  botId?: string | null;
+  minConfidence?: number;
+}): Promise<KnowledgeLanguage | null> {
+  const { message, botId, minConfidence = 0.85 } = params;
+  return detectLanguageWithLLM(message, botId, minConfidence);
 }
