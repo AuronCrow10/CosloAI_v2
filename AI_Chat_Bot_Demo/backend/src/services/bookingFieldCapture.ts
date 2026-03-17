@@ -7,6 +7,11 @@ export type BookingCaptureConfig = {
   services: Array<{ name: string; aliases?: string[] }>;
 };
 
+type BookingCaptureContext = {
+  bookingFlowActive?: boolean;
+  assistantAskedForName?: boolean;
+};
+
 type FieldCandidate = {
   field: "name" | "email" | "phone" | "service";
   value: string;
@@ -22,32 +27,6 @@ const ACK_PHRASE_PATTERNS = [
   /\b(yes|no|si|s[ií]|claro|cierto|d'accordo|de\s*acuerdo)\b/i,
   /\b(ciao|hello|hola|buenas|buongiorno|buonasera|good\s*morning|good\s*afternoon|good\s*evening)\b/i
 ];
-
-const ACK_WORDS = new Set(
-  [
-    "thanks",
-    "thank",
-    "you",
-    "grazie",
-    "gracias",
-    "ok",
-    "okay",
-    "okey",
-    "vale",
-    "perfetto",
-    "perfecto",
-    "listo",
-    "yes",
-    "no",
-    "si",
-    "ciao",
-    "hello",
-    "hola",
-    "buenas",
-    "buongiorno",
-    "buonasera"
-  ].map((w) => w.toLowerCase())
-);
 
 const NAME_PARTICLES = new Set(
   [
@@ -71,6 +50,86 @@ const NAME_PARTICLES = new Set(
     "mac",
     "st",
     "saint"
+  ].map((w) => w.toLowerCase())
+);
+
+const NAME_STOPWORDS = new Set(
+  [
+    // IT
+    "capisco",
+    "devo",
+    "sviluppare",
+    "voglio",
+    "vorrei",
+    "prenotare",
+    "consulenza",
+    "appuntamento",
+    "informazioni",
+    "aiuto",
+    "perche",
+    "quindi",
+    "allora",
+    "oggi",
+    "domani",
+    // EN
+    "understand",
+    "need",
+    "build",
+    "develop",
+    "want",
+    "would",
+    "like",
+    "book",
+    "appointment",
+    "consultation",
+    "information",
+    "help",
+    "today",
+    "tomorrow",
+    // ES
+    "entiendo",
+    "necesito",
+    "desarrollar",
+    "quiero",
+    "gustaria",
+    "reservar",
+    "cita",
+    "consulta",
+    "informacion",
+    "ayuda",
+    "hoy",
+    "manana",
+    // DE
+    "verstehe",
+    "brauche",
+    "entwickeln",
+    "mochte",
+    "buchen",
+    "termin",
+    "beratung",
+    "informationen",
+    "hilfe",
+    "heute",
+    "morgen",
+    // FR
+    "comprends",
+    "besoin",
+    "developper",
+    "veux",
+    "voudrais",
+    "reserver",
+    "rendez",
+    "vous",
+    "consultation",
+    "informations",
+    "aide",
+    "aujourd",
+    "demain",
+    // Generic technical terms often found in requests, not names
+    "saas",
+    "software",
+    "servizio",
+    "service"
   ].map((w) => w.toLowerCase())
 );
 
@@ -134,6 +193,50 @@ const MONTH_WORDS = [
   "diciembre"
 ];
 
+const NAME_CONNECTOR_RE =
+  /\b(?:and|e|y|und|et|ma|pero|but|because|perche|porque|weil|car|that|che|que)\b/i;
+
+const NAME_SPLIT_PUNCTUATION_RE = /[\n,.;:!?()\[\]{}<>]/;
+
+const NAME_EXPLICIT_CUE_PATTERNS: Array<{ pattern: RegExp; weak: boolean }> = [
+  // Italian
+  { pattern: /\bmi\s+chiamo\s+(.+)/i, weak: false },
+  { pattern: /\bil\s+mio\s+nome\s+e['’]?\s+(.+)/i, weak: false },
+  { pattern: /\bpuoi\s+chiamarmi\s+(.+)/i, weak: false },
+  { pattern: /\bchiamami\s+(.+)/i, weak: false },
+  { pattern: /^(?:io\s+)?sono\s+(.+)$/i, weak: true },
+
+  // English
+  { pattern: /\bmy\s+name\s+is\s+(.+)/i, weak: false },
+  { pattern: /\bi\s+am\s+called\s+(.+)/i, weak: false },
+  { pattern: /\byou\s+can\s+call\s+me\s+(.+)/i, weak: false },
+  { pattern: /\bcall\s+me\s+(.+)/i, weak: false },
+  { pattern: /\bthis\s+is\s+(.+)/i, weak: true },
+  { pattern: /^(?:i\s+am|i['’]m)\s+(.+)$/i, weak: true },
+
+  // Spanish
+  { pattern: /\bme\s+llamo\s+(.+)/i, weak: false },
+  { pattern: /\bmi\s+nombre\s+es\s+(.+)/i, weak: false },
+  { pattern: /\bpuedes\s+llamarme\s+(.+)/i, weak: false },
+  { pattern: /\bllamame\s+(.+)/i, weak: false },
+  { pattern: /^(?:yo\s+)?soy\s+(.+)$/i, weak: true },
+
+  // German
+  { pattern: /\bich\s+hei(?:ss|ß)e\s+(.+)/i, weak: false },
+  { pattern: /\bmein\s+name\s+ist\s+(.+)/i, weak: false },
+  { pattern: /\bnenn\s+mich\s+(.+)/i, weak: false },
+  { pattern: /\bnennen\s+sie\s+mich\s+(.+)/i, weak: false },
+  { pattern: /^(?:ich\s+bin)\s+(.+)$/i, weak: true },
+
+  // French
+  { pattern: /\bje\s+m['’]appelle\s+(.+)/i, weak: false },
+  { pattern: /\bmon\s+nom\s+est\s+(.+)/i, weak: false },
+  { pattern: /\btu\s+peux\s+m['’]appeler\s+(.+)/i, weak: false },
+  { pattern: /\bvous\s+pouvez\s+m['’]appeler\s+(.+)/i, weak: false },
+  { pattern: /\bappelez[-\s]?moi\s+(.+)/i, weak: false },
+  { pattern: /^(?:je\s+suis)\s+(.+)$/i, weak: true }
+];
+
 function foldDiacritics(input: string): string {
   return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
@@ -157,6 +260,98 @@ function containsDateOrTimeWords(normalized: string): boolean {
 
 function isAckPhrase(normalized: string): boolean {
   return ACK_PHRASE_PATTERNS.some((re) => re.test(normalized));
+}
+
+function extractNameTailFromCue(
+  text: string
+): { value: string; weakCue: boolean } | null {
+  for (const cue of NAME_EXPLICIT_CUE_PATTERNS) {
+    const match = text.match(cue.pattern);
+    if (!match || !match[1]) continue;
+    return { value: match[1].trim(), weakCue: cue.weak };
+  }
+  return null;
+}
+
+function cleanupNameTail(raw: string): string {
+  let value = raw
+    .trim()
+    .replace(/^[\"'“”‘’\-\s]+/, "")
+    .replace(/[\"'“”‘’]+$/g, "");
+
+  const punctuationMatch = value.search(NAME_SPLIT_PUNCTUATION_RE);
+  if (punctuationMatch >= 0) {
+    value = value.slice(0, punctuationMatch).trim();
+  }
+
+  const connectorMatch = value.search(NAME_CONNECTOR_RE);
+  if (connectorMatch > 0) {
+    value = value.slice(0, connectorMatch).trim();
+  }
+
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isLikelyNameValue(
+  input: string,
+  options?: {
+    fromExplicitCue?: boolean;
+    allowLowerCase?: boolean;
+    weakCue?: boolean;
+  }
+): boolean {
+  const fromExplicitCue = options?.fromExplicitCue === true;
+  const allowLowerCase = options?.allowLowerCase === true;
+  const weakCue = options?.weakCue === true;
+  const original = input.trim();
+
+  if (original.length < 2 || original.length > 60) return false;
+  if (/@/.test(original)) return false;
+  if (/\d/.test(original)) return false;
+  if (/https?:\/\//i.test(original) || /\bwww\./i.test(original)) return false;
+
+  // Name values should be short and sentence-free.
+  if (NAME_SPLIT_PUNCTUATION_RE.test(original)) return false;
+  if (/[^A-Za-z\u00C0-\u017F'’\-\s]/.test(original)) return false;
+
+  const normalized = normalizeText(original);
+  if (!normalized) return false;
+  if (isAckPhrase(normalized)) return false;
+  if (containsDateOrTimeWords(normalized)) return false;
+
+  const tokens = original.match(/[A-Za-z\u00C0-\u017F]+(?:['’\-][A-Za-z\u00C0-\u017F]+)*/g);
+  if (!tokens || tokens.length === 0) return false;
+
+  const maxTokenCount = fromExplicitCue ? 5 : 4;
+  if (tokens.length > maxTokenCount) return false;
+
+  const normalizedTokens = tokens.map((token) => normalizeText(token));
+  const nonParticles = normalizedTokens.filter((token) => !NAME_PARTICLES.has(token));
+  if (nonParticles.length === 0) return false;
+  if (nonParticles.some((token) => NAME_STOPWORDS.has(token))) return false;
+
+  const hasVeryShortToken = nonParticles.some((token) => token.length < 2);
+  if (hasVeryShortToken) return false;
+
+  if (!fromExplicitCue) {
+    const hasCapitalizedToken = tokens.some((token) => {
+      const first = token[0];
+      return first && first.toUpperCase() === first && first.toLowerCase() !== first;
+    });
+
+    if (!hasCapitalizedToken && !allowLowerCase) return false;
+  } else if (weakCue) {
+    const hasCapitalizedToken = tokens.some((token) => {
+      const first = token[0];
+      return first && first.toUpperCase() === first && first.toLowerCase() !== first;
+    });
+    // Generic cues like "I am"/"sono"/"je suis" are ambiguous:
+    // require a stronger name shape to avoid sentence captures.
+    if (!hasCapitalizedToken) return false;
+    if (tokens.length > 3) return false;
+  }
+
+  return true;
 }
 
 function extractEmail(text: string): FieldCandidate | null {
@@ -287,62 +482,45 @@ function extractService(
   };
 }
 
-function extractName(text: string): FieldCandidate | null {
+function extractName(
+  text: string,
+  options?: { allowPlainCapture?: boolean; allowLowerCasePlain?: boolean }
+): FieldCandidate | null {
   const original = text.trim();
-  if (original.length < 2 || original.length > 60) return null;
 
-  if (/@/.test(original)) return null;
-  if (/[0-9]/.test(original)) return null;
-
-  const normalized = normalizeText(original);
-  if (!normalized) return null;
-
-  if (isAckPhrase(normalized)) return null;
-  if (containsDateOrTimeWords(normalized)) return null;
-
-  const tokens = original.match(/[A-Za-z\u00C0-\u017F'’]+/g);
-  if (!tokens || tokens.length === 0) return null;
-
-  const normalizedTokens = tokens.map((t) => normalizeText(t));
-  const nonParticles = normalizedTokens.filter((t) => !NAME_PARTICLES.has(t));
-  if (nonParticles.length === 0) return null;
-
-  const allAckTokens = normalizedTokens.every((t) => ACK_WORDS.has(t));
-  if (allAckTokens) return null;
-
-  const ackTokenCount = normalizedTokens.filter((t) => ACK_WORDS.has(t)).length;
-  if (ackTokenCount >= Math.ceil(normalizedTokens.length / 2)) return null;
-
-  const capitalizedCount = tokens.filter((t) => {
-    const first = t[0];
-    return first && first.toUpperCase() === first && first.toLowerCase() !== first;
-  }).length;
-
-  const avgLen =
-    nonParticles.reduce((sum, t) => sum + t.length, 0) / nonParticles.length;
-  const hasShortToken = nonParticles.some((t) => t.length < 2);
-
-  let score = 0;
-  if (capitalizedCount > 0) score += 2;
-  if (nonParticles.length >= 2) score += 1;
-  if (avgLen >= 3) score += 1;
-  if (!hasShortToken) score += 1;
-
-  if (score >= 4) {
-    return {
-      field: "name",
-      value: original,
-      confidence: "high",
-      reason: "name_score_high"
-    };
+  const fromExplicitCue = extractNameTailFromCue(original);
+  if (fromExplicitCue) {
+    const cleaned = cleanupNameTail(fromExplicitCue.value);
+    if (
+      isLikelyNameValue(cleaned, {
+        fromExplicitCue: true,
+        allowLowerCase: true,
+        weakCue: fromExplicitCue.weakCue
+      })
+    ) {
+      return {
+        field: "name",
+        value: cleaned,
+        confidence: "high",
+        reason: "name_explicit_self_identification"
+      };
+    }
   }
 
-  if (score >= 2) {
+  if (!options?.allowPlainCapture) return null;
+
+  const cleanedPlain = cleanupNameTail(original);
+  if (
+    isLikelyNameValue(cleanedPlain, {
+      fromExplicitCue: false,
+      allowLowerCase: options.allowLowerCasePlain === true
+    })
+  ) {
     return {
       field: "name",
-      value: original,
-      confidence: "medium",
-      reason: "name_score_medium"
+      value: cleanedPlain,
+      confidence: "high",
+      reason: "name_plain_shape"
     };
   }
 
@@ -363,7 +541,9 @@ function hasExplicitCue(field: FieldCandidate["field"], normalized: string): boo
       normalized
     );
   }
-  return /\b(mi chiamo|sono|my name is|this is|me llamo|soy)\b/.test(normalized);
+  return /\b(mi chiamo|il mio nome e|my name is|i am called|call me|this is|me llamo|mi nombre es|ich heisse|ich hei(?:ss|ß|s)e|mein name ist|je m'appelle|mon nom est)\b/.test(
+    normalized
+  );
 }
 
 function getMissingFields(
@@ -390,15 +570,21 @@ export function detectBookingFieldUpdates(params: {
   message: string;
   bookingCfg: BookingCaptureConfig;
   existingDraft: BookingDraft | null | undefined;
+  context?: BookingCaptureContext;
   debug?: boolean;
   debugContext?: { slug?: string; conversationId?: string };
 }): Record<string, string> {
-  const { message, bookingCfg, existingDraft, debug, debugContext } = params;
+  const { message, bookingCfg, existingDraft, context, debug, debugContext } = params;
   const trimmed = (message || "").trim();
   if (!trimmed) return {};
   if (trimmed.length > 200) return {};
 
   const normalized = normalizeText(trimmed);
+  const missing = getMissingFields(existingDraft, bookingCfg);
+  const nameMissing = missing.includes("name");
+  const allowPlainNameCapture =
+    context?.assistantAskedForName === true ||
+    (context?.bookingFlowActive === true && nameMissing && missing.length === 1);
 
   const candidates: FieldCandidate[] = [];
   const email = extractEmail(trimmed);
@@ -407,13 +593,15 @@ export function detectBookingFieldUpdates(params: {
   if (phone) candidates.push(phone);
   const service = extractService(trimmed, bookingCfg.services);
   if (service) candidates.push(service);
-  const name = extractName(trimmed);
+  const name = extractName(trimmed, {
+    allowPlainCapture: allowPlainNameCapture,
+    allowLowerCasePlain: context?.assistantAskedForName === true
+  });
   if (name) candidates.push(name);
 
   if (candidates.length === 0) return {};
 
   const updates: Record<string, string> = {};
-  const missing = getMissingFields(existingDraft, bookingCfg);
 
   for (const candidate of candidates) {
     const alreadySet = (existingDraft as any)?.[candidate.field];
@@ -447,6 +635,9 @@ export function detectBookingFieldUpdates(params: {
     const expected = missing[0];
     const expectedCandidate = candidates.find((c) => c.field === expected);
     if (expectedCandidate && expectedCandidate.confidence === "medium") {
+      if (expected === "name" && context?.assistantAskedForName !== true) {
+        return updates;
+      }
       updates[expected] = expectedCandidate.value;
       if (debug) {
         console.log("📘 [BookingCapture] updates (fallback)", {
