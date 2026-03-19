@@ -370,9 +370,9 @@
       // niente hint su schermi piccolissimi
       if (window.innerWidth < 480) return;
 
-      // primo hint dopo 8s, poi ogni 20s
-      window.setTimeout(showHint, 8000);
-      hintIntervalId = window.setInterval(showHint, 20000);
+      // primo hint dopo 5s, poi ogni 10s
+      window.setTimeout(showHint, 5000);
+      hintIntervalId = window.setInterval(showHint, 10000);
     }
 
     function applyWidgetRouteVisibility() {
