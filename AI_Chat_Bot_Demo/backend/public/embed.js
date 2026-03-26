@@ -45,6 +45,30 @@
     window.addEventListener("hashchange", emitRouteChange);
   }
 
+  function normalizeCssSize(value, fallback) {
+    if (!value) return fallback;
+    var trimmed = String(value).trim();
+    if (!trimmed) return fallback;
+
+    // Accept plain numbers as px for easier script usage (e.g. "120")
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      return trimmed + "px";
+    }
+
+    // Accept common CSS length units
+    if (/^\d+(\.\d+)?(px|rem|em|vw|vh|vmin|vmax|%)$/i.test(trimmed)) {
+      return trimmed;
+    }
+
+    console.warn(
+      "[Bot Widget] Invalid icon size value:",
+      trimmed,
+      "-> fallback:",
+      fallback
+    );
+    return fallback;
+  }
+
   function init() {
     if (window.self !== window.top) {
       // Prevent embedding the launcher inside the widget iframe
@@ -60,6 +84,15 @@
     var iconUrl = script.getAttribute("data-bot-icon");
     var defaultIconUrl = "https://i.ibb.co/cczVssVz/test.gif";
     var position = script.getAttribute("data-bot-position") || "bottom-right";
+    var defaultIconSize = "100px";
+    var iconSizeAttr =
+      script.getAttribute("data-bot-icon-size") ||
+      script.getAttribute("data-bot-size");
+    var iconWidthAttr = script.getAttribute("data-bot-icon-width");
+    var iconHeightAttr = script.getAttribute("data-bot-icon-height");
+    var iconSize = normalizeCssSize(iconSizeAttr, defaultIconSize);
+    var iconWidth = normalizeCssSize(iconWidthAttr, iconSize);
+    var iconHeight = normalizeCssSize(iconHeightAttr, iconSize);
 
     // NEW: optional language parameter (default: "en")
     var lang = script.getAttribute("data-bot-lang") || "en";
@@ -180,8 +213,8 @@
       img.alt = "Chat bot";
 
       // Size the image directly (button stays transparent)
-      img.style.width = "100px";
-      img.style.height = "100px";
+      img.style.width = iconWidth;
+      img.style.height = iconHeight;
       img.style.objectFit = "contain";
 
       // keep it nicely centered, no extra clipping
