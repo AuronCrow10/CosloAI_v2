@@ -30,8 +30,6 @@ export async function deleteBotsGraph(
   await tx.teamInviteBot.deleteMany({ where: byBot });
   await tx.metaLead.deleteMany({ where: byBot });
   await tx.metaLeadAutomation.deleteMany({ where: byBot });
-  await tx.googleCalendarConnection.deleteMany({ where: byBot });
-  await tx.googleCalendarConnectSession.deleteMany({ where: byBot });
   await tx.metaConnectSession.deleteMany({ where: byBot });
   await tx.whatsappConnectSession.deleteMany({ where: byBot });
   await tx.botChannel.deleteMany({ where: byBot });
