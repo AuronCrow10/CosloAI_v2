@@ -65,8 +65,22 @@ function normalize(text: string): string {
   return text.trim().toLowerCase();
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cueMatches(text: string, cue: string): boolean {
+  const trimmedCue = cue.trim();
+  if (!trimmedCue) return false;
+  const pattern = new RegExp(
+    `(^|[^\\p{L}\\p{N}_])${escapeRegex(trimmedCue)}($|[^\\p{L}\\p{N}_])`,
+    "iu"
+  );
+  return pattern.test(text);
+}
+
 function hasAny(text: string, cues: string[]): boolean {
-  return cues.some((cue) => text.includes(cue));
+  return cues.some((cue) => cueMatches(text, cue));
 }
 
 function stripCodeFences(value: string): string {

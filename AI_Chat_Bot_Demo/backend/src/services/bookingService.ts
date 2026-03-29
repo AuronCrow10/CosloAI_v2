@@ -1919,6 +1919,47 @@ type SendBookingConfirmationEmailResult = {
   reason?: string;
 };
 
+const CORE_BOOKING_TEMPLATE_FIELDS = new Set([
+  "name",
+  "email",
+  "phone",
+  "service",
+  "datetime"
+]);
+
+function coerceTemplateValue(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildAdditionalTemplateFields(args: BookAppointmentArgs): Record<string, string> {
+  const extra: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(args || {})) {
+    const key = String(rawKey || "").trim();
+    if (!key || CORE_BOOKING_TEMPLATE_FIELDS.has(key)) continue;
+    const value = coerceTemplateValue(rawValue);
+    extra[key] = value;
+    extra[`booking.${key}`] = value;
+  }
+  return extra;
+}
+
+function buildHtmlTemplateContext(
+  contextText: Record<string, string>
+): Record<string, string> {
+  const contextHtml: Record<string, string> = {};
+  for (const [key, value] of Object.entries(contextText)) {
+    contextHtml[key] = escapeHtml(value);
+  }
+  return contextHtml;
+}
+
 async function sendBookingConfirmationEmail(params: {
   botId: string | null;
   botName: string;
@@ -1929,7 +1970,7 @@ async function sendBookingConfirmationEmail(params: {
   end: DateTime;
   addToCalendarUrl: string;
 }): Promise<SendBookingConfirmationEmailResult> {
-  const { botId, botName, botDomain, bookingCfg, args, start, addToCalendarUrl } =
+  const { botId, botName, botDomain, bookingCfg, args, start, end, addToCalendarUrl } =
     params;
 
   const brandName = botName || "our business";
@@ -1937,8 +1978,10 @@ async function sendBookingConfirmationEmail(params: {
 
   const formattedDate = start.toFormat("cccc, dd LLLL yyyy");
   const formattedTime = start.toFormat("HH:mm");
+  const formattedStart = start.toFormat("cccc, dd LLLL yyyy HH:mm");
+  const formattedEnd = end.toFormat("cccc, dd LLLL yyyy HH:mm");
 
-  const contextText: Record<string, string> = {
+  const baseContextText: Record<string, string> = {
     name: args.name,
     email: args.email,
     phone: args.phone || "",
@@ -1948,21 +1991,28 @@ async function sendBookingConfirmationEmail(params: {
     timezone: bookingCfg.timeZone,
     brandName,
     brandUrl,
-    calendarUrl: addToCalendarUrl
+    calendarUrl: addToCalendarUrl,
+    "client.name": args.name,
+    "client.email": args.email,
+    "client.phone": args.phone || "",
+    "booking.start": formattedStart,
+    "booking.end": formattedEnd,
+    "booking.date": formattedDate,
+    "booking.time": formattedTime,
+    "booking.timezone": bookingCfg.timeZone,
+    "booking.service": args.service,
+    "booking.calendarUrl": addToCalendarUrl,
+    "booking.reason": "",
+    "bot.name": brandName,
+    "bot.url": brandUrl
   };
 
-  const contextHtml: Record<string, string> = {
-    name: escapeHtml(args.name),
-    email: escapeHtml(args.email),
-    phone: escapeHtml(args.phone || ""),
-    service: escapeHtml(args.service),
-    date: escapeHtml(formattedDate),
-    time: escapeHtml(formattedTime),
-    timezone: escapeHtml(bookingCfg.timeZone),
-    brandName: escapeHtml(brandName),
-    brandUrl: escapeHtml(brandUrl),
-    calendarUrl: escapeHtml(addToCalendarUrl)
+  const contextText: Record<string, string> = {
+    ...baseContextText,
+    ...buildAdditionalTemplateFields(args)
   };
+
+  const contextHtml = buildHtmlTemplateContext(contextText);
 
   const subjectTemplate =
     bookingCfg.confirmationSubjectTemplate ||
@@ -2037,15 +2087,18 @@ async function sendBookingCancellationEmail(params: {
   end: DateTime;
   reason?: string;
 }): Promise<SendBookingCancellationEmailResult> {
-  const { botId, botName, botDomain, bookingCfg, args, start, reason } = params;
+  const { botId, botName, botDomain, bookingCfg, args, start, end, reason } = params;
 
   const brandName = botName || "our business";
   const brandUrl = botDomain || "";
+  const reasonText = reason || "";
 
   const formattedDate = start.toFormat("cccc, dd LLLL yyyy");
   const formattedTime = start.toFormat("HH:mm");
+  const formattedStart = start.toFormat("cccc, dd LLLL yyyy HH:mm");
+  const formattedEnd = end.toFormat("cccc, dd LLLL yyyy HH:mm");
 
-  const contextText: Record<string, string> = {
+  const baseContextText: Record<string, string> = {
     name: args.name,
     email: args.email,
     phone: args.phone || "",
@@ -2055,21 +2108,28 @@ async function sendBookingCancellationEmail(params: {
     timezone: bookingCfg.timeZone,
     brandName,
     brandUrl,
-    reason: reason || ""
+    reason: reasonText,
+    "client.name": args.name,
+    "client.email": args.email,
+    "client.phone": args.phone || "",
+    "booking.start": formattedStart,
+    "booking.end": formattedEnd,
+    "booking.date": formattedDate,
+    "booking.time": formattedTime,
+    "booking.timezone": bookingCfg.timeZone,
+    "booking.service": args.service,
+    "booking.calendarUrl": "",
+    "booking.reason": reasonText,
+    "bot.name": brandName,
+    "bot.url": brandUrl
   };
 
-  const contextHtml: Record<string, string> = {
-    name: escapeHtml(args.name),
-    email: escapeHtml(args.email),
-    phone: escapeHtml(args.phone || ""),
-    service: escapeHtml(args.service),
-    date: escapeHtml(formattedDate),
-    time: escapeHtml(formattedTime),
-    timezone: escapeHtml(bookingCfg.timeZone),
-    brandName: escapeHtml(brandName),
-    brandUrl: escapeHtml(brandUrl),
-    reason: escapeHtml(reason || "")
+  const contextText: Record<string, string> = {
+    ...baseContextText,
+    ...buildAdditionalTemplateFields(args)
   };
+
+  const contextHtml = buildHtmlTemplateContext(contextText);
 
   const subjectTemplate =
     bookingCfg.cancellationSubjectTemplate ||
@@ -2128,7 +2188,8 @@ function renderTemplate(
   template: string,
   context: Record<string, string>
 ): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_match, key) => {
+  return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, rawKey) => {
+    const key = String(rawKey || "").trim();
     const value = context[key] ?? "";
     return value;
   });

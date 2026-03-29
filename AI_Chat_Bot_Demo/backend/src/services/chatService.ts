@@ -40,6 +40,11 @@ import {
   CancelAppointmentArgs,
   BookingResult
 } from "./bookingService";
+import {
+  getRestaurantChatContext,
+  handleRestaurantCancelFromChat,
+  handleRestaurantCreateFromChat
+} from "./restaurantBookingService";
 import { getConversationHistoryAsChatMessages } from "./conversationService";
 import {
   getConversationMemorySummary,
@@ -2697,6 +2702,117 @@ function buildCancelBookingTool(): ChatTool {
   };
 }
 
+type RestaurantChatToolConfig = {
+  timeZone: string;
+  askSmokingPreference: boolean;
+};
+
+function buildRestaurantCreateReservationTool(
+  cfg: RestaurantChatToolConfig
+): ChatTool {
+  const properties: Record<string, any> = {
+    name: {
+      type: "string",
+      description: "Reservation name."
+    },
+    email: {
+      type: "string",
+      description: "Customer email."
+    },
+    phone: {
+      type: "string",
+      description: "Customer phone number."
+    },
+    partySize: {
+      type: "number",
+      description: "Number of guests."
+    },
+    datetime: {
+      type: "string",
+      description: `Requested reservation datetime in ISO 8601 local to ${cfg.timeZone} (example: 2026-03-18T20:30:00).`
+    },
+    notes: {
+      type: "string",
+      description: "Optional customer notes."
+    }
+  };
+
+  if (cfg.askSmokingPreference) {
+    properties.smokingPreference = {
+      type: "string",
+      enum: ["smoking", "non_smoking", "no_preference"],
+      description:
+        "Smoking preference. Ask only when needed and only if options differ."
+    };
+  }
+
+  return {
+    type: "function",
+    function: {
+      name: "create_restaurant_reservation",
+      description: "Create a restaurant table reservation.",
+      parameters: {
+        type: "object",
+        properties,
+        required: ["name", "email", "phone", "partySize", "datetime"]
+      }
+    }
+  };
+}
+
+function buildRestaurantCancelReservationTool(): ChatTool {
+  return {
+    type: "function",
+    function: {
+      name: "cancel_restaurant_reservation",
+      description:
+        "Cancel an existing restaurant reservation by email and datetime.",
+      parameters: {
+        type: "object",
+        properties: {
+          email: {
+            type: "string",
+            description: "Customer email used for the reservation."
+          },
+          datetime: {
+            type: "string",
+            description:
+              "Original reservation datetime in ISO 8601 local to the restaurant time zone."
+          },
+          reason: {
+            type: "string",
+            description: "Optional cancellation reason."
+          }
+        },
+        required: ["email", "datetime"]
+      }
+    }
+  };
+}
+
+function getRestaurantBookingInstructions(
+  cfg: RestaurantChatToolConfig,
+  nowIso: string
+): string {
+  const smokingHint = cfg.askSmokingPreference
+    ? "- Ask smoking preference only once and only if the user did not already provide it.\n"
+    : "- Do not ask about smoking preference.\n";
+
+  return (
+    `Restaurant booking mode is active. Time zone: ${cfg.timeZone}.\n` +
+    `Server time (ISO 8601): ${nowIso}.\n` +
+    "Use this as the reference for words like now, today, tomorrow, and in X days.\n" +
+    "Collect these fields naturally: name, email, phone, party size, datetime.\n" +
+    smokingHint +
+    "- Convert relative date expressions (e.g. domani, tomorrow, stasera) into an explicit ISO datetime before calling tools.\n" +
+    "- Never use guessed or old years for relative dates. Relative dates must be computed from the server time above.\n" +
+    "Use tool `create_restaurant_reservation` only when all required fields are known.\n" +
+    "If the user wants cancellation, use `cancel_restaurant_reservation`.\n" +
+    "Do not claim confirmation before tool success.\n" +
+    "If the tool fails with threshold/policy errors, politely ask the customer to contact the restaurant directly.\n"
+  );
+}
+
 function buildShopifySearchTool(): ChatTool {
   return {
     type: "function",
@@ -3810,7 +3926,7 @@ function isBookingFlowActiveForTurn(params: {
 /**
  * Decide whether we really need to hit the knowledge backend for this turn.
  */
-function shouldUseKnowledgeForTurn(
+export function shouldUseKnowledgeForTurn(
   message: string,
   historyMessages: ChatMessage[],
   options?: { bookingFlowActive?: boolean }
@@ -3833,6 +3949,9 @@ function shouldUseKnowledgeForTurn(
       lastAssistantAskedQuestion &&
       isAffirmativeFollowUpSignal(normalizedReply)
     ) {
+      if (bookingFlowActive || lastAssistantAskedPersonalField) {
+        return false;
+      }
       return true;
     }
     return false;
@@ -3903,11 +4022,20 @@ function shouldUseKnowledgeForTurn(
       !looksLikeDateWord &&
       !looksLikeTime;
 
+    const looksLikeBookingProgressToken =
+      /\b(ok|okay|va bene|confermo|confermata|si|sì|yes|non fumatori|fumatori|no preference|no preferenze|nessuna preferenza)\b/i.test(
+        folded
+      );
+
     if (
       looksLikeEmail ||
       looksLikePhone ||
       looksLikeDateWord ||
       looksLikeTime ||
+      (bookingFlowActive &&
+        looksLikeBookingProgressToken &&
+        !hasDirectiveVerb &&
+        !hasKnowledgeQueryToken) ||
       (bookingFlowActive && looksLikeName)
     ) {
       return false;
@@ -4262,8 +4390,25 @@ export async function generateBotReplyForSlug(
   }
 
   // Booking config for chat (normalized)
-  const botBookingCfg = normalizeBookingConfigForChat(botConfig.booking);
-  const bookingEnabled = !!botBookingCfg;
+  const bookingSystemType = botConfig.bookingSystemType ?? "GENERIC";
+  const restaurantBookingMode = bookingSystemType === "RESTAURANT";
+  const botBookingCfg = restaurantBookingMode
+    ? null
+    : normalizeBookingConfigForChat(botConfig.booking);
+  let restaurantChatToolCfg: RestaurantChatToolConfig | null = null;
+  if (restaurantBookingMode && botConfig.botId) {
+    const restaurantContext = await getRestaurantChatContext(botConfig.botId);
+    if (restaurantContext.enabled) {
+      restaurantChatToolCfg = {
+        timeZone: restaurantContext.timeZone,
+        askSmokingPreference: restaurantContext.shouldAskSmokingPreference
+      };
+    }
+  }
+
+  const bookingEnabled = restaurantBookingMode
+    ? !!restaurantChatToolCfg
+    : !!botBookingCfg;
   const bookingFlowActiveForKnowledge = isBookingFlowActiveForTurn({
     message,
     historyMessages,
@@ -4399,7 +4544,9 @@ export async function generateBotReplyForSlug(
     const shouldClarifyContactIntent =
       contactDetection.ambiguous === true && !contactDetection.isContactQuery;
     const shouldRouteToContactRetrieval =
-      contactDetection.isContactQuery && !shouldClarifyContactIntent;
+      !bookingFlowActiveForKnowledge &&
+      contactDetection.isContactQuery &&
+      !shouldClarifyContactIntent;
 
     const retrievalRun = shouldRouteToContactRetrieval
       ? {
@@ -4885,9 +5032,19 @@ export async function generateBotReplyForSlug(
     quickLanguage: detectQuickMessageLanguageHint(` ${message} `)
   });
 
-  const applyGenericReplyPolicy = async (reply: string): Promise<string> => {
+  const applyGenericReplyPolicy = async (
+    reply: string,
+    options?: { skipKnowledgeGroundingChecks?: boolean }
+  ): Promise<string> => {
     const trimmed = String(reply || "").trim();
     if (!trimmed) return reply;
+    const skipKnowledgeGroundingChecks =
+      options?.skipKnowledgeGroundingChecks === true;
+    const knowledgeGroundingEnabled =
+      useKnowledge && !skipKnowledgeGroundingChecks;
+    const followUpGroundingEnabled =
+      !!shortAffirmativeFollowUp?.hasSpecificTopic &&
+      !skipKnowledgeGroundingChecks;
     const fallbackLanguage =
       policyTargetLanguage ??
       conversationLanguageLock ??
@@ -4964,16 +5121,15 @@ export async function generateBotReplyForSlug(
     }
 
     if (
-      shortAffirmativeFollowUp &&
-      shortAffirmativeFollowUp.hasSpecificTopic &&
+      followUpGroundingEnabled &&
       (
         looksLikeShortAffirmativeDeflection(safeReply) ||
-        !isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp)
+        !isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp!)
       )
     ) {
       const repaired = await repairShortAffirmativeFollowUpReply({
         reply: safeReply,
-        context: shortAffirmativeFollowUp,
+        context: shortAffirmativeFollowUp!,
         evidenceText: knowledgeEvidenceText,
         targetLanguage: fallbackLanguage,
         usageContext: usageBase
@@ -4984,13 +5140,12 @@ export async function generateBotReplyForSlug(
     }
 
     if (
-      shortAffirmativeFollowUp &&
-      shortAffirmativeFollowUp.hasSpecificTopic &&
-      !isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp)
+      followUpGroundingEnabled &&
+      !isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp!)
     ) {
       const groundedFollowUp = await rewriteReplyUsingEvidenceOnly({
         reply: safeReply,
-        userMessage: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        userMessage: shortAffirmativeFollowUp!.resolvedKnowledgeQuery,
         evidenceText: knowledgeEvidenceText,
         targetLanguage: fallbackLanguage,
         usageContext: usageBase
@@ -4998,19 +5153,18 @@ export async function generateBotReplyForSlug(
       if (groundedFollowUp) {
         safeReply = groundedFollowUp;
       }
-      if (!isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp)) {
+      if (!isConcreteFollowUpResolution(safeReply, shortAffirmativeFollowUp!)) {
         return buildInsufficientEvidenceClaimReply(fallbackLanguage);
       }
     }
 
     if (
-      shortAffirmativeFollowUp &&
-      shortAffirmativeFollowUp.hasSpecificTopic &&
+      followUpGroundingEnabled &&
       hasUnsupportedActionRefusal(safeReply)
     ) {
       const repairedRefusal = await rewriteReplyUsingEvidenceOnly({
         reply: safeReply,
-        userMessage: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        userMessage: shortAffirmativeFollowUp!.resolvedKnowledgeQuery,
         evidenceText: knowledgeEvidenceText,
         targetLanguage: fallbackLanguage,
         usageContext: usageBase
@@ -5020,16 +5174,16 @@ export async function generateBotReplyForSlug(
       }
     }
 
-    if (shortAffirmativeFollowUp?.hasSpecificTopic) {
+    if (followUpGroundingEnabled) {
       safeReply = alignReplyUrlWithEvidence({
         reply: safeReply,
-        resolvedQuery: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        resolvedQuery: shortAffirmativeFollowUp!.resolvedKnowledgeQuery,
         evidenceText: knowledgeEvidenceText,
         lang: fallbackLanguage
       });
     }
 
-    if (useKnowledge && queryLooksLikeDirectLinkRequest(message)) {
+    if (knowledgeGroundingEnabled && queryLooksLikeDirectLinkRequest(message)) {
       safeReply = alignReplyUrlWithEvidence({
         reply: safeReply,
         resolvedQuery: message,
@@ -5074,18 +5228,18 @@ export async function generateBotReplyForSlug(
       return buildCapabilityScopeFallback(fallbackLanguage);
     }
 
-    if (useKnowledge) {
+    if (knowledgeGroundingEnabled) {
       const sanitized = stripUnsupportedFollowUpQuestions({
         reply: safeReply,
         evidenceText: knowledgeEvidenceText,
-        useKnowledge,
+        useKnowledge: knowledgeGroundingEnabled,
         userMessage: shortAffirmativeFollowUp?.resolvedKnowledgeQuery ?? message
       });
       safeReply = sanitized.reply;
     }
 
     if (
-      useKnowledge &&
+      knowledgeGroundingEnabled &&
       knowledgeLowConfidence &&
       looksLikeOutOfScopeExternalGuidance(safeReply) &&
       !hasEvidenceForExternalGuidance(safeReply, knowledgeEvidenceText)
@@ -5109,7 +5263,7 @@ export async function generateBotReplyForSlug(
     }
 
     if (
-      useKnowledge &&
+      knowledgeGroundingEnabled &&
       isFactualClaimRiskyReply(message, safeReply)
     ) {
       const numericClaimsSupported = hasEvidenceForNumericClaims(
@@ -5162,7 +5316,7 @@ export async function generateBotReplyForSlug(
     }
 
     if (
-      useKnowledge &&
+      knowledgeGroundingEnabled &&
       isBinaryClaimQuestion(message) &&
       isDefinitiveClaimReply(safeReply) &&
       !hasEvidenceForClaim(message, knowledgeEvidenceText)
@@ -5185,16 +5339,16 @@ export async function generateBotReplyForSlug(
         }
       }
     }
-    if (shortAffirmativeFollowUp?.hasSpecificTopic) {
+    if (followUpGroundingEnabled) {
       const aligned = hasMinimumTopicAlignment({
         reply: safeReply,
-        query: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+        query: shortAffirmativeFollowUp!.resolvedKnowledgeQuery,
         minMatches: 1
       });
       if (!aligned) {
         const rewritten = await rewriteReplyUsingEvidenceOnly({
           reply: safeReply,
-          userMessage: shortAffirmativeFollowUp.resolvedKnowledgeQuery,
+          userMessage: shortAffirmativeFollowUp!.resolvedKnowledgeQuery,
           evidenceText: knowledgeEvidenceText,
           targetLanguage: fallbackLanguage,
           usageContext: usageBase
@@ -5227,9 +5381,14 @@ export async function generateBotReplyForSlug(
 
   const finalizeReply = async (
     reply: string,
-    extra?: { hasShopifyActionsInReply?: boolean }
+    extra?: {
+      hasShopifyActionsInReply?: boolean;
+      skipKnowledgeGroundingChecks?: boolean;
+    }
   ): Promise<{ reply: string; suggestion?: RevenueAISuggestion | null; clerk?: ClerkPayload }> => {
-    const safeReply = await applyGenericReplyPolicy(reply);
+    const safeReply = await applyGenericReplyPolicy(reply, {
+      skipKnowledgeGroundingChecks: extra?.skipKnowledgeGroundingChecks
+    });
 
     if (!botConfig.botId || !shopifyEnabled || !botConfig.revenueAIEnabled) {
       persistPendingFollowUpFromReply(safeReply);
@@ -5332,6 +5491,9 @@ export async function generateBotReplyForSlug(
     persistPendingFollowUpFromReply(appended);
     return { reply: appended, suggestion: offer.suggestion };
   };
+  const bookingReplyPolicyBypass = {
+    skipKnowledgeGroundingChecks: true
+  } as const;
 
   if (knowledgeEarlyReply) {
     return await finalizeReply(knowledgeEarlyReply);
@@ -5468,7 +5630,7 @@ export async function generateBotReplyForSlug(
 
   // 3b) Inject booking draft snapshot, if any
   let bookingDraft: BookingDraft | null = null;
-  if (bookingEnabledForTurn && options.conversationId) {
+  if (bookingEnabledForTurn && !!botBookingCfg && options.conversationId) {
     bookingDraft = await loadBookingDraft(options.conversationId);
     if (botBookingCfg) {
       const lastAssistantMessage = getLastAssistantContent(historyMessages);
@@ -5531,6 +5693,16 @@ export async function generateBotReplyForSlug(
         getBookingInstructions(botBookingCfg) +
         "\n\n" +
         "You can also reschedule or cancel existing bookings using the tools `update_appointment` and `cancel_appointment`. Ask the user for their email and the original booking date/time to identify the booking. Call these tools only when the user clearly wants a change or cancellation and you have enough information."
+    });
+  } else if (bookingEnabledForTurn && restaurantChatToolCfg) {
+    tools.push(buildRestaurantCreateReservationTool(restaurantChatToolCfg));
+    tools.push(buildRestaurantCancelReservationTool());
+    messages.push({
+      role: "system",
+      content: getRestaurantBookingInstructions(
+        restaurantChatToolCfg,
+        new Date().toISOString()
+      )
     });
   }
 
@@ -5783,7 +5955,9 @@ export async function generateBotReplyForSlug(
     return (
       name === "book_appointment" ||
       name === "update_appointment" ||
-      name === "cancel_appointment"
+      name === "cancel_appointment" ||
+      name === "create_restaurant_reservation" ||
+      name === "cancel_restaurant_reservation"
     );
   });
 
@@ -6053,7 +6227,8 @@ export async function generateBotReplyForSlug(
                     requested: weekdayHint,
                     actualIso: draftArgs.datetime,
                     timeZone: bookingTimeZone
-                  })
+                  }),
+                  bookingReplyPolicyBypass
                 );
               }
             }
@@ -6103,14 +6278,17 @@ export async function generateBotReplyForSlug(
               ? `Ta reservation pour ${draftArgs.service} a ete creee pour ${whenLabel} au nom de ${draftArgs.name}.`
               : `Your booking for ${draftArgs.service} has been created for ${whenLabel} under the name ${draftArgs.name}.`;
 
-            return await finalizeReply(`${successText}${emailNotice}`);
+            return await finalizeReply(
+              `${successText}${emailNotice}`,
+              bookingReplyPolicyBypass
+            );
           }
 
           const localizedError =
             localizeBookingError(autoResult, replyLang) ||
             autoResult.errorMessage;
           if (localizedError) {
-            return await finalizeReply(localizedError);
+            return await finalizeReply(localizedError, bookingReplyPolicyBypass);
           }
 
           return await finalizeReply(
@@ -6123,7 +6301,8 @@ export async function generateBotReplyForSlug(
                 ? "Es tut mir leid, ich konnte die Buchung nicht abschliessen. Bitte versuche eine andere Zeit oder pruefe die Details."
                 : replyLang === "fr"
                 ? "Desole, je n'ai pas pu terminer la reservation. Essaie un autre horaire ou verifie les informations."
-                : "Sorry, I couldn't process your booking. Please try another time or check your details.")
+                : "Sorry, I couldn't process your booking. Please try another time or check your details."),
+            bookingReplyPolicyBypass
           );
         }
       } catch (err) {
@@ -6184,12 +6363,13 @@ const functionName = bookingCall.function?.name || "unknown";
 executedToolNamesThisTurn.add(functionName);
 
 // Parse booking tool arguments and execute
-let bookingResult: BookingResult;
+let bookingResult: any;
 
-  const bookingTimeZone =
-    botConfig.booking && "timeZone" in botConfig.booking
-      ? botConfig.booking.timeZone
-      : "UTC";
+  const bookingTimeZone = restaurantChatToolCfg
+    ? restaurantChatToolCfg.timeZone
+    : botConfig.booking && "timeZone" in botConfig.booking
+    ? botConfig.booking.timeZone
+    : "UTC";
 
   const replyLang = resolveReplyLanguage(shoppingState, routerResult);
 
@@ -6272,7 +6452,8 @@ try {
               requested: weekdayHint,
               actualIso: finalArgs.datetime,
               timeZone: bookingTimeZone
-            })
+            }),
+            bookingReplyPolicyBypass
           );
         }
       }
@@ -6294,7 +6475,8 @@ try {
               requested: weekdayHint,
               actualIso: updateArgs.newDatetime,
               timeZone: bookingTimeZone
-            })
+            }),
+            bookingReplyPolicyBypass
           );
         }
       }
@@ -6306,6 +6488,22 @@ try {
       slug,
       parsed as CancelAppointmentArgs
     );
+  } else if (functionName === "create_restaurant_reservation") {
+    bookingResult = await handleRestaurantCreateFromChat(slug, {
+      name: String((parsed as any).name || ""),
+      email: String((parsed as any).email || ""),
+      phone: String((parsed as any).phone || ""),
+      partySize: Number((parsed as any).partySize || 0),
+      datetime: String((parsed as any).datetime || ""),
+      smokingPreference: (parsed as any).smokingPreference,
+      notes: (parsed as any).notes
+    });
+  } else if (functionName === "cancel_restaurant_reservation") {
+    bookingResult = await handleRestaurantCancelFromChat(slug, {
+      email: String((parsed as any).email || ""),
+      datetime: String((parsed as any).datetime || ""),
+      reason: (parsed as any).reason
+    });
   } else {
     bookingResult = {
       success: false,
@@ -6371,7 +6569,8 @@ try {
           ? "Es tut mir leid, ich konnte die Buchung nicht abschliessen."
           : replyLang === "fr"
           ? "Desole, je n'ai pas pu terminer la reservation."
-          : "Sorry, I couldn't process your booking.")
+          : "Sorry, I couldn't process your booking."),
+      bookingReplyPolicyBypass
     );
   }
 
@@ -6488,7 +6687,7 @@ try {
     void maybeSendUsageAlertsForBot(botConfig.botId);
   }
 
-  return await finalizeReply(finalContent);
+  return await finalizeReply(finalContent, bookingReplyPolicyBypass);
 }
 
 /**

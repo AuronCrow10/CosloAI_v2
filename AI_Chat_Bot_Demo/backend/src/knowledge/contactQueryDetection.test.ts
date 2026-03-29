@@ -32,4 +32,16 @@ describe("detectContactQuery", () => {
   it("treats 'numero di telefono' as contact", () => {
     expect(detectContactQuery("numero di telefono").isContactQuery).toBe(true);
   });
+
+  it("does not trigger contact mode for email providers in addresses", () => {
+    expect(
+      detectContactQuery("Cosmin, acosmin.marica@gmail.com, 3342355347").isContactQuery
+    ).toBe(false);
+  });
+
+  it("still detects standalone 'mail' requests", () => {
+    expect(detectContactQuery("Mi dai la mail di contatto?").isContactQuery).toBe(
+      true
+    );
+  });
 });

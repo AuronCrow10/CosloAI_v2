@@ -177,6 +177,11 @@ async function maybeSendReminderForBooking(booking: any): Promise<void> {
 
   const startLocalDateStr = startLocal.toFormat("cccc, dd LLLL yyyy");
   const startLocalTimeStr = startLocal.toFormat("HH:mm");
+  const startLocalDateTimeStr = startLocal.toFormat("cccc, dd LLLL yyyy HH:mm");
+  const endLocal = DateTime.fromJSDate(booking.end).setZone(booking.timeZone);
+  const endLocalDateTimeStr = endLocal.isValid
+    ? endLocal.toFormat("cccc, dd LLLL yyyy HH:mm")
+    : "";
 
   const subjectTemplate =
     bot.bookingReminderSubjectTemplate ||
@@ -213,20 +218,23 @@ async function maybeSendReminderForBooking(booking: any): Promise<void> {
     time: startLocalTimeStr,
     timezone: booking.timeZone,
     brandName,
-    brandUrl
+    brandUrl,
+    "client.name": booking.name,
+    "client.email": booking.email,
+    "client.phone": booking.phone || "",
+    "booking.start": startLocalDateTimeStr,
+    "booking.end": endLocalDateTimeStr,
+    "booking.date": startLocalDateStr,
+    "booking.time": startLocalTimeStr,
+    "booking.timezone": booking.timeZone,
+    "booking.service": booking.service,
+    "booking.calendarUrl": "",
+    "booking.reason": "",
+    "bot.name": brandName,
+    "bot.url": brandUrl
   };
 
-  const contextHtml: Record<string, string> = {
-    name: escapeHtml(booking.name),
-    email: escapeHtml(booking.email),
-    phone: escapeHtml(booking.phone || ""),
-    service: escapeHtml(booking.service),
-    date: escapeHtml(startLocalDateStr),
-    time: escapeHtml(startLocalTimeStr),
-    timezone: escapeHtml(booking.timeZone),
-    brandName: escapeHtml(brandName),
-    brandUrl: escapeHtml(brandUrl)
-  };
+  const contextHtml = buildHtmlTemplateContext(contextText);
 
   const subject = renderTemplate(subjectTemplate, contextText);
   const text = renderTemplate(textTemplate, contextText);
@@ -268,10 +276,21 @@ function renderTemplate(
   template: string,
   context: Record<string, string>
 ): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_match, key) => {
+  return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, rawKey) => {
+    const key = String(rawKey || "").trim();
     const value = context[key] ?? "";
     return value;
   });
+}
+
+function buildHtmlTemplateContext(
+  contextText: Record<string, string>
+): Record<string, string> {
+  const contextHtml: Record<string, string> = {};
+  for (const [key, value] of Object.entries(contextText)) {
+    contextHtml[key] = escapeHtml(value);
+  }
+  return contextHtml;
 }
 
 function escapeHtml(input: string): string {

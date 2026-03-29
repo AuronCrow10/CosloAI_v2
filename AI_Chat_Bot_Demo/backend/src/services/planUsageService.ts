@@ -6,6 +6,8 @@ import { getEmailUsageForBot } from "./emailUsageService";
 
 export const EMAIL_TOKEN_COST = 400;
 export const WHATSAPP_MESSAGE_TOKEN_COST = 1;
+export const USAGE_WINDOW_DAYS = 30;
+const USAGE_WINDOW_MS = USAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 export type PlanUsageSnapshot = {
   botId: string;
@@ -15,37 +17,107 @@ export type PlanUsageSnapshot = {
   usedTokensWhatsapp: number;
   usedTokensTotal: number;
   remainingTokens: number | null;
+  periodStart: Date;
+  periodEnd: Date;
+  usageWindowIndex: number | null;
 };
 
-function getCurrentMonthUtcRange(): { from: Date; to: Date } {
+export type UsageWindow = {
+  from: Date;
+  to: Date;
+  anchorAt: Date;
+  windowIndex: number;
+};
+
+function getCurrentMonthUtcRange(): UsageWindow {
   const now = new Date();
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  return { from, to };
+  return {
+    from,
+    to,
+    anchorAt: from,
+    windowIndex: 0
+  };
 }
 
+function computeUsageWindowFromAnchor(anchorAt: Date, now = new Date()): UsageWindow {
+  const diffMs = now.getTime() - anchorAt.getTime();
+  const windowIndex = diffMs <= 0 ? 0 : Math.floor(diffMs / USAGE_WINDOW_MS);
+  const from = new Date(anchorAt.getTime() + windowIndex * USAGE_WINDOW_MS);
+  const to = new Date(from.getTime() + USAGE_WINDOW_MS);
 
-async function getCurrentBillingPeriodForBot(
-  botId: string
-): Promise<{ from: Date; to: Date } | null> {
+  return { from, to, anchorAt, windowIndex };
+}
+
+async function resolveUsageAnchorForSubscription(botId: string, sub: any): Promise<Date | null> {
+  if (!sub) return null;
+  if (sub.usageAnchorAt) return sub.usageAnchorAt as Date;
+
   const payment = await prisma.payment.findFirst({
     where: {
       botId,
       kind: "SUBSCRIPTION",
       status: "paid",
-      periodStart: { not: null },
-      periodEnd: { not: null }
+      periodStart: { not: null }
     },
-    orderBy: { periodStart: "desc" }
+    orderBy: { periodStart: "asc" }
   });
 
-  if (!payment?.periodStart || !payment?.periodEnd) {
+  const anchor =
+    payment?.periodStart ??
+    sub.createdAt ??
+    new Date();
+
+  try {
+    await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { usageAnchorAt: anchor }
+    });
+  } catch (err) {
+    console.error("[planUsageService] Failed to persist usage anchor", {
+      botId,
+      subscriptionId: sub.id,
+      error: err
+    });
+  }
+
+  return anchor;
+}
+
+export async function getCurrentUsageWindowForBot(
+  botId: string
+): Promise<UsageWindow | null> {
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId },
+    include: { subscription: true }
+  });
+
+  if (!bot?.subscription) {
     return null;
   }
 
-  return { from: payment.periodStart, to: payment.periodEnd };
+  const anchorAt = await resolveUsageAnchorForSubscription(botId, bot.subscription);
+  if (!anchorAt) return null;
+
+  return computeUsageWindowFromAnchor(anchorAt);
 }
 
+export async function getCurrentUsageRangeForBot(
+  botId: string
+): Promise<{ from: Date; to: Date; windowIndex: number | null }> {
+  const usageWindow = await getCurrentUsageWindowForBot(botId);
+  if (!usageWindow) {
+    const fallback = getCurrentMonthUtcRange();
+    return { from: fallback.from, to: fallback.to, windowIndex: null };
+  }
+
+  return {
+    from: usageWindow.from,
+    to: usageWindow.to,
+    windowIndex: usageWindow.windowIndex
+  };
+}
 
 export async function getPlanUsageForBot(
   botId: string
@@ -63,8 +135,8 @@ export async function getPlanUsageForBot(
   let monthlyTokenLimit =
     bot.subscription?.usagePlan?.monthlyTokens ?? null;
 
-  const billingRange = await getCurrentBillingPeriodForBot(botId);
-  const { from, to } = billingRange ?? getCurrentMonthUtcRange();
+  const usageWindow = await getCurrentUsageWindowForBot(botId);
+  const { from, to, windowIndex } = usageWindow ?? getCurrentMonthUtcRange();
 
   // 1) OpenAI usage (chat + crawler + analytics)
   const agg = await getUsageForBot({
@@ -128,7 +200,10 @@ export async function getPlanUsageForBot(
     usedTokensEmails: emailTokens,
     usedTokensWhatsapp: whatsappTokens,
     usedTokensTotal,
-    remainingTokens
+    remainingTokens,
+    periodStart: from,
+    periodEnd: to,
+    usageWindowIndex: usageWindow ? windowIndex : null
   };
 }
 

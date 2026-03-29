@@ -81,6 +81,7 @@ const botCreateSchema = z.object({
   channelInstagram: z.boolean().optional().default(false),
   channelMessenger: z.boolean().optional().default(false),
   useCalendar: z.boolean().optional().default(false),
+  bookingSystemType: z.enum(["GENERIC", "RESTAURANT"]).optional().default("GENERIC"),
 
   calendarId: z.string().optional().nullable(),
   timeZone: z.string().optional().nullable(),
@@ -340,6 +341,7 @@ if (selectedCount > 1) {
       channelInstagram: data.channelInstagram,
       channelMessenger: data.channelMessenger,
       useCalendar: data.useCalendar,
+      bookingSystemType: data.bookingSystemType ?? "GENERIC",
       calendarId: data.calendarId ?? null,
       timeZone: data.timeZone ?? null,
       defaultDurationMinutes: data.defaultDurationMinutes ?? 30,
@@ -651,10 +653,22 @@ if (selectedCount > 1) {
 // Get bot
 router.get("/bots/:id", async (req: Request, res: Response) => {
   const bot = await findAccessibleBot(req, req.params.id, {
-    include: { bookingServices: true }
+    include: {
+      bookingServices: true,
+      subscription: {
+        include: { usagePlan: true }
+      }
+    }
   });
   if (!bot) return res.status(404).json({ error: "Not found" });
-  res.json(await withTeamPages(req, bot));
+
+  const payload = {
+    ...bot,
+    usagePlanId: (bot as any).subscription?.usagePlanId ?? null,
+    billingTerm: (bot as any).subscription?.billingTerm ?? "MONTHLY"
+  };
+
+  res.json(await withTeamPages(req, payload));
 });
 
 // Revenue AI settings (per bot)

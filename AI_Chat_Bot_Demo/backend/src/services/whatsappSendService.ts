@@ -6,7 +6,8 @@ import { config } from "../config";
 import { normalizeAxiosError, isWhatsAppAuthError, markWhatsAppNeedsReconnect } from "../routes/whatsappWebhook"; // or extract these helpers out of whatsappWebhook.ts
 import {
   ensureBotHasTokens,
-  WHATSAPP_MESSAGE_TOKEN_COST
+  WHATSAPP_MESSAGE_TOKEN_COST,
+  getCurrentUsageRangeForBot
 } from "./planUsageService";
 import { maybeSendUsageAlertsForBot } from "./planUsageAlertService";
 
@@ -107,11 +108,7 @@ export async function sendLeadWhatsAppTemplate(
     bot?.subscription?.usagePlan?.monthlyWhatsappLeads ?? null;
 
   if (whatsappCap && whatsappCap > 0) {
-    const now = new Date();
-    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const to = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
-    );
+    const { from, to } = await getCurrentUsageRangeForBot(botId);
 
     const leadsThisMonth = await prisma.metaLead.count({
       where: {

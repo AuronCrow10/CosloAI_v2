@@ -9,6 +9,10 @@ import {
   TEAM_PAGE_VALUES,
   TeamPagePermission
 } from "../services/teamAccessService";
+import {
+  buildTeamInviteEmail,
+  getFrontendOrigin
+} from "../services/systemEmailTemplates";
 
 const router = Router();
 
@@ -103,20 +107,20 @@ router.post("/team/invites", async (req: Request, res: Response) => {
     }
   });
 
-  const frontendOrigin = process.env.FRONTEND_ORIGIN || "";
-  const inviteUrl =
-    frontendOrigin.trim()
-      ? `${frontendOrigin.replace(/\/$/, "")}/register?invite=${encodeURIComponent(token)}`
-      : `/register?invite=${encodeURIComponent(token)}`;
+  const inviteUrl = `${getFrontendOrigin()}/register?invite=${encodeURIComponent(
+    token
+  )}`;
 
-  const botNames = ownedBots.map((b) => b.name).join(", ");
-  const subject = "You have been invited to join a Coslo workspace";
-  const text = `You have been invited to access bots: ${botNames}.\n\nRegister here: ${inviteUrl}\n\nThis invite can be used once.`;
+  const inviteMessage = buildTeamInviteEmail({
+    inviteUrl,
+    botNames: ownedBots.map((b) => b.name)
+  });
 
   await sendMail({
     to: email,
-    subject,
-    text
+    subject: inviteMessage.subject,
+    text: inviteMessage.text,
+    html: inviteMessage.html
   });
 
   return res.status(201).json({

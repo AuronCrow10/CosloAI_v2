@@ -7,6 +7,7 @@ import {
   isMetaTokenErrorNeedingRefresh
 } from "../services/metaTokenService";
 import { sendLeadWhatsAppTemplate } from "../services/whatsappSendService";
+import { getCurrentUsageRangeForBot } from "./planUsageService";
 
 
 type LeadPayload = {
@@ -152,10 +153,8 @@ if (!bot.channelWhatsapp || !limit) {
   }
 
 
-  // Monthly quota check
-const now = new Date();
-const from = new Date(now.getFullYear(), now.getMonth(), 1);
-const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  // 30-day usage-window quota check
+const { from, to } = await getCurrentUsageRangeForBot(bot.id);
 
 const sentThisMonth = await prisma.metaLead.count({
   where: {

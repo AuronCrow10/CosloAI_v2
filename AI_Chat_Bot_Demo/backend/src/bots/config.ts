@@ -111,6 +111,7 @@ export type DemoBotConfig = {
   domain: string;
   systemPrompt: string;
   booking?: BookingConfig;
+  bookingSystemType?: "GENERIC" | "RESTAURANT";
   channels?: BotChannels;
   description?: string;
 
@@ -358,6 +359,7 @@ function mapDbBotToDemoConfig(
     systemPrompt: dbBot.systemPrompt,
     description: dbBot.description || undefined,
     booking: buildBookingFromDb(dbBot),
+    bookingSystemType: (dbBot as any).bookingSystemType ?? "GENERIC",
     channels: buildChannelsFromDb(dbBot),
 
     revenueAIEnabled: (dbBot as any).revenueAIEnabled ?? false,

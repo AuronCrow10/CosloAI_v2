@@ -1,15 +1,25 @@
 import { Router } from "express";
+import Stripe from "stripe";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../prisma/prisma";
 import {
   stripe,
   computeBotPricingForBot,
   updateBotSubscriptionForUsagePlanChange,
-  botToFeatureFlags
+  botToFeatureFlags,
+  buildCompactPlanSnapshot
 } from "../services/billingService";
-import { getPlanUsageForBot } from "../services/planUsageService";
+import { getCurrentUsageRangeForBot, getPlanUsageForBot } from "../services/planUsageService";
 import { getEmailUsageForBot } from "../services/emailUsageService";
 import { userCanAccessBot } from "../services/teamAccessService";
+import {
+  BillingTerm,
+  billingTermMonths,
+  classifyPlanChange,
+  getPlanTermPrice,
+  listPlanTermPrices,
+  normalizeBillingTerm
+} from "../services/billingTerms";
 
 // ✅ Referrals
 import {
@@ -33,8 +43,14 @@ type UsagePlanLite = {
   description: string | null;
   monthlyTokens: number | null;
   monthlyEmails: number | null;
+  monthlyWhatsappLeads: number | null;
   monthlyAmountCents: number;
+  semiAnnualAmountCents: number | null;
+  annualAmountCents: number | null;
   currency: string;
+  stripePriceId: string | null;
+  stripeSemiAnnualPriceId: string | null;
+  stripeAnnualPriceId: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -68,38 +84,6 @@ function formatAmountForUi(amountCents: number, currency: string): string {
     currency: currency.toUpperCase(),
     minimumFractionDigits: 2
   }).format(amountCents / 100);
-}
-
-function getCurrentCalendarMonthRange(): { from: Date; to: Date } {
-  const now = new Date();
-  const from = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
-  );
-  const to = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
-  );
-  return { from, to };
-}
-
-async function getCurrentBillingPeriodRangeForBot(
-  botId: string
-): Promise<{ from: Date; to: Date } | null> {
-  const payment = await prisma.payment.findFirst({
-    where: {
-      botId,
-      kind: "SUBSCRIPTION",
-      status: "paid",
-      periodStart: { not: null },
-      periodEnd: { not: null }
-    },
-    orderBy: { periodStart: "desc" }
-  });
-
-  if (!payment?.periodStart || !payment?.periodEnd) {
-    return null;
-  }
-
-  return { from: payment.periodStart, to: payment.periodEnd };
 }
 
 // Require auth for all /billing/* routes
@@ -167,18 +151,17 @@ router.get("/billing/overview", async (req, res) => {
 
       const usagePlan = sub.usagePlan ?? null;
 
-      const billingRange =
-        (await getCurrentBillingPeriodRangeForBot(bot.id)) ??
-        getCurrentCalendarMonthRange();
-      const { from, to } = billingRange;
+      const normalizedTerm = normalizeBillingTerm(
+        (sub as any).billingTerm
+      ) as BillingTerm;
 
-// Canonical plan usage snapshot (includes OpenAI + knowledge + emails + WhatsApp,
-// and already accounts for paid top-ups in the token limit)
       const planUsage = await getPlanUsageForBot(bot.id);
+      const fallbackRange = await getCurrentUsageRangeForBot(bot.id);
+      const from = planUsage?.periodStart ?? fallbackRange.from;
+      const to = planUsage?.periodEnd ?? fallbackRange.to;
 
-      const usedTokens = planUsage?.usedTokensTotal ?? 0; 
+      const usedTokens = planUsage?.usedTokensTotal ?? 0;
 
-// If snapshot has a limit, prefer that; otherwise fall back to the raw plan
       let monthlyTokens =
         planUsage?.monthlyTokenLimit ?? usagePlan?.monthlyTokens ?? null;
 
@@ -231,6 +214,9 @@ router.get("/billing/overview", async (req, res) => {
 
       // ✅ Features are included in the plan now — always 0 in billing/overview.
       const featuresAmountCents = 0;
+      const termPrice = usagePlan
+        ? getPlanTermPrice(usagePlan, normalizedTerm)
+        : null;
 
       // Plan amount: prefer snapshot pt, else DB usagePlan
       let planAmountCents: number | null =
@@ -251,9 +237,17 @@ router.get("/billing/overview", async (req, res) => {
         planAmountCents = usagePlan.monthlyAmountCents;
       }
 
-      const totalAmountCents = planAmountCents ?? 0;
-
-      const totalMonthlyAmountCents = totalAmountCents || 0;
+      const totalMonthlyAmountCents =
+        typeof snap?.mt === "number"
+          ? snap.mt
+          : termPrice?.monthlyEquivalentAmountCents ??
+            planAmountCents ??
+            0;
+      const termAmountCents =
+        typeof snap?.tm === "number"
+          ? snap.tm
+          : termPrice?.amountCents ??
+            totalMonthlyAmountCents;
       const totalMonthlyAmountFormatted = formatAmountForUi(
         totalMonthlyAmountCents,
         currency
@@ -271,6 +265,9 @@ router.get("/billing/overview", async (req, res) => {
         botStatus: bot.status,
         subscriptionStatus: sub.status,
         currency,
+        billingTerm: normalizedTerm,
+        billingTermMonths: billingTermMonths(normalizedTerm),
+        termAmountCents,
         totalMonthlyAmountCents,
         totalMonthlyAmountFormatted,
         featuresAmountCents,
@@ -503,8 +500,16 @@ router.get("/usage-plans", async (_req, res) => {
         description: p.description,
         monthlyTokens: p.monthlyTokens,
         monthlyEmails: p.monthlyEmails,
+        monthlyWhatsappLeads: p.monthlyWhatsappLeads,
         monthlyAmountCents: p.monthlyAmountCents,
         currency: p.currency,
+        termPrices: listPlanTermPrices(p).map((tp) => ({
+          billingTerm: tp.billingTerm,
+          months: tp.months,
+          amountCents: tp.amountCents,
+          monthlyEquivalentAmountCents: tp.monthlyEquivalentAmountCents,
+          currency: tp.currency
+        })),
         createdAt: p.createdAt,
         updatedAt: p.updatedAt
       }))
@@ -524,7 +529,10 @@ router.post("/bots/:id/activate-free", requireAuth, async (req, res) => {
   try {
     const botId = req.params.id;
     const userId = (req as any).user.id as string;
-    const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
+    const { usagePlanId, billingTerm } = (req.body || {}) as {
+      usagePlanId?: string;
+      billingTerm?: BillingTerm;
+    };
 
     if (!usagePlanId) {
       return res.status(400).json({ error: "usagePlanId is required" });
@@ -573,23 +581,31 @@ router.post("/bots/:id/activate-free", requireAuth, async (req, res) => {
       })
     );
 
-    const compactPlanSnapshot = {
-      f: featurePricing.featureCodes,
-      fp: 0,
-      p: usagePlan.code,
-      pt: usagePlan.monthlyAmountCents,
-      t: usagePlan.monthlyAmountCents,
-      c: usagePlan.currency
-    };
+    const monthlyTermPrice = getPlanTermPrice(usagePlan, "MONTHLY");
+    const compactPlanSnapshot = buildCompactPlanSnapshot({
+      featureCodes: featurePricing.featureCodes,
+      usagePlan,
+      billingTerm: "MONTHLY",
+      termAmountCents: monthlyTermPrice.amountCents,
+      monthlyEquivalentAmountCents:
+        monthlyTermPrice.monthlyEquivalentAmountCents,
+      currency: usagePlan.currency
+    });
+    const usageAnchorAt = new Date();
 
     if (bot.subscription) {
       await prisma.subscription.update({
         where: { id: bot.subscription.id },
         data: {
           usagePlanId: usagePlan.id,
+          billingTerm: "MONTHLY",
           status: "ACTIVE",
           currency: usagePlan.currency,
-          planSnapshotJson: compactPlanSnapshot
+          planSnapshotJson: compactPlanSnapshot,
+          usageAnchorAt,
+          pendingUsagePlanId: null,
+          pendingBillingTerm: null,
+          pendingSwitchAt: null
         }
       });
     } else {
@@ -599,10 +615,12 @@ router.post("/bots/:id/activate-free", requireAuth, async (req, res) => {
           stripeCustomerId: `free_${bot.userId}`,
           stripeSubscriptionId: `free_${bot.id}`,
           stripePriceId: "",
+          billingTerm: "MONTHLY",
           status: "ACTIVE",
           currency: usagePlan.currency,
           planSnapshotJson: compactPlanSnapshot,
-          usagePlanId: usagePlan.id
+          usagePlanId: usagePlan.id,
+          usageAnchorAt
         }
       });
     }
@@ -630,7 +648,10 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
 
     const botId = req.params.id;
     const userId = (req as any).user.id as string;
-    const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
+    const { usagePlanId, billingTerm } = (req.body || {}) as {
+      usagePlanId?: string;
+      billingTerm?: BillingTerm | string;
+    };
 
     if (!usagePlanId) return res.status(400).json({ error: "usagePlanId is required" });
 
@@ -645,8 +666,18 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
       where: { id: usagePlanId, isActive: true }
     });
     if (!usagePlan) return res.status(404).json({ error: "Usage plan not found" });
-    if (!usagePlan.stripePriceId) {
-      return res.status(500).json({ error: `Usage plan ${usagePlan.code} has no Stripe price configured` });
+    if ((usagePlan.monthlyAmountCents ?? 0) === 0) {
+      return res.status(400).json({
+        error: "Use activate-free for free plans"
+      });
+    }
+
+    const normalizedTerm = normalizeBillingTerm(billingTerm);
+    const selectedTermPrice = getPlanTermPrice(usagePlan, normalizedTerm);
+    if ((usagePlan.monthlyAmountCents ?? 0) > 0 && !selectedTermPrice.stripePriceId) {
+      return res.status(500).json({
+        error: `Usage plan ${usagePlan.code} has no Stripe price configured for ${normalizedTerm}`
+      });
     }
 
     // Keep featureCodes for metadata/snapshot compatibility, but it costs 0 now.
@@ -666,7 +697,9 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
     );
 
     // ✅ total is PLAN ONLY now
-    const totalAmountCents = usagePlan.monthlyAmountCents;
+    const totalAmountCents = selectedTermPrice.amountCents;
+    const monthlyEquivalentAmountCents =
+      selectedTermPrice.monthlyEquivalentAmountCents;
     const currency = usagePlan.currency;
 
     // Referral attribution (cookie-first, optional body override)
@@ -725,16 +758,18 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
     const frontendOrigin =
       process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
-    const lineItemsForStripe = [{ price: usagePlan.stripePriceId, quantity: 1 }];
+    const lineItemsForStripe = [
+      { price: selectedTermPrice.stripePriceId!, quantity: 1 }
+    ];
 
-    const compactPlanSnapshot = {
-      f: featurePricing.featureCodes,
-      fp: 0,
-      p: usagePlan.code,
-      pt: usagePlan.monthlyAmountCents,
-      t: totalAmountCents,
-      c: currency
-    };
+    const compactPlanSnapshot = buildCompactPlanSnapshot({
+      featureCodes: featurePricing.featureCodes,
+      usagePlan,
+      billingTerm: normalizedTerm,
+      termAmountCents: selectedTermPrice.amountCents,
+      monthlyEquivalentAmountCents,
+      currency
+    });
 
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
@@ -756,6 +791,10 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
         planCode: usagePlan.code,
         planId: usagePlan.id,
         planAmountCents: String(usagePlan.monthlyAmountCents),
+        billingTerm: normalizedTerm,
+        billingTermMonths: String(selectedTermPrice.months),
+        termAmountCents: String(selectedTermPrice.amountCents),
+        monthlyEquivalentAmountCents: String(monthlyEquivalentAmountCents),
         totalAmountCents: String(totalAmountCents),
         currency,
         usagePlanId: usagePlan.id,
@@ -769,6 +808,7 @@ router.post("/bots/:id/checkout", requireAuth, async (req, res) => {
           botId,
           userId: bot.userId,
           usagePlanId: usagePlan.id,
+          billingTerm: normalizedTerm,
           referralCode: referralCodeToApply ?? ""
         }
       }
@@ -851,7 +891,12 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
 
     const botId = req.params.id;
     const userId = (req as any).user.id as string;
-    const { usagePlanId } = (req.body || {}) as { usagePlanId?: string };
+    const { usagePlanId, billingTerm, acknowledgeImmediateCharge } =
+      (req.body || {}) as {
+        usagePlanId?: string;
+        billingTerm?: BillingTerm;
+        acknowledgeImmediateCharge?: boolean;
+      };
 
     if (!usagePlanId) {
       return res.status(400).json({ error: "usagePlanId is required" });
@@ -881,10 +926,6 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
       });
     }
 
-    if (bot.subscription.usagePlanId === usagePlanId) {
-      return res.json({ ok: true, unchanged: true });
-    }
-
     const targetPlan = await prisma.usagePlan.findFirst({
       where: { id: usagePlanId, isActive: true }
     });
@@ -892,17 +933,111 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Usage plan not found" });
     }
 
-    const currentAmount = bot.subscription.usagePlan?.monthlyAmountCents ?? 0;
+    const currentPlan = bot.subscription.usagePlan;
+    const currentAmount = currentPlan?.monthlyAmountCents ?? 0;
     if (currentAmount > 0 && targetPlan.monthlyAmountCents === 0) {
       return res.status(400).json({
         error: "Paid subscriptions cannot be downgraded to the free plan"
       });
     }
 
-    await updateBotSubscriptionForUsagePlanChange({
-      botId: bot.id,
-      newUsagePlanId: usagePlanId,
-      prorationBehavior: "create_prorations"
+    const currentTerm = normalizeBillingTerm(
+      (bot.subscription as any).billingTerm
+    ) as BillingTerm;
+    const targetTerm = normalizeBillingTerm(billingTerm);
+    const targetTermPrice = getPlanTermPrice(targetPlan, targetTerm);
+
+    if ((targetPlan.monthlyAmountCents ?? 0) > 0 && !targetTermPrice.stripePriceId) {
+      return res.status(400).json({
+        error: `Selected billing term is not configured for ${targetPlan.name}`
+      });
+    }
+
+    if (bot.subscription.usagePlanId === usagePlanId && currentTerm === targetTerm) {
+      return res.json({ ok: true, unchanged: true });
+    }
+
+    if (bot.subscription.stripeSubscriptionId.startsWith("free_")) {
+      return res.status(400).json({
+        error:
+          "This bot is on a free subscription. Use checkout to move to a paid term."
+      });
+    }
+
+    const changeDirection = classifyPlanChange({
+      currentMonthlyAmountCents: currentAmount,
+      targetMonthlyAmountCents: targetPlan.monthlyAmountCents ?? 0,
+      currentBillingTerm: currentTerm,
+      targetBillingTerm: targetTerm
+    });
+
+    if (changeDirection === "UPGRADE") {
+      if (!acknowledgeImmediateCharge) {
+        return res.status(400).json({
+          error:
+            "You must acknowledge immediate full charge and forfeiture of unused prepaid time for upgrades."
+        });
+      }
+
+      await updateBotSubscriptionForUsagePlanChange({
+        botId: bot.id,
+        newUsagePlanId: usagePlanId,
+        billingTerm: targetTerm,
+        prorationBehavior: "none",
+        billingCycleAnchor: "now",
+        resetUsageAnchor: true
+      });
+
+      const updatedSub = await prisma.subscription.findUnique({
+        where: { id: bot.subscription.id },
+        include: { usagePlan: true }
+      });
+
+      return res.json({
+        ok: true,
+        changeType: "UPGRADE_IMMEDIATE",
+        chargedImmediately: true,
+        subscription: updatedSub
+      });
+    }
+
+    const stripeSub = await stripe.subscriptions.retrieve(
+      bot.subscription.stripeSubscriptionId,
+      { expand: ["items.data.price"] }
+    );
+
+    const items: Stripe.SubscriptionUpdateParams.Item[] = stripeSub.items.data.map(
+      (item) => ({
+        id: item.id,
+        deleted: true
+      })
+    );
+    items.push({ price: targetTermPrice.stripePriceId!, quantity: 1 });
+
+    await stripe.subscriptions.update(bot.subscription.stripeSubscriptionId, {
+      items,
+      proration_behavior: "none",
+      billing_cycle_anchor: "unchanged",
+      metadata: {
+        botId: bot.id,
+        userId: String(bot.userId),
+        usagePlanId: targetPlan.id,
+        billingTerm: targetTerm,
+        changeType: "DOWNGRADE_SCHEDULED"
+      }
+    });
+
+    const effectiveAt = stripeSub.current_period_end
+      ? new Date(stripeSub.current_period_end * 1000)
+      : null;
+
+    await prisma.subscription.update({
+      where: { id: bot.subscription.id },
+      data: {
+        pendingUsagePlanId: targetPlan.id,
+        pendingBillingTerm: targetTerm,
+        pendingSwitchAt: effectiveAt
+      }
     });
 
     const updatedSub = await prisma.subscription.findUnique({
@@ -910,7 +1045,12 @@ router.post("/bots/:id/change-plan", requireAuth, async (req, res) => {
       include: { usagePlan: true }
     });
 
-    return res.json({ ok: true, subscription: updatedSub });
+    return res.json({
+      ok: true,
+      changeType: "DOWNGRADE_SCHEDULED",
+      effectiveAt: effectiveAt ? effectiveAt.toISOString() : null,
+      subscription: updatedSub
+    });
   } catch (err) {
     console.error("Error changing usage plan", err);
     return res.status(500).json({ error: "Failed to change usage plan" });
@@ -959,16 +1099,7 @@ router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
       });
     }
 
-    const snap: any = sub.planSnapshotJson ?? null;
-
-    let planAmountCents: number | null =
-      typeof snap?.pt === "number"
-        ? snap.pt
-        : usagePlan.monthlyAmountCents ?? null;
-
-    if (planAmountCents == null) {
-      planAmountCents = usagePlan.monthlyAmountCents;
-    }
+    const planAmountCents: number = usagePlan.monthlyAmountCents;
 
     if (!planAmountCents || planAmountCents <= 0) {
       return res.status(400).json({
@@ -977,7 +1108,6 @@ router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
     }
 
     const currency: string =
-      (snap?.c as string | undefined) ||
       sub.currency ||
       usagePlan.currency ||
       "eur";
@@ -993,7 +1123,7 @@ router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
         (baseMonthlyTokens * opt.percentTokens) / 100
       );
       const priceCents = Math.round(
-        (planAmountCents! * opt.percentPrice) / 100
+        (planAmountCents * opt.percentPrice) / 100
       );
 
       return {
@@ -1006,7 +1136,7 @@ router.get("/bots/:id/topup-options", requireAuth, async (req, res) => {
       };
     });
 
-    const baseMonthlyAmountCents = planAmountCents!;
+    const baseMonthlyAmountCents = planAmountCents;
     const baseMonthlyAmountFormatted = formatAmountForUi(
       baseMonthlyAmountCents,
       currency
@@ -1083,16 +1213,7 @@ router.post("/bots/:id/topup-checkout", requireAuth, async (req, res) => {
       });
     }
 
-    const snap: any = sub.planSnapshotJson ?? null;
-
-    let planAmountCents: number | null =
-      typeof snap?.pt === "number"
-        ? snap.pt
-        : usagePlan.monthlyAmountCents ?? null;
-
-    if (planAmountCents == null) {
-      planAmountCents = usagePlan.monthlyAmountCents;
-    }
+    const planAmountCents: number = usagePlan.monthlyAmountCents;
 
     if (!planAmountCents || planAmountCents <= 0) {
       return res.status(400).json({
@@ -1101,7 +1222,6 @@ router.post("/bots/:id/topup-checkout", requireAuth, async (req, res) => {
     }
 
     const currency: string =
-      (snap?.c as string | undefined) ||
       sub.currency ||
       usagePlan.currency ||
       "eur";
@@ -1121,7 +1241,7 @@ router.post("/bots/:id/topup-checkout", requireAuth, async (req, res) => {
       (baseMonthlyTokens * selected.percentTokens) / 100
     );
     const priceCents = Math.round(
-      (planAmountCents! * selected.percentPrice) / 100
+      (planAmountCents * selected.percentPrice) / 100
     );
 
     // Reuse Stripe customer from subscription

@@ -1,13 +1,15 @@
-// services/billingService.ts
 import Stripe from "stripe";
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
+import {
+  BillingTerm,
+  getPlanTermPrice,
+  normalizeBillingTerm
+} from "./billingTerms";
 
 export const stripe = config.stripeSecretKey
   ? new Stripe(config.stripeSecretKey, { apiVersion: "2024-06-20" })
   : null;
-
-// ---- Feature-based pricing types & helpers ----
 
 export type FeatureCode =
   | "DOMAIN_CRAWLER"
@@ -57,7 +59,7 @@ export interface PricingFeatureLineItem {
 }
 
 export interface BotPricingResult {
-  lineItemsForStripe: { price: string; quantity: number }[]; // one Stripe price per feature
+  lineItemsForStripe: { price: string; quantity: number }[];
   lineItemsForUi: PricingFeatureLineItem[];
   totalAmountCents: number;
   totalAmountFormatted: string;
@@ -85,23 +87,32 @@ function getEnabledFeatureCodes(bot: BotFeatureFlags): FeatureCode[] {
   return enabled;
 }
 
-/**
- * Main pricing function: single source of truth.
- * Given a set of feature flags, loads FeaturePrice rows from DB and returns:
- *  - per-feature UI breakdown
- *  - Stripe line_items (one per feature)
- *  - total amount & currency
- *
- * NOTE: this is *only* features price. UsagePlan price is added separately.
- */
+export function buildCompactPlanSnapshot(params: {
+  featureCodes: FeatureCode[];
+  usagePlan: any;
+  billingTerm: BillingTerm;
+  termAmountCents: number;
+  monthlyEquivalentAmountCents: number;
+  currency: string;
+}) {
+  return {
+    f: params.featureCodes,
+    fp: 0,
+    p: params.usagePlan.code,
+    pt: params.usagePlan.monthlyAmountCents,
+    bt: params.billingTerm,
+    tm: params.termAmountCents,
+    mt: params.monthlyEquivalentAmountCents,
+    t: params.monthlyEquivalentAmountCents,
+    c: params.currency
+  };
+}
+
 export async function computeBotPricingForBot(
   bot: BotFeatureFlags
 ): Promise<BotPricingResult> {
   const featureCodes = getEnabledFeatureCodes(bot);
-
-  // Feature pricing is removed. Features are included in plans.
-  // We keep the return shape so the rest of the codebase doesn't break.
-  const currency = "eur"; // only used for formatting "0.00"; plan currency is handled elsewhere now.
+  const currency = "eur";
 
   return {
     lineItemsForStripe: [],
@@ -113,11 +124,7 @@ export async function computeBotPricingForBot(
   };
 }
 
-/**
- * LEGACY: flat plan, kept so older code keeps compiling.
- * New code should use `computeBotPricingForBot` instead.
- */
-export function computeBotPrice(bot: {
+export function computeBotPrice(_bot: {
   useDomainCrawler: boolean;
   usePdfCrawler: boolean;
   channelWhatsapp: boolean;
@@ -128,33 +135,15 @@ export function computeBotPrice(bot: {
   leadWhatsappMessages500?: boolean | null;
   leadWhatsappMessages1000?: boolean | null;
 }) {
-  // Simple model: one flat plan
   if (!config.stripePriceIdBasic) {
     throw new Error("STRIPE_PRICE_ID_BASIC not configured");
   }
 
   return {
     priceId: config.stripePriceIdBasic,
-    amountDescription: "€29.00 / month"
+    amountDescription: "EUR 29.00 / month"
   };
 }
-
-/*
-Example (for your own sanity checks):
-
-const exampleBot: BotFeatureFlags = {
-  useDomainCrawler: true,
-  usePdfCrawler: false,
-  channelWeb: true,
-  channelWhatsapp: true,
-  channelMessenger: false,
-  channelInstagram: false,
-  useCalendar: false
-};
-
-computeBotPricingForBot(exampleBot) =>
-  totalAmountCents = sum of DOMAIN_CRAWLER + CHANNEL_WEB + WHATSAPP prices.
-*/
 
 type BotWithSubscription = {
   id: string;
@@ -175,16 +164,6 @@ type BotWithSubscription = {
   } | null;
 };
 
-/**
- * Sync Stripe subscription prices with the bot's current feature flags.
- *
- * - Uses computeBotPricingForBot as SSoT for *feature* prices.
- * - Uses proration_behavior: "create_prorations".
- *
- * IMPORTANT with plans:
- *  We keep the UsagePlan Stripe price item untouched and only
- *  add/remove feature price items.
- */
 export async function updateBotSubscriptionForFeatureChange(
   bot: BotWithSubscription,
   prorationBehavior: Stripe.SubscriptionUpdateParams.ProrationBehavior = "create_prorations"
@@ -235,17 +214,11 @@ export async function updateBotSubscriptionForFeatureChange(
   });
 
   const existingItems = stripeSub.items.data;
-
   const planPriceId: string | null = dbSub?.usagePlan?.stripePriceId ?? null;
-
-  // If we can't identify the plan item, do nothing (safer than deleting unknown items).
   if (!planPriceId) return;
 
   const hasNonPlanItems = existingItems.some((i) => i.price.id !== planPriceId);
-  if (!hasNonPlanItems) {
-    // Already plan-only; no Stripe update needed.
-    return;
-  }
+  if (!hasNonPlanItems) return;
 
   const items: Stripe.SubscriptionUpdateParams.Item[] = existingItems.map((item) => {
     if (item.price.id === planPriceId) {
@@ -260,7 +233,6 @@ export async function updateBotSubscriptionForFeatureChange(
     metadata: { botId: bot.id, userId: String(bot.userId) }
   });
 
-  // snapshot: features are included => fp is always 0
   await prisma.subscription.update({
     where: { id: bot.subscription.id },
     data: {
@@ -273,20 +245,23 @@ export async function updateBotSubscriptionForFeatureChange(
   });
 }
 
-
-
 export async function updateBotSubscriptionForUsagePlanChange({
   botId,
   newUsagePlanId,
-  prorationBehavior = "create_prorations"
+  billingTerm,
+  prorationBehavior = "none",
+  billingCycleAnchor = "now",
+  resetUsageAnchor = true
 }: {
   botId: string;
   newUsagePlanId: string;
+  billingTerm: BillingTerm;
   prorationBehavior?: Stripe.SubscriptionUpdateParams.ProrationBehavior;
+  billingCycleAnchor?: Stripe.SubscriptionUpdateParams.BillingCycleAnchor;
+  resetUsageAnchor?: boolean;
 }) {
   if (!stripe) return;
 
-  // Load bot with subscription + current usage plan
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
     include: {
@@ -308,7 +283,6 @@ export async function updateBotSubscriptionForUsagePlanChange({
     throw new Error("Free plans do not have Stripe subscriptions.");
   }
 
-  // Load the new usage plan (must be active and have a Stripe price)
   const newPlan = await prisma.usagePlan.findFirst({
     where: {
       id: newUsagePlanId,
@@ -320,11 +294,16 @@ export async function updateBotSubscriptionForUsagePlanChange({
     throw new Error("Usage plan not found or inactive");
   }
 
-  if (!newPlan.stripePriceId) {
-    throw new Error(`Usage plan ${newPlan.code} has no Stripe price configured`);
+  const normalizedTerm = normalizeBillingTerm(billingTerm);
+  const targetTermPrice = getPlanTermPrice(newPlan, normalizedTerm);
+  const isPaidPlan = (newPlan.monthlyAmountCents ?? 0) > 0;
+
+  if (isPaidPlan && !targetTermPrice.stripePriceId) {
+    throw new Error(
+      `Usage plan ${newPlan.code} has no Stripe price configured for ${normalizedTerm}`
+    );
   }
 
-  // (Optional) keep feature codes in snapshot for UI/debug, but NO PRICING
   const featureCodes = getEnabledFeatureCodes(
     botToFeatureFlags({
       useDomainCrawler: bot.useDomainCrawler,
@@ -340,62 +319,62 @@ export async function updateBotSubscriptionForUsagePlanChange({
     })
   );
 
-  // Load Stripe subscription items
   const stripeSub = await stripe.subscriptions.retrieve(stripeSubId, {
     expand: ["items.data.price"]
   });
 
-  const existingItems = stripeSub.items.data;
-
-  // ✅ Plan-only billing:
-  // delete EVERYTHING currently on the subscription (plan + any feature add-ons),
-  // then add the new plan price as the only item.
-  const items: Stripe.SubscriptionUpdateParams.Item[] = existingItems.map((item) => ({
-    id: item.id,
-    deleted: true
-  }));
+  const items: Stripe.SubscriptionUpdateParams.Item[] = stripeSub.items.data.map(
+    (item) => ({
+      id: item.id,
+      deleted: true
+    })
+  );
 
   items.push({
-    price: newPlan.stripePriceId,
+    price: targetTermPrice.stripePriceId || undefined,
     quantity: 1
   });
 
   const updatedStripeSub = await stripe.subscriptions.update(stripeSubId, {
     items,
     proration_behavior: prorationBehavior,
+    billing_cycle_anchor: billingCycleAnchor,
     metadata: {
       botId: bot.id,
       userId: String(bot.userId),
-      usagePlanId: newPlan.id
+      usagePlanId: newPlan.id,
+      billingTerm: normalizedTerm
     }
   });
 
   const primaryItem = updatedStripeSub.items.data[0];
   const currency = primaryItem?.price?.currency ?? newPlan.currency;
 
-  // ✅ total is PLAN ONLY
-  const totalAmountCents = newPlan.monthlyAmountCents;
-
-  const compactPlanSnapshot = {
-    f: featureCodes,                 // optional: keep codes
-    fp: 0,                           // ✅ feature price removed
-    p: newPlan.code,
-    pt: newPlan.monthlyAmountCents,
-    t: totalAmountCents,
-    c: currency
-  };
+  const compactPlanSnapshot = buildCompactPlanSnapshot({
+    featureCodes,
+    usagePlan: newPlan,
+    billingTerm: normalizedTerm,
+    termAmountCents: targetTermPrice.amountCents,
+    monthlyEquivalentAmountCents:
+      targetTermPrice.monthlyEquivalentAmountCents,
+    currency
+  });
 
   await prisma.subscription.update({
     where: { id: dbSub.id },
     data: {
+      stripePriceId: targetTermPrice.stripePriceId ?? dbSub.stripePriceId,
       usagePlanId: newPlan.id,
+      billingTerm: normalizedTerm,
       currency,
-      planSnapshotJson: compactPlanSnapshot
+      planSnapshotJson: compactPlanSnapshot,
+      usageAnchorAt: resetUsageAnchor ? new Date() : dbSub.usageAnchorAt,
+      pendingUsagePlanId: null,
+      pendingBillingTerm: null,
+      pendingSwitchAt: null
     }
   });
 }
-
-
 
 export function botToFeatureFlags(bot: {
   useDomainCrawler: boolean;

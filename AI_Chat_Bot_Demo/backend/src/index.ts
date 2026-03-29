@@ -45,12 +45,22 @@ import adminPlansRouter from "./routes/adminPlans";
 import adminConversationsRouter from "./routes/adminConversations";
 import adminTeamAccessRouter from "./routes/adminTeamAccess";
 import teamRouter from "./routes/team";
+import contactRouter from "./routes/contact";
+import restaurantBookingRouter from "./routes/restaurantBooking";
 // NEW: booking reminder scheduler
 import { scheduleBookingReminderJob } from "./services/bookingReminderService";
 import { scheduleShopifyDataCleanupJob } from "./shopify/dataProtectionService";
 import mobileDevicesRouter from "./routes/mobileDevices";
 
 const app = express();
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+});
 
 const server = http.createServer(app);
 
@@ -317,6 +327,8 @@ app.use("/api", whatsappTemplatesRouter);
 app.use("/api", shopifyRouter);
 app.use("/api", revenueAIRouter);
 app.use("/api", teamRouter);
+app.use("/api", contactRouter);
+app.use("/api", restaurantBookingRouter);
 
 
 app.use("/api", adminUsersRouter);

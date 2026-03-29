@@ -238,9 +238,18 @@ model Bot {
   bookingRequiredFields String[] @default(["name", "email", "phone", "service", "datetime"])
 
   bookingWeeklySchedule Json?
+  bookingSystemType    BookingSystemType @default(GENERIC)
 
   // NEW: Email usage records (for per-plan email limits)
   emailUsages EmailUsage[]
+
+  // Restaurant booking domain (separate from generic booking)
+  restaurantConfig       RestaurantConfig?
+  restaurantRooms        RestaurantRoom[]
+  restaurantTables       RestaurantTable[]
+  restaurantTableJoins   RestaurantTableJoin[]
+  restaurantReservations RestaurantReservation[]
+  restaurantAuditLogs    RestaurantAuditLog[]
 
   leadWhatsappMessages200  Boolean @default(false)
   leadWhatsappMessages500  Boolean @default(false)
@@ -364,9 +373,14 @@ model Subscription {
   stripeCustomerId     String
   stripeSubscriptionId String
   stripePriceId        String // kept for backwards compatibility (first / primary price)
+  billingTerm          String             @default("MONTHLY") // MONTHLY | SEMI_ANNUAL | ANNUAL
   status               SubscriptionStatus
   currency             String?
   planSnapshotJson     Json?
+  usageAnchorAt        DateTime?
+  pendingUsagePlanId   String?
+  pendingBillingTerm   String?
+  pendingSwitchAt      DateTime?
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
@@ -536,6 +550,10 @@ model UsagePlan {
   monthlyAmountCents Int
   currency           String
   stripePriceId      String? // Stripe recurring price ID for this plan
+  semiAnnualAmountCents Int?
+  annualAmountCents     Int?
+  stripeSemiAnnualPriceId String?
+  stripeAnnualPriceId     String?
 
   isActive Boolean @default(true)
 
@@ -712,6 +730,49 @@ enum ReferralPayoutStatus {
 enum BookingStatus {
   ACTIVE
   CANCELLED
+}
+
+enum BookingSystemType {
+  GENERIC
+  RESTAURANT
+}
+
+enum RestaurantSmokingPreference {
+  NO_PREFERENCE
+  SMOKING
+  NON_SMOKING
+}
+
+enum RestaurantReservationStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  CHECKED_IN
+  COMPLETED
+  EXPIRED
+  NO_SHOW
+}
+
+enum RestaurantReservationSource {
+  AI
+  STAFF
+  CUSTOMER
+  SYSTEM
+}
+
+enum RestaurantReservationActor {
+  AI
+  STAFF
+  CUSTOMER
+  SYSTEM
+}
+
+enum RestaurantTableManualState {
+  AUTO
+  FREE
+  RESERVED
+  OCCUPIED
+  OUT_OF_SERVICE
 }
 
 model ReferralPartner {
@@ -893,6 +954,167 @@ model Booking {
 
   @@index([botId, start])
   @@index([email])
+}
+
+model RestaurantConfig {
+  id                           String @id @default(uuid())
+  botId                        String @unique
+  bot                          Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  timeZone                     String?
+  openingHours                 Json?
+  closedDates                  String[] @default([])
+  defaultDurationMinutes       Int @default(90)
+  bufferMinutes                Int @default(15)
+  autoBookingSaturationPct     Int @default(85)
+  oversizeToleranceSeats       Int @default(2)
+  allowJoinedTables            Boolean @default(true)
+  joinedTablesFallbackOnly     Boolean @default(true)
+  maxJoinedTables              Int @default(2)
+  lateArrivalGraceMinutes      Int @default(15)
+  noShowAfterMinutes           Int @default(30)
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+}
+
+model RestaurantRoom {
+  id           String @id @default(uuid())
+  botId        String
+  bot          Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  name         String
+  notes        String?
+  displayOrder Int @default(0)
+  isActive     Boolean @default(true)
+  tables       RestaurantTable[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([botId, name])
+  @@index([botId, displayOrder])
+}
+
+model RestaurantTable {
+  id                 String @id @default(uuid())
+  botId              String
+  bot                Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  roomId             String
+  room               RestaurantRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  code               String
+  capacity           Int
+  isSmoking          Boolean @default(false)
+  notes              String?
+  isAiBookable       Boolean @default(true)
+  isActive           Boolean @default(true)
+  manualState        RestaurantTableManualState @default(AUTO)
+  manualStateUpdatedAt DateTime?
+  manualStateNote    String?
+  joinMembers        RestaurantTableJoinMember[]
+  reservationTables  RestaurantReservationTable[]
+  auditLogs          RestaurantAuditLog[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([roomId, code])
+  @@index([botId, roomId])
+}
+
+model RestaurantTableJoin {
+  id            String @id @default(uuid())
+  botId         String
+  bot           Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  name          String
+  isActive      Boolean @default(true)
+  allowAiBooking Boolean @default(true)
+  members       RestaurantTableJoinMember[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([botId, name])
+  @@index([botId])
+}
+
+model RestaurantTableJoinMember {
+  id        String @id @default(uuid())
+  joinId    String
+  join      RestaurantTableJoin @relation(fields: [joinId], references: [id], onDelete: Cascade)
+  tableId   String
+  table     RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([joinId, tableId])
+  @@index([tableId])
+}
+
+model RestaurantReservation {
+  id                         String @id @default(uuid())
+  botId                      String
+  bot                        Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  source                     RestaurantReservationSource @default(AI)
+  status                     RestaurantReservationStatus @default(CONFIRMED)
+  customerName               String
+  customerEmail              String
+  customerPhone              String
+  partySize                  Int
+  smokingPreference          RestaurantSmokingPreference @default(NO_PREFERENCE)
+  notes                      String?
+  startAt                    DateTime
+  endAt                      DateTime
+  durationMinutes            Int
+  bufferMinutes              Int
+  aiAutoApproved             Boolean @default(false)
+  saturationPercentAtBooking Int?
+  checkInTokenHash           String? @unique
+  checkInTokenIssuedAt       DateTime?
+  checkedInAt                DateTime?
+  cancelledAt                DateTime?
+  cancelledBy                RestaurantReservationActor?
+  noShowMarkedAt             DateTime?
+  completedAt                DateTime?
+  expiredAt                  DateTime?
+  createdByUserId            String?
+  tables                     RestaurantReservationTable[]
+  auditLogs                  RestaurantAuditLog[]
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  @@index([botId, startAt])
+  @@index([botId, status, startAt])
+  @@index([customerEmail])
+}
+
+model RestaurantReservationTable {
+  id            String @id @default(uuid())
+  reservationId String
+  reservation   RestaurantReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  tableId       String
+  table         RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  blockedFrom   DateTime
+  blockedUntil  DateTime
+  isBlocking    Boolean @default(true)
+  role          String @default("PRIMARY")
+  createdAt     DateTime @default(now())
+
+  @@unique([reservationId, tableId])
+  @@index([tableId])
+  @@index([tableId, isBlocking, blockedFrom, blockedUntil])
+}
+
+model RestaurantAuditLog {
+  id            String @id @default(uuid())
+  botId         String
+  bot           Bot    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  reservationId String?
+  reservation   RestaurantReservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  tableId       String?
+  table         RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  action        String
+  actor         RestaurantReservationActor @default(SYSTEM)
+  actorUserId   String?
+  details       Json?
+  createdAt     DateTime @default(now())
+
+  @@index([botId, createdAt])
+  @@index([reservationId])
+  @@index([tableId])
 }
 
 // NEW: Email usage per bot (for plan email quotas)

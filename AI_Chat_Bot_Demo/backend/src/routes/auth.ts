@@ -19,6 +19,10 @@ import { randomInt } from "crypto";
 import { addSeconds } from "date-fns";
 import { sendMail } from "../services/mailer";
 import { REFERRAL_COOKIE_NAME, validateReferralCode } from "../services/referralService";
+import {
+  buildPasswordResetEmail,
+  getFrontendOrigin
+} from "../services/systemEmailTemplates";
 
 const router = Router();
 
@@ -313,7 +317,7 @@ router.post("/verify-email", async (req: Request, res: Response) => {
     prisma.emailVerificationToken.delete({ where: { id: record.id } })
   ]);
 
-  return res.json({ message: "Email verified" });
+  return res.json({ success: true, message: "Email verified" });
 });
 
 const forgotPasswordSchema = z.object({
@@ -355,16 +359,19 @@ router.post("/forgot-password", resetIpLimiter, resetEmailLimiter, async (req: R
     }
   });
 
+  const resetUrl = `${getFrontendOrigin()}/forgot-password?email=${encodeURIComponent(
+    email
+  )}`;
+  const resetMessage = buildPasswordResetEmail({
+    code,
+    resetUrl
+  });
+
   await sendMail({
     to: email,
-    subject: "Your Coslo password reset code",
-    text:
-      `Your password reset code is ${code}. ` +
-      "It expires in 30 minutes. If you didn't request this, you can ignore this email.",
-    html:
-      `<p>Your password reset code is <strong>${code}</strong>.</p>` +
-      "<p>This code expires in 30 minutes.</p>" +
-      "<p>If you didn't request this, you can ignore this email.</p>"
+    subject: resetMessage.subject,
+    text: resetMessage.text,
+    html: resetMessage.html
   });
 
   return res.json(safeResponse);

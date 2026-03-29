@@ -4,7 +4,8 @@ import { prisma } from "../prisma/prisma";
 import {
   stripe,
   computeBotPricingForBot,
-  botToFeatureFlags
+  botToFeatureFlags,
+  buildCompactPlanSnapshot
 } from "../services/billingService";
 import { config } from "../config";
 import {
@@ -12,6 +13,11 @@ import {
   monthKeyForDate,
   validateReferralCode
 } from "../services/referralService";
+import {
+  BillingTerm,
+  getPlanTermPrice,
+  normalizeBillingTerm
+} from "../services/billingTerms";
 
 function parsePlanSnapshot(metadata: Stripe.Metadata | null | undefined) {
   const raw = metadata?.planSnapshot;
@@ -25,6 +31,73 @@ function parsePlanSnapshot(metadata: Stripe.Metadata | null | undefined) {
 
 function isStripeSubActive(status: Stripe.Subscription.Status): boolean {
   return status === "active" || status === "trialing";
+}
+
+async function applyPendingPlanSwitchIfDue(params: {
+  stripeSubscriptionId: string;
+  periodStart: Date | null;
+}) {
+  const dbSub = await prisma.subscription.findFirst({
+    where: { stripeSubscriptionId: params.stripeSubscriptionId },
+    include: { usagePlan: true }
+  });
+  if (!dbSub?.pendingUsagePlanId || !dbSub.pendingBillingTerm) return;
+
+  const switchAt = dbSub.pendingSwitchAt;
+  if (switchAt && params.periodStart && params.periodStart.getTime() < switchAt.getTime()) {
+    return;
+  }
+
+  const pendingPlan = await prisma.usagePlan.findUnique({
+    where: { id: dbSub.pendingUsagePlanId }
+  });
+  if (!pendingPlan) return;
+
+  const bot = await prisma.bot.findUnique({
+    where: { id: dbSub.botId }
+  });
+  if (!bot) return;
+
+  const pendingTerm = normalizeBillingTerm(dbSub.pendingBillingTerm) as BillingTerm;
+  const pendingTermPrice = getPlanTermPrice(pendingPlan, pendingTerm);
+  const featurePricing = await computeBotPricingForBot(
+    botToFeatureFlags({
+      useDomainCrawler: bot.useDomainCrawler,
+      usePdfCrawler: bot.usePdfCrawler,
+      channelWeb: bot.channelWeb,
+      channelWhatsapp: bot.channelWhatsapp,
+      channelMessenger: bot.channelMessenger,
+      channelInstagram: bot.channelInstagram,
+      useCalendar: bot.useCalendar,
+      leadWhatsappMessages200: (bot as any).leadWhatsappMessages200,
+      leadWhatsappMessages500: (bot as any).leadWhatsappMessages500,
+      leadWhatsappMessages1000: (bot as any).leadWhatsappMessages1000
+    })
+  );
+
+  const currency = dbSub.currency || pendingPlan.currency;
+  const compactPlanSnapshot = buildCompactPlanSnapshot({
+    featureCodes: featurePricing.featureCodes,
+    usagePlan: pendingPlan,
+    billingTerm: pendingTerm,
+    termAmountCents: pendingTermPrice.amountCents,
+    monthlyEquivalentAmountCents:
+      pendingTermPrice.monthlyEquivalentAmountCents,
+    currency
+  });
+
+  await prisma.subscription.update({
+    where: { id: dbSub.id },
+    data: {
+      usagePlanId: pendingPlan.id,
+      billingTerm: pendingTerm,
+      planSnapshotJson: compactPlanSnapshot,
+      usageAnchorAt: params.periodStart ?? new Date(),
+      pendingUsagePlanId: null,
+      pendingBillingTerm: null,
+      pendingSwitchAt: null
+    }
+  });
 }
 
 export async function stripeWebhookHandler(req: Request, res: Response) {
@@ -73,6 +146,13 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
 
         const planSnapshot = parsePlanSnapshot(session.metadata || null);
         const usagePlanId = session.metadata?.usagePlanId as string | undefined;
+        const billingTerm = normalizeBillingTerm(
+          session.metadata?.billingTerm ||
+            sub.metadata?.billingTerm
+        ) as BillingTerm;
+        const usageAnchorAt = sub.current_period_start
+          ? new Date(sub.current_period_start * 1000)
+          : new Date();
 
         await prisma.subscription.upsert({
           where: { botId },
@@ -81,19 +161,26 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             stripeCustomerId: customerId,
             stripeSubscriptionId: subscriptionId,
             stripePriceId,
+            billingTerm,
             status: "ACTIVE",
             currency,
             planSnapshotJson: planSnapshot ?? undefined,
-            usagePlanId: usagePlanId ?? undefined
+            usagePlanId: usagePlanId ?? undefined,
+            usageAnchorAt
           },
           update: {
             stripeCustomerId: customerId,
             stripeSubscriptionId: subscriptionId,
             stripePriceId,
+            billingTerm,
             status: "ACTIVE",
             currency,
             planSnapshotJson: planSnapshot ?? undefined,
-            usagePlanId: usagePlanId ?? undefined
+            usagePlanId: usagePlanId ?? undefined,
+            usageAnchorAt,
+            pendingUsagePlanId: null,
+            pendingBillingTerm: null,
+            pendingSwitchAt: null
           }
         });
 
@@ -157,6 +244,9 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           unpaid: "UNPAID"
         };
         const status = (statusMap[sub.status] ?? "ACTIVE") as any;
+        const metadataBillingTerm = sub.metadata?.billingTerm
+          ? (normalizeBillingTerm(sub.metadata.billingTerm) as BillingTerm)
+          : null;
 
         if (status === "CANCELED") {
           const freePlan = await prisma.usagePlan.findFirst({
@@ -185,25 +275,32 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
                 })
               );
 
-              const compactPlanSnapshot = {
-                f: featurePricing.featureCodes,
-                fp: 0,
-                p: freePlan.code,
-                pt: freePlan.monthlyAmountCents,
-                t: freePlan.monthlyAmountCents,
-                c: freePlan.currency
-              };
+              const freeTermPrice = getPlanTermPrice(freePlan, "MONTHLY");
+              const compactPlanSnapshot = buildCompactPlanSnapshot({
+                featureCodes: featurePricing.featureCodes,
+                usagePlan: freePlan,
+                billingTerm: "MONTHLY",
+                termAmountCents: freeTermPrice.amountCents,
+                monthlyEquivalentAmountCents:
+                  freeTermPrice.monthlyEquivalentAmountCents,
+                currency: freePlan.currency
+              });
 
               await prisma.subscription.update({
                 where: { id: dbSub.id },
                 data: {
                   status: "ACTIVE",
+                  billingTerm: "MONTHLY",
                   currency: freePlan.currency,
                   usagePlanId: freePlan.id,
                   stripeCustomerId: `free_${bot.userId}`,
                   stripeSubscriptionId: `free_${bot.id}`,
                   stripePriceId: "",
-                  planSnapshotJson: compactPlanSnapshot
+                  planSnapshotJson: compactPlanSnapshot,
+                  usageAnchorAt: new Date(),
+                  pendingUsagePlanId: null,
+                  pendingBillingTerm: null,
+                  pendingSwitchAt: null
                 }
               });
 
@@ -217,7 +314,11 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
               where: { id: dbSub.id },
               data: {
                 status,
-                currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
+                billingTerm: metadataBillingTerm ?? dbSub.billingTerm,
+                currency: sub.items.data[0]?.price?.currency ?? dbSub.currency,
+                pendingUsagePlanId: null,
+                pendingBillingTerm: null,
+                pendingSwitchAt: null
               }
             });
 
@@ -231,6 +332,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             where: { id: dbSub.id },
             data: {
               status,
+              billingTerm: metadataBillingTerm ?? dbSub.billingTerm,
               currency: sub.items.data[0]?.price?.currency ?? dbSub.currency
             }
           });
@@ -326,25 +428,38 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
             ? parseInt(topupTokensRaw, 10) || 0
             : null;
 
-        const payment = await prisma.payment.create({
-          data: {
-            botId,
-            stripeCustomerId,
-            stripeSubscriptionId: stripeSubscriptionId ?? undefined,
-            stripeInvoiceId,
-            stripePaymentIntentId: stripePaymentIntentId ?? undefined,
-            amountCents,
-            currency,
-            status: invoice.status ?? "succeeded",
-            billingEmail,
-            billingName,
-            billingAddressJson: billingAddress ? (billingAddress as any) : undefined,
-            periodStart: periodStart ?? undefined,
-            periodEnd: periodEnd ?? undefined,
-            kind,
-            topupTokens: topupTokens ?? undefined
-          }
+        let payment = await prisma.payment.findFirst({
+          where: { stripeInvoiceId }
         });
+
+        if (!payment) {
+          payment = await prisma.payment.create({
+            data: {
+              botId,
+              stripeCustomerId,
+              stripeSubscriptionId: stripeSubscriptionId ?? undefined,
+              stripeInvoiceId,
+              stripePaymentIntentId: stripePaymentIntentId ?? undefined,
+              amountCents,
+              currency,
+              status: invoice.status ?? "succeeded",
+              billingEmail,
+              billingName,
+              billingAddressJson: billingAddress ? (billingAddress as any) : undefined,
+              periodStart: periodStart ?? undefined,
+              periodEnd: periodEnd ?? undefined,
+              kind,
+              topupTokens: topupTokens ?? undefined
+            }
+          });
+        }
+
+        if (kind === "SUBSCRIPTION" && stripeSubscriptionId) {
+          await applyPendingPlanSwitchIfDue({
+            stripeSubscriptionId,
+            periodStart
+          });
+        }
 
         // ✅ Referral commission ledger per paid invoice (subscription invoices only)
         if (stripeSubscriptionId) {
@@ -441,24 +556,32 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           });
           botId = dbSub?.botId;
         }
+        if (!botId && invoice.metadata?.botId) {
+          botId = invoice.metadata.botId as string;
+        }
 
         if (!botId) {
           console.warn("invoice.payment_failed without identifiable botId", invoice.id);
           break;
         }
 
-        await prisma.payment.create({
-          data: {
-            botId,
-            stripeCustomerId,
-            stripeSubscriptionId: stripeSubscriptionId ?? undefined,
-            stripeInvoiceId: invoice.id,
-            stripePaymentIntentId: (invoice.payment_intent as string) ?? undefined,
-            amountCents: invoice.amount_due,
-            currency: invoice.currency,
-            status: "failed"
-          }
+        const existingFailed = await prisma.payment.findFirst({
+          where: { stripeInvoiceId: invoice.id }
         });
+        if (!existingFailed) {
+          await prisma.payment.create({
+            data: {
+              botId,
+              stripeCustomerId,
+              stripeSubscriptionId: stripeSubscriptionId ?? undefined,
+              stripeInvoiceId: invoice.id,
+              stripePaymentIntentId: (invoice.payment_intent as string) ?? undefined,
+              amountCents: invoice.amount_due,
+              currency: invoice.currency,
+              status: "failed"
+            }
+          });
+        }
 
         break;
       }

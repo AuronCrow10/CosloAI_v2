@@ -7,6 +7,10 @@ import { OAuth2Client } from "google-auth-library";
 
 import { prisma } from "../prisma/prisma";
 import { config } from "../config";
+import {
+  buildVerificationEmail,
+  getFrontendOrigin
+} from "./systemEmailTemplates";
 
 const SALT_ROUNDS = 10;
 
@@ -121,9 +125,10 @@ export async function sendVerificationEmail(userId: string, email: string): Prom
     data: { userId, token, expiresAt }
   });
 
-  const verifyUrl = `${
-    process.env.FRONTEND_ORIGIN || "http://localhost:3000"
-  }/verify-email?token=${token}`;
+  const verifyUrl = `${getFrontendOrigin()}/verify-email?token=${encodeURIComponent(
+    token
+  )}`;
+  const message = buildVerificationEmail({ verifyUrl });
 
   const transporter = nodemailer.createTransport({
     host: config.smtpHost,
@@ -138,9 +143,9 @@ export async function sendVerificationEmail(userId: string, email: string): Prom
   await transporter.sendMail({
     from: config.smtpFrom!,
     to: email,
-    subject: "Verify your email",
-    text: `Click to verify your email: ${verifyUrl}`,
-    html: `<p>Click to verify your email:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p>`
+    subject: message.subject,
+    text: message.text,
+    html: message.html
   });
 }
 

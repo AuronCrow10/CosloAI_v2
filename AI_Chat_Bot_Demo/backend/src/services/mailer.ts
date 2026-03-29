@@ -10,7 +10,8 @@ import {
 } from "./emailUsageService";
 import {
   ensureBotHasTokens,
-  EMAIL_TOKEN_COST
+  EMAIL_TOKEN_COST,
+  getCurrentUsageRangeForBot
 } from "./planUsageService";
 import { maybeSendUsageAlertsForBot } from "./planUsageAlertService";
 
@@ -59,6 +60,7 @@ export type SendMailOptions = {
   subject: string;
   text?: string;
   html?: string;
+  replyTo?: string;
 };
 
 /**
@@ -84,7 +86,8 @@ export async function sendMail(options: SendMailOptions): Promise<void> {
       to: options.to,
       subject: options.subject,
       text: options.text,
-      html: options.html
+      html: options.html,
+      replyTo: options.replyTo
     });
   } catch (err) {
     console.error("[Mailer] Error sending email", {
@@ -173,11 +176,7 @@ export async function sendBotMail(params: {
 
     // ---- Email soft cap (per bot / per month) ----
     if (params.botId && monthlyEmailCap && monthlyEmailCap > 0) {
-      const now = new Date();
-      const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-      const to = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
-      );
+      const { from, to } = await getCurrentUsageRangeForBot(params.botId);
 
       const emailUsage = await getEmailUsageForBot({
         botId: params.botId,
