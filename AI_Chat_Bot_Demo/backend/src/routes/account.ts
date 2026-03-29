@@ -14,6 +14,7 @@ import {
 import { JwtPayload } from "../services/authService";
 import { passwordSchema } from "./auth"; // or re-export it there
 import { deleteKnowledgeClient } from "../services/knowledgeClient";
+import { deleteBotsGraph } from "../services/botDeletionService";
 import { config } from "../config";
 import { authenticator } from "otplib";
 import bcrypt from "bcryptjs";
@@ -487,18 +488,7 @@ router.delete("/", async (req: Request, res: Response) => {
   // 3) Delete everything in a transaction (DB side)
   await prisma.$transaction(async (tx :any) => {
     if (botIds.length > 0) {
-      await tx.botChannel.deleteMany({ where: { botId: { in: botIds } } });
-      await tx.metaConnectSession.deleteMany({
-        where: { botId: { in: botIds } }
-      });
-      await tx.whatsappConnectSession.deleteMany({
-        where: { botId: { in: botIds } }
-      });
-      await tx.conversation.deleteMany({ where: { botId: { in: botIds } } });
-      await tx.payment.deleteMany({ where: { botId: { in: botIds } } });
-      await tx.openAIUsage.deleteMany({ where: { botId: { in: botIds } } });
-      await tx.subscription.deleteMany({ where: { botId: { in: botIds } } });
-      await tx.bot.deleteMany({ where: { id: { in: botIds } } });
+      await deleteBotsGraph(tx, botIds);
     }
 
     // User-level tokens/sessions/usages

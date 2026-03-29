@@ -12,6 +12,7 @@ import {
 import { updateBotSubscriptionForFeatureChange } from "../services/billingService";
 import { deleteKnowledgeClient } from "../services/knowledgeClient";
 import { computeAssignedStyle } from "../services/revenueAIService";
+import { deleteBotsGraph } from "../services/botDeletionService";
 import { resolveKnowledgeRetrievalProfile } from "../knowledge/knowledgeRetrievalProfiles";
 
 const router = Router();
@@ -795,36 +796,7 @@ router.delete("/bots/:id", async (req: Request, res: Response) => {
 
   // 2) Delete all bot-related data in a transaction
   await prisma.$transaction(async (tx) => {
-    // Messages -> Conversations
-    await tx.message.deleteMany({
-      where: {
-        conversation: { botId: bot.id }
-      }
-    });
-    await tx.conversation.deleteMany({ where: { botId: bot.id } });
-
-    // Channels
-    await tx.botChannel.deleteMany({ where: { botId: bot.id } });
-
-    // Billing / payments / subscriptions
-    await tx.payment.deleteMany({ where: { botId: bot.id } });
-    await tx.subscription.deleteMany({ where: { botId: bot.id } });
-
-    // Meta & WhatsApp sessions
-    await tx.metaConnectSession.deleteMany({ where: { botId: bot.id } });
-    await tx.whatsappConnectSession.deleteMany({ where: { botId: bot.id } });
-
-    // Usage
-    await tx.openAIUsage.deleteMany({ where: { botId: bot.id } });
-
-    // Email usage
-    await tx.emailUsage.deleteMany({ where: { botId: bot.id } });
-
-    // Booking services
-    await tx.bookingService.deleteMany({ where: { botId: bot.id } });
-
-    // Finally the bot itself
-    await tx.bot.delete({ where: { id: bot.id } });
+    await deleteBotsGraph(tx, [bot.id]);
   });
 
   return res.status(204).send();
