@@ -2,6 +2,18 @@
   if (window.__cosloGtagInit) {
     return;
   }
+
+  var consent = null;
+  try {
+    consent = window.localStorage.getItem("coslo_cookie_consent");
+  } catch (err) {
+    consent = null;
+  }
+
+  if (consent !== "accepted") {
+    return;
+  }
+
   window.__cosloGtagInit = true;
 
   var gaId = "G-ZZHXCFT7FW";
@@ -15,6 +27,11 @@
     window.dataLayer.push(arguments);
   }
   window.gtag = window.gtag || gtag;
+  window["ga-disable-" + gaId] = false;
+  window.gtag("consent", "default", {
+    analytics_storage: "granted"
+  });
   window.gtag("js", new Date());
-  window.gtag("config", gaId, { send_page_view: false });
+  window.gtag("config", gaId, { send_page_view: true });
 })();
+
