@@ -35,8 +35,18 @@ function isValidSlug(slug: string): boolean {
 // POST /api/chat/:slug
 router.post("/chat/:slug", async (req: Request, res: Response) => {
   const { slug } = req.params;
+  const requestId = uuidv4();
+
+  const cookieHeader = typeof req.headers.cookie === "string" ? req.headers.cookie : "";
+  const cookieNames = cookieHeader
+    ? cookieHeader
+        .split(";")
+        .map((part) => part.split("=")[0]?.trim())
+        .filter(Boolean)
+    : [];
 
   if (!isValidSlug(slug)) {
+    console.warn("[widget-chat] invalid-slug", { requestId, slug });
     return res.status(400).json({ error: "Invalid bot slug format" });
   }
 
@@ -63,6 +73,20 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
 
   const externalUserId =
     (req.headers["x-session-id"] as string) || `web:${convId}`;
+
+  console.log("[widget-chat] incoming", {
+    requestId,
+    slug,
+    conversationId: typeof conversationId === "string" ? conversationId : null,
+    generatedConversationId: convId,
+    hasSessionIdHeader: !!req.headers["x-session-id"],
+    sessionIdHeader: req.headers["x-session-id"] ?? null,
+    origin: req.headers.origin ?? null,
+    referer: req.headers.referer ?? null,
+    userAgent: req.headers["user-agent"] ?? null,
+    hasCookies: cookieNames.length > 0,
+    cookieNames
+  });
 
   let dbConversationId: string | null = null;
 
@@ -127,6 +151,13 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
             logErr
           );
         }
+
+        console.warn("[widget-chat] rate-limited", {
+          requestId,
+          slug,
+          conversationId: convo.id,
+          retryAfterSeconds: rateResult.retryAfterSeconds
+        });
 
         return res.json({
           conversationId: convId,
@@ -209,8 +240,19 @@ router.post("/chat/:slug", async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     if (err instanceof ChatServiceError) {
+      console.warn("[widget-chat] handled-error", {
+        requestId,
+        slug,
+        statusCode: err.statusCode,
+        message: err.message
+      });
       return res.status(err.statusCode).json({ error: err.message });
     }
+    console.error("[widget-chat] unhandled-error", {
+      requestId,
+      slug,
+      message: err?.message ?? String(err)
+    });
     console.error("Error in /api/chat:", err);
     return res.status(500).json({
       error: "Sorry, there was an error. Please try again."
