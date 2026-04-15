@@ -20,7 +20,10 @@ import {
 
 const router = Router();
 
-router.use(requireAuth);
+// Scope auth to the restaurant routes owned by this router so unrelated
+// /api endpoints (for example the public widget chat route) are not intercepted.
+router.use("/bots/:id/restaurant", requireAuth);
+router.use("/restaurant/check-in/:token", requireAuth);
 
 type AsyncRouteHandler = (
   req: Request,
